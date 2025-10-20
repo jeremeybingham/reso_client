@@ -32,7 +32,7 @@ impl From<reqwest::Error> for ResoApiError {
 /// RESO Web API Client configuration
 #[derive(Debug, Clone)]
 pub struct ResoApiConfig {
-    /// Base URL for the API (e.g., "https://api.bridgedataoutput.com/api/v2")
+    /// Base URL for the API (e.g., "https://api.resowebprovider.com/api/")
     pub base_url: String,
     /// Server token for authentication (Bearer token)
     pub server_token: String,
