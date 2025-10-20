@@ -6,7 +6,7 @@ A Rust client for connecting to the RESO Web API via Bridge Interactive using OA
 
 ### 1. Get Credentials
 
-Register at [bridgedataoutput.com](https://bridgedataoutput.com) and obtain:
+Register with a RESO Web API provider and obtain:
 - **Server Token** (Bearer token)
 - **Dataset ID** (from your MLS)
 
@@ -15,7 +15,7 @@ Register at [bridgedataoutput.com](https://bridgedataoutput.com) and obtain:
 Create a `.env` file in your project root:
 
 ```env
-RESO_BASE_URL=https://api.bridgedataoutput.com/api/v2
+RESO_BASE_URL=https://api.resowebprovider.com/api/
 RESO_SERVER_TOKEN=your_server_token_here
 RESO_DATASET_ID=your_dataset_id_here
 ```
@@ -38,7 +38,7 @@ use reso_client::{ResoApiClient, ResoApiConfig};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = ResoApiConfig::new(
-        "https://api.bridgedataoutput.com/api/v2".to_string(),
+        "https://api.resowebprovider.com/api/".to_string(),
         "your_token".to_string()
     ).with_dataset("your_dataset_id".to_string());
     
@@ -114,4 +114,4 @@ The client uses OAuth 2.0 Bearer token authentication via the `Authorization` he
 Authorization: Bearer {your_server_token}
 ```
 
-All requests are made over HTTPS to the Bridge API endpoints.
+All requests are made over HTTPS to the RESO Web API endpoints.
