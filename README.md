@@ -20,8 +20,6 @@ RESO_SERVER_TOKEN=your_server_token_here
 RESO_DATASET_ID=your_dataset_id_here
 ```
 
-**Important:** Add `.env` to `.gitignore`!
-
 ### 3. Run
 
 ```bash
