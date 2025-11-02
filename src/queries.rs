@@ -47,7 +47,7 @@ impl Query {
         
         // $orderby
         if let Some(order) = &self.order_by {
-            params.push(format!("$orderby={}", order));
+            params.push(format!("$orderby={}", urlencoding::encode(order)));
         }
         
         // $top
