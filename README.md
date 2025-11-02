@@ -75,17 +75,17 @@ RESO_TIMEOUT=30
 
 ### Dataset ID Explained
 
-Some RESO servers require a dataset identifier in the URL path. The dataset ID is inserted between the base URL and the resource name.
+Configured to handle the Bridges/ACTRIS RESO Web API Reference Server, which uses a dataset identifier in the URL path. The dataset ID is inserted between the base URL and the resource name.
 
 **Without dataset ID:**
 ```
-https://api.mls.com/odata/Property
+https://api.mls.com/OData/Property
 ```
 
 **With dataset ID:**
 ```
-https://api.mls.com/odata/actris_ref/Property
-https://api.mls.com/odata/actris_ref/$metadata
+https://api.mls.com/OData/actris_ref/Property
+https://api.mls.com/OData/actris_ref/$metadata
 ```
 
 When to use:
@@ -99,7 +99,7 @@ You can set it via environment variable or programmatically:
 let client = ResoClient::from_env()?;
 
 // Via builder
-let config = ClientConfig::new("https://api.mls.com/odata", "token")
+let config = ClientConfig::new("https://api.mls.com/OData", "token")
     .with_dataset_id("actris_ref");
 let client = ResoClient::with_config(config)?;
 ```
@@ -279,7 +279,7 @@ match client.execute(&query).await {
 ```rust
 use std::time::Duration;
 
-let config = ClientConfig::new("https://api.mls.com/odata", "token")
+let config = ClientConfig::new("https://api.mls.com/OData", "token")
     .with_timeout(Duration::from_secs(60));
 let client = ResoClient::with_config(config)?;
 ```
@@ -310,7 +310,7 @@ Common OData 4.0 operators:
 | `lt` | Less than | `ListPrice lt 1000000` |
 | `le` | Less than or equal | `BedroomsTotal le 5` |
 | `and` | Logical AND | `City eq 'Austin' and ListPrice gt 500000` |
-| `or` | Logical OR | `City eq 'Austin' or City eq 'Cambridge'` |
+| `or` | Logical OR | `City eq 'Austin' or City eq 'Manor'` |
 | `not` | Logical NOT | `not (City eq 'Austin')` |
 
 String functions:
