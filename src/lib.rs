@@ -17,12 +17,16 @@
 //!     
 //!     // Build and execute a query
 //!     let query = QueryBuilder::new("Property")
-//!         .filter("City", "Austin")
+//!         .filter("City eq 'Austin'")
 //!         .top(10)
 //!         .build()?;
 //!     
 //!     let results = client.execute(&query).await?;
-//!     println!("Found {} properties", results.len());
+//!     
+//!     // Access the records from the OData response
+//!     if let Some(records) = results["value"].as_array() {
+//!         println!("Found {} properties", records.len());
+//!     }
 //!     
 //!     Ok(())
 //! }
