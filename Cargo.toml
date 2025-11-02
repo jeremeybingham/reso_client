@@ -8,6 +8,9 @@ authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
 description = "Rust client library for RESO Web API (OData 4.0) servers"
 license = "MIT"
 repository = "https://github.com/jeremeybingham/reso_client"
+homepage = "https://github.com/jeremeybingham/reso_client"
+documentation = "https://docs.rs/reso-client"
+readme = "README.md"
 keywords = ["reso", "odata", "real-estate", "mls"]
 categories = ["api-bindings", "web-programming::http-client"]
 
