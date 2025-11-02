@@ -7,7 +7,7 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// Configuration for RESO client
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientConfig {
     /// Base URL of the RESO Web API server
     pub base_url: String,
@@ -20,6 +20,17 @@ pub struct ClientConfig {
     
     /// HTTP timeout duration
     pub timeout: Duration,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("base_url", &self.base_url)
+            .field("token", &"<redacted>")
+            .field("dataset_id", &self.dataset_id)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl ClientConfig {
