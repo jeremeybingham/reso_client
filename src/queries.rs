@@ -29,47 +29,47 @@ impl Query {
             count: false,
         }
     }
-    
+
     /// Convert to OData query string
     pub fn to_odata_string(&self) -> String {
         let mut parts = vec![self.resource.clone()];
         let mut params = Vec::new();
-        
+
         // $filter
         if let Some(filter) = &self.filter {
             params.push(format!("$filter={}", urlencoding::encode(filter)));
         }
-        
+
         // $select
         if let Some(fields) = &self.select_fields {
             params.push(format!("$select={}", fields.join(",")));
         }
-        
+
         // $orderby
         if let Some(order) = &self.order_by {
             params.push(format!("$orderby={}", urlencoding::encode(order)));
         }
-        
+
         // $top
         if let Some(top) = self.top {
             params.push(format!("$top={}", top));
         }
-        
+
         // $skip
         if let Some(skip) = self.skip {
             params.push(format!("$skip={}", skip));
         }
-        
+
         // $count
         if self.count {
             params.push("$count=true".to_string());
         }
-        
+
         if !params.is_empty() {
             parts.push("?".to_string());
             parts.push(params.join("&"));
         }
-        
+
         parts.concat()
     }
 }
@@ -97,7 +97,7 @@ impl QueryBuilder {
             query: Query::new(resource),
         }
     }
-    
+
     /// Add an OData filter expression
     ///
     /// Pass a complete OData filter string. The library does not parse or validate
@@ -132,7 +132,7 @@ impl QueryBuilder {
         self.query.filter = Some(expression.into());
         self
     }
-    
+
     /// Select specific fields
     ///
     /// # Examples
@@ -148,7 +148,7 @@ impl QueryBuilder {
         self.query.select_fields = Some(fields.iter().map(|s| s.to_string()).collect());
         self
     }
-    
+
     /// Order by a field
     ///
     /// # Examples
@@ -164,7 +164,7 @@ impl QueryBuilder {
         self.query.order_by = Some(format!("{} {}", field, direction));
         self
     }
-    
+
     /// Limit number of results
     ///
     /// # Examples
@@ -180,7 +180,7 @@ impl QueryBuilder {
         self.query.top = Some(n);
         self
     }
-    
+
     /// Skip results (for pagination)
     ///
     /// # Examples
@@ -197,7 +197,7 @@ impl QueryBuilder {
         self.query.skip = Some(n);
         self
     }
-    
+
     /// Include count in response
     ///
     /// # Examples
@@ -214,7 +214,7 @@ impl QueryBuilder {
         self.query.count = true;
         self
     }
-    
+
     /// Build the query
     pub fn build(self) -> Result<Query> {
         Ok(self.query)
@@ -227,20 +227,15 @@ mod tests {
 
     #[test]
     fn test_query_builder_basic() {
-        let query = QueryBuilder::new("Property")
-            .top(10)
-            .build()
-            .unwrap();
-        
+        let query = QueryBuilder::new("Property").top(10).build().unwrap();
+
         assert_eq!(query.to_odata_string(), "Property?$top=10");
     }
 
     #[test]
     fn test_query_resource_only() {
-        let query = QueryBuilder::new("Property")
-            .build()
-            .unwrap();
-        
+        let query = QueryBuilder::new("Property").build().unwrap();
+
         assert_eq!(query.to_odata_string(), "Property");
     }
 
@@ -250,7 +245,7 @@ mod tests {
             .filter("City eq 'Austin'")
             .build()
             .unwrap();
-        
+
         let url = query.to_odata_string();
         assert!(url.starts_with("Property?"));
         assert!(url.contains("$filter=City%20eq%20%27Austin%27"));
@@ -262,7 +257,7 @@ mod tests {
             .select(&["ListingKey", "City", "ListPrice"])
             .build()
             .unwrap();
-        
+
         let url = query.to_odata_string();
         assert!(url.contains("$select=ListingKey,City,ListPrice"));
     }
@@ -273,29 +268,23 @@ mod tests {
             .order_by("ListPrice", "desc")
             .build()
             .unwrap();
-        
+
         let url = query.to_odata_string();
         assert!(url.contains("$orderby=ListPrice%20desc"));
     }
 
     #[test]
     fn test_query_with_skip() {
-        let query = QueryBuilder::new("Property")
-            .skip(20)
-            .build()
-            .unwrap();
-        
+        let query = QueryBuilder::new("Property").skip(20).build().unwrap();
+
         let url = query.to_odata_string();
         assert!(url.contains("$skip=20"));
     }
 
     #[test]
     fn test_query_with_count() {
-        let query = QueryBuilder::new("Property")
-            .with_count()
-            .build()
-            .unwrap();
-        
+        let query = QueryBuilder::new("Property").with_count().build().unwrap();
+
         let url = query.to_odata_string();
         assert!(url.contains("$count=true"));
     }
@@ -311,9 +300,9 @@ mod tests {
             .with_count()
             .build()
             .unwrap();
-        
+
         let url = query.to_odata_string();
-        
+
         // Verify all parameters are present
         assert!(url.starts_with("Property?"));
         assert!(url.contains("$filter="));
@@ -330,7 +319,7 @@ mod tests {
             .filter("City eq 'San Francisco' and ListPrice gt 1000000")
             .build()
             .unwrap();
-        
+
         let url = query.to_odata_string();
         // Spaces and quotes should be URL encoded
         assert!(url.contains("%20")); // Space encoded
@@ -343,7 +332,7 @@ mod tests {
             .filter("(City eq 'Austin' or City eq 'Dallas') and ListPrice gt 500000")
             .build()
             .unwrap();
-        
+
         let url = query.to_odata_string();
         assert!(url.contains("$filter="));
         assert!(url.contains("Austin"));
@@ -358,10 +347,7 @@ mod tests {
     #[test]
     fn test_query_pagination() {
         // First page
-        let query1 = QueryBuilder::new("Property")
-            .top(20)
-            .build()
-            .unwrap();
+        let query1 = QueryBuilder::new("Property").top(20).build().unwrap();
         assert_eq!(query1.to_odata_string(), "Property?$top=20");
 
         // Second page

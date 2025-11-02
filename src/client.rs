@@ -2,7 +2,7 @@
 
 //! Client configuration and connection management
 
-use crate::error::{Result, ResoError};
+use crate::error::{ResoError, Result};
 use reqwest::Client;
 use std::time::Duration;
 
@@ -11,13 +11,13 @@ use std::time::Duration;
 pub struct ClientConfig {
     /// Base URL of the RESO Web API server
     pub base_url: String,
-    
+
     /// OAuth bearer token
     pub token: String,
-    
+
     /// Optional dataset ID (inserted between base_url and resource)
     pub dataset_id: Option<String>,
-    
+
     /// HTTP timeout duration
     pub timeout: Duration,
 }
@@ -44,17 +44,17 @@ impl ClientConfig {
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var("RESO_BASE_URL")
             .map_err(|_| ResoError::Config("RESO_BASE_URL not set".into()))?;
-        
+
         let token = std::env::var("RESO_TOKEN")
             .map_err(|_| ResoError::Config("RESO_TOKEN not set".into()))?;
-        
+
         let dataset_id = std::env::var("RESO_DATASET_ID").ok();
-        
+
         let timeout_secs = std::env::var("RESO_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(30);
-        
+
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
@@ -62,7 +62,7 @@ impl ClientConfig {
             timeout: Duration::from_secs(timeout_secs),
         })
     }
-    
+
     /// Create configuration manually
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
         Self {
@@ -72,13 +72,13 @@ impl ClientConfig {
             timeout: Duration::from_secs(30),
         }
     }
-    
+
     /// Set dataset ID
     pub fn with_dataset_id(mut self, dataset_id: impl Into<String>) -> Self {
         self.dataset_id = Some(dataset_id.into());
         self
     }
-    
+
     /// Set custom timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -114,7 +114,7 @@ impl ResoClient {
         let config = ClientConfig::from_env()?;
         Self::with_config(config)
     }
-    
+
     /// Create a new client with manual configuration
     ///
     /// # Examples
@@ -133,18 +133,18 @@ impl ResoClient {
             .timeout(config.timeout)
             .build()
             .map_err(|e| ResoError::Config(format!("Failed to create HTTP client: {}", e)))?;
-        
+
         Ok(Self {
             config,
             http_client,
         })
     }
-    
+
     /// Get the base URL
     pub fn base_url(&self) -> &str {
         &self.config.base_url
     }
-    
+
     /// Build full URL with optional dataset_id
     fn build_url(&self, path: &str) -> String {
         match &self.config.dataset_id {
@@ -152,72 +152,77 @@ impl ResoClient {
             None => format!("{}/{}", self.config.base_url, path),
         }
     }
-    
+
     /// Execute a query and return raw JSON
     pub async fn execute(&self, query: &crate::queries::Query) -> Result<serde_json::Value> {
         use tracing::{debug, info};
-        
+
         let url = self.build_url(&query.to_odata_string());
-        
+
         info!("Executing query: {}", url);
-        
-        let response = self.http_client
+
+        let response = self
+            .http_client
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.config.token))
             .header("Accept", "application/json")
             .send()
             .await
             .map_err(|e| ResoError::Network(e.to_string()))?;
-        
+
         let status = response.status();
-        
+
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(ResoError::ODataError(format!(
                 "Request failed with status {}: {}",
-                status,
-                body
+                status, body
             )));
         }
-        
+
         let json = response
             .json::<serde_json::Value>()
             .await
             .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e)))?;
-        
-        debug!("Query result: {} records", 
-            json.get("value").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0));
-        
+
+        debug!(
+            "Query result: {} records",
+            json.get("value")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0)
+        );
+
         Ok(json)
     }
-    
+
     /// Fetch $metadata XML
     pub async fn fetch_metadata(&self) -> Result<String> {
         use tracing::info;
-        
+
         let url = self.build_url("$metadata");
-        
+
         info!("Fetching metadata from: {}", url);
-        
-        let response = self.http_client
+
+        let response = self
+            .http_client
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.config.token))
             .header("Accept", "application/xml")
             .send()
             .await
             .map_err(|e| ResoError::Network(e.to_string()))?;
-        
+
         let status = response.status();
-        
+
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             return Err(ResoError::ODataError(format!(
                 "Metadata request failed with status {}: {}",
-                status,
-                body
+                status, body
             )));
         }
-        
+
         response
             .text()
             .await

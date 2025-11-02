@@ -33,13 +33,13 @@
 //! ```
 
 pub mod client;
-pub mod queries;
 pub mod error;
+pub mod queries;
 
 // Re-export main types for convenience
-pub use client::{ResoClient, ClientConfig};
-pub use queries::{QueryBuilder, Query};
+pub use client::{ClientConfig, ResoClient};
 pub use error::{ResoError, Result};
+pub use queries::{Query, QueryBuilder};
 
 // Re-export serde_json for convenience
 pub use serde_json::Value as JsonValue;
