@@ -4,10 +4,10 @@
 name = "reso-client"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <you@example.com>"]
+authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]  # TODO: Update
 description = "Rust client library for RESO Web API (OData 4.0) servers"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/reso-odata"
+license = "MIT"
+repository = "https://github.com/jeremeybingham/reso_client"
 keywords = ["reso", "odata", "real-estate", "mls"]
 categories = ["api-bindings", "web-programming::http-client"]
 
