@@ -220,3 +220,158 @@ impl QueryBuilder {
         Ok(self.query)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_builder_basic() {
+        let query = QueryBuilder::new("Property")
+            .top(10)
+            .build()
+            .unwrap();
+        
+        assert_eq!(query.to_odata_string(), "Property?$top=10");
+    }
+
+    #[test]
+    fn test_query_resource_only() {
+        let query = QueryBuilder::new("Property")
+            .build()
+            .unwrap();
+        
+        assert_eq!(query.to_odata_string(), "Property");
+    }
+
+    #[test]
+    fn test_query_with_filter() {
+        let query = QueryBuilder::new("Property")
+            .filter("City eq 'Austin'")
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        assert!(url.starts_with("Property?"));
+        assert!(url.contains("$filter=City%20eq%20%27Austin%27"));
+    }
+
+    #[test]
+    fn test_query_with_select() {
+        let query = QueryBuilder::new("Property")
+            .select(&["ListingKey", "City", "ListPrice"])
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        assert!(url.contains("$select=ListingKey,City,ListPrice"));
+    }
+
+    #[test]
+    fn test_query_with_orderby() {
+        let query = QueryBuilder::new("Property")
+            .order_by("ListPrice", "desc")
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        assert!(url.contains("$orderby=ListPrice%20desc"));
+    }
+
+    #[test]
+    fn test_query_with_skip() {
+        let query = QueryBuilder::new("Property")
+            .skip(20)
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        assert!(url.contains("$skip=20"));
+    }
+
+    #[test]
+    fn test_query_with_count() {
+        let query = QueryBuilder::new("Property")
+            .with_count()
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        assert!(url.contains("$count=true"));
+    }
+
+    #[test]
+    fn test_query_with_multiple_params() {
+        let query = QueryBuilder::new("Property")
+            .filter("City eq 'Austin'")
+            .select(&["ListingKey", "City"])
+            .top(5)
+            .skip(10)
+            .order_by("ListPrice", "desc")
+            .with_count()
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        
+        // Verify all parameters are present
+        assert!(url.starts_with("Property?"));
+        assert!(url.contains("$filter="));
+        assert!(url.contains("$select=ListingKey,City"));
+        assert!(url.contains("$top=5"));
+        assert!(url.contains("$skip=10"));
+        assert!(url.contains("$orderby="));
+        assert!(url.contains("$count=true"));
+    }
+
+    #[test]
+    fn test_query_filter_url_encoding() {
+        let query = QueryBuilder::new("Property")
+            .filter("City eq 'San Francisco' and ListPrice gt 1000000")
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        // Spaces and quotes should be URL encoded
+        assert!(url.contains("%20")); // Space encoded
+        assert!(url.contains("%27")); // Single quote encoded
+    }
+
+    #[test]
+    fn test_query_complex_filter() {
+        let query = QueryBuilder::new("Property")
+            .filter("(City eq 'Austin' or City eq 'Dallas') and ListPrice gt 500000")
+            .build()
+            .unwrap();
+        
+        let url = query.to_odata_string();
+        assert!(url.contains("$filter="));
+        assert!(url.contains("Austin"));
+    }
+
+    #[test]
+    fn test_query_direct_construction() {
+        let query = Query::new("Member");
+        assert_eq!(query.to_odata_string(), "Member");
+    }
+
+    #[test]
+    fn test_query_pagination() {
+        // First page
+        let query1 = QueryBuilder::new("Property")
+            .top(20)
+            .build()
+            .unwrap();
+        assert_eq!(query1.to_odata_string(), "Property?$top=20");
+
+        // Second page
+        let query2 = QueryBuilder::new("Property")
+            .skip(20)
+            .top(20)
+            .build()
+            .unwrap();
+        let url = query2.to_odata_string();
+        assert!(url.contains("$skip=20"));
+        assert!(url.contains("$top=20"));
+    }
+}
