@@ -7,12 +7,12 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 🔍 Fluent query builder for OData queries
 - 🔐 OAuth bearer token authentication
 - 📊 Support for filters, ordering, pagination, and field selection
-- 🏗️ Optional dataset ID path support
+- 🗂️ Optional dataset ID path support
 - 📖 Metadata retrieval
 - ⚡ Async/await with tokio
+- ✅ Comprehensive test coverage
 
 ## Quick Start
-
 ```rust
 use reso_client::{ResoClient, QueryBuilder};
 
@@ -42,13 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Installation
+## Installation via Github
 
-Add to your `Cargo.toml`:
-
+Pending Cargo crate publication, use the Github repository to install - add to your `Cargo.toml`:
 ```toml
 [dependencies]
-reso-client = "0.1.0"
+# Import the RESO client from GitHub
+reso-client = { git = "https://github.com/jeremeybingham/reso_client" }
 ```
 
 ## Configuration
@@ -65,7 +65,6 @@ The client reads configuration from environment variables:
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default: 30) | `60` |
 
 Create a `.env` file:
-
 ```bash
 RESO_BASE_URL=https://api.bridgedataoutput.com/api/v2/OData
 RESO_TOKEN=your-token-here
@@ -93,7 +92,6 @@ When to use:
 - **Optional**: If your provider uses a simple base URL structure
 
 You can set it via environment variable or programmatically:
-
 ```rust
 // Via environment
 let client = ResoClient::from_env()?;
@@ -107,7 +105,6 @@ let client = ResoClient::with_config(config)?;
 ## Usage Examples
 
 ### Basic Query
-
 ```rust
 let query = QueryBuilder::new("Property")
     .top(10)
@@ -119,7 +116,6 @@ let results = client.execute(&query).await?;
 ### Filtering
 
 Use OData 4.0 filter syntax:
-
 ```rust
 // Simple equality
 let query = QueryBuilder::new("Property")
@@ -148,7 +144,6 @@ let query = QueryBuilder::new("Property")
 ```
 
 ### Field Selection
-
 ```rust
 let query = QueryBuilder::new("Property")
     .select(&["ListingKey", "City", "ListPrice", "BedroomsTotal"])
@@ -157,7 +152,6 @@ let query = QueryBuilder::new("Property")
 ```
 
 ### Sorting
-
 ```rust
 let query = QueryBuilder::new("Property")
     .order_by("ListPrice", "desc")
@@ -166,7 +160,6 @@ let query = QueryBuilder::new("Property")
 ```
 
 ### Pagination
-
 ```rust
 // First page
 let query = QueryBuilder::new("Property")
@@ -181,7 +174,6 @@ let query = QueryBuilder::new("Property")
 ```
 
 ### Getting Total Count
-
 ```rust
 let query = QueryBuilder::new("Property")
     .filter("City eq 'Austin'")
@@ -200,7 +192,6 @@ if let Some(count) = results["@odata.count"].as_u64() {
 ### Fetching Metadata
 
 Retrieve the OData metadata document:
-
 ```rust
 let metadata_xml = client.fetch_metadata().await?;
 println!("{}", metadata_xml);
@@ -209,7 +200,6 @@ println!("{}", metadata_xml);
 ## OData Response Structure
 
 The RESO Web API returns responses in OData format:
-
 ```json
 {
   "value": [
@@ -235,7 +225,6 @@ Key fields:
 - **`@odata.nextLink`**: URL for next page (for server-side pagination)
 
 Access records:
-
 ```rust
 let results = client.execute(&query).await?;
 
@@ -249,7 +238,6 @@ if let Some(records) = results["value"].as_array() {
 ```
 
 ## Error Handling
-
 ```rust
 use reso_client::{ResoClient, ResoError};
 
@@ -275,7 +263,6 @@ match client.execute(&query).await {
 ## Advanced Configuration
 
 ### Custom Timeout
-
 ```rust
 use std::time::Duration;
 
@@ -285,7 +272,6 @@ let client = ResoClient::with_config(config)?;
 ```
 
 ### Manual Configuration
-
 ```rust
 let config = ClientConfig::new(
     "https://api.mls.com/odata",
@@ -327,19 +313,56 @@ For complete OData 4.0 filter syntax, see: [OData URL Conventions](https://docs.
 
 ## Testing
 
-Run the example test:
+### Running Tests
 
+The library includes comprehensive unit tests:
 ```bash
-# Set up environment
-cp example.env .env
-# Edit .env with your credentials
-
-# Run the test
-cargo run --example quick_test
+cargo test
 ```
+
+### Examples and Integration Tests
+
+For working examples and integration tests against real RESO servers, see the separate examples repository:
+
+**[reso-client-examples](https://github.com/jeremeybingham/reso-client-examples)** *(coming soon)*
+
+This repository includes:
+- Simple usage examples for common queries
+- Complete integration tests against real RESO servers
+- Advanced usage patterns and best practices
+- Step-by-step tutorials for getting started
+
+## Development
+
+### Prerequisites
+
+- Rust 1.70 or later
+- Environment variables configured (see Configuration section)
+
+### Running Quality Checks
+```bash
+# Run tests
+cargo test
+
+# Check formatting
+cargo fmt --check
+
+# Run clippy
+cargo clippy -- -D warnings
+
+# Build documentation
+cargo doc --open
+```
+
+## License
+
+Licensed under the terms of the MIT license. See the file:
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 ## Resources
 
 - [RESO Web API Specification](https://www.reso.org/reso-web-api/)
 - [OData 4.0 Protocol](https://www.odata.org/documentation/)
 - [RESO Data Dictionary](https://www.reso.org/data-dictionary/)
+- [Changelog](CHANGELOG.md)
