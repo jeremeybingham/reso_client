@@ -1,0 +1,41 @@
+// src/lib.rs
+
+//! RESO Web API Client Library
+//!
+//! This library provides a Rust interface for communicating with RESO Web API
+//! (OData 4.0) compliant servers.
+//!
+//! # Quick Start
+//!
+//! ```no_run
+//! use reso_client::{ResoClient, QueryBuilder};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Create client (uses environment variables)
+//!     let client = ResoClient::from_env()?;
+//!     
+//!     // Build and execute a query
+//!     let query = QueryBuilder::new("Property")
+//!         .filter("City", "Austin")
+//!         .top(10)
+//!         .build()?;
+//!     
+//!     let results = client.execute(&query).await?;
+//!     println!("Found {} properties", results.len());
+//!     
+//!     Ok(())
+//! }
+//! ```
+
+pub mod client;
+pub mod queries;
+pub mod error;
+
+// Re-export main types for convenience
+pub use client::{ResoClient, ClientConfig};
+pub use queries::{QueryBuilder, Query};
+pub use error::{ResoError, Result};
+
+// Re-export serde_json for convenience
+pub use serde_json::Value as JsonValue;

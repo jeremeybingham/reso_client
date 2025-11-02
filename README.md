@@ -1,102 +1,270 @@
-# RESO Web API Client for Rust
+# RESO Client Library
 
-A Rust client for connecting to the RESO Web API via Bridge Interactive using OAuth Bearer token authentication.
+A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) servers using OData 4.0.
+
+## Features
+
+- 🔍 Fluent query builder for OData queries
+- 🔐 OAuth bearer token authentication
+- 📊 Support for filters, ordering, pagination, and field selection
+- 🏗️ Optional dataset ID path support
+- 📖 Metadata retrieval
+- ⚡ Async/await with tokio
 
 ## Quick Start
 
-### 1. Get Credentials
-
-Register with a RESO Web API provider and obtain:
-- **Server Token** (Bearer token)
-- **Dataset ID** (from your MLS)
-
-### 2. Configure
-
-Create a `.env` file in your project root:
-
-```env
-RESO_BASE_URL=https://api.resowebprovider.com/api/
-RESO_SERVER_TOKEN=your_server_token_here
-RESO_DATASET_ID=your_dataset_id_here
-```
-
-### 3. Run
-
-```bash
-cargo run
-```
-
-## Usage
-
-### Basic Query
-
 ```rust
-use reso_client::{ResoApiClient, ResoApiConfig};
+use reso_client::{ResoClient, QueryBuilder};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = ResoApiConfig::new(
-        "https://api.resowebprovider.com/api/".to_string(),
-        "your_token".to_string()
-    ).with_dataset("your_dataset_id".to_string());
+    // Create client from environment variables
+    let client = ResoClient::from_env()?;
     
-    let client = ResoApiClient::new(config);
+    // Build and execute a query
+    let query = QueryBuilder::new("Property")
+        .filter("City eq 'Austin' and ListPrice gt 500000")
+        .select(&["ListingKey", "City", "ListPrice"])
+        .top(10)
+        .build()?;
     
-    // Get metadata
-    let metadata = client.get_metadata().await?;
+    let results = client.execute(&query).await?;
     
-    // Query properties
-    let query = "$filter=StandardStatus eq 'Active'&$top=10";
-    let response = client.query::<Property>("Property", Some(query)).await?;
+    // OData responses have structure: { "value": [...records...], "@odata.count": 123 }
+    if let Some(records) = results["value"].as_array() {
+        println!("Found {} properties", records.len());
+        for record in records {
+            println!("{}", serde_json::to_string_pretty(record)?);
+        }
+    }
     
     Ok(())
 }
 ```
 
-## OData Query Examples
+## Installation
 
-```rust
-// Filter by status and price
-"$filter=StandardStatus eq 'Active' and ListPrice lt 500000&$top=10"
+Add to your `Cargo.toml`:
 
-// Select specific fields
-"$select=ListingKey,ListPrice,City&$top=20"
-
-// Sort by price
-"$orderby=ListPrice desc&$top=5"
-
-// Price range with location
-"$filter=(City eq 'Boston' or City eq 'Cambridge') and BedroomsTotal ge 3"
+```toml
+[dependencies]
+reso-client = "0.1.0"
 ```
 
-## Common OData Operators
+## Configuration
 
-| Operator | Example |
-|----------|---------|
-| `eq` | `City eq 'Boston'` |
-| `ne` | `Status ne 'Sold'` |
-| `gt/ge` | `ListPrice ge 200000` |
-| `lt/le` | `ListPrice lt 500000` |
-| `and/or` | `Beds ge 3 and Baths ge 2` |
-| `contains` | `contains(City, 'Boston')` |
+### Environment Variables
 
-## Available Resources
+The client reads configuration from environment variables:
 
-Query any RESO resource:
-- **Property** - Listings
-- **Member** - Agents
-- **Office** - Offices
-- **OpenHouse** - Open houses
-- **Media** - Photos/media
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `RESO_BASE_URL` | Yes | Base URL of the RESO Web API server | `https://api.bridgedataoutput.com/api/v2/OData` |
+| `RESO_TOKEN` | Yes | OAuth bearer token for authentication | `your-token-here` |
+| `RESO_DATASET_ID` | No | Dataset identifier (see below) | `actris_ref` |
+| `RESO_TIMEOUT` | No | HTTP timeout in seconds (default: 30) | `60` |
 
-Check metadata to see all available resources for your MLS.
+Create a `.env` file:
+
+```bash
+RESO_BASE_URL=https://api.bridgedataoutput.com/api/v2/OData
+RESO_TOKEN=your-token-here
+RESO_DATASET_ID=actris_ref
+RESO_TIMEOUT=30
+```
+
+### Dataset ID Explained
+
+Some RESO servers require a dataset identifier in the URL path. The dataset ID is inserted between the base URL and the resource name.
+
+**Without dataset ID:**
+```
+https://api.mls.com/odata/Property
+```
+
+**With dataset ID:**
+```
+https://api.mls.com/odata/actris_ref/Property
+https://api.mls.com/odata/actris_ref/$metadata
+```
+
+When to use:
+- **Required**: If your RESO provider's API documentation shows URLs with a dataset/database identifier
+- **Optional**: If your provider uses a simple base URL structure
+
+You can set it via environment variable or programmatically:
+
+```rust
+// Via environment
+let client = ResoClient::from_env()?;
+
+// Via builder
+let config = ClientConfig::new("https://api.mls.com/odata", "token")
+    .with_dataset_id("actris_ref");
+let client = ResoClient::with_config(config)?;
+```
+
+## Usage Examples
+
+### Basic Query
+
+```rust
+let query = QueryBuilder::new("Property")
+    .top(10)
+    .build()?;
+
+let results = client.execute(&query).await?;
+```
+
+### Filtering
+
+Use OData 4.0 filter syntax:
+
+```rust
+// Simple equality
+let query = QueryBuilder::new("Property")
+    .filter("City eq 'Austin'")
+    .build()?;
+
+// Comparison operators
+let query = QueryBuilder::new("Property")
+    .filter("ListPrice gt 500000 and ListPrice lt 1000000")
+    .build()?;
+
+// String functions
+let query = QueryBuilder::new("Property")
+    .filter("startswith(City, 'San')")
+    .build()?;
+
+// Date comparison
+let query = QueryBuilder::new("Property")
+    .filter("ModificationTimestamp gt 2025-01-01T00:00:00Z")
+    .build()?;
+
+// Complex expressions
+let query = QueryBuilder::new("Property")
+    .filter("City eq 'Austin' and (ListPrice gt 500000 or BedroomsTotal ge 4)")
+    .build()?;
+```
+
+### Field Selection
+
+```rust
+let query = QueryBuilder::new("Property")
+    .select(&["ListingKey", "City", "ListPrice", "BedroomsTotal"])
+    .top(10)
+    .build()?;
+```
+
+### Sorting
+
+```rust
+let query = QueryBuilder::new("Property")
+    .order_by("ListPrice", "desc")
+    .top(10)
+    .build()?;
+```
+
+### Pagination
+
+```rust
+// First page
+let query = QueryBuilder::new("Property")
+    .top(20)
+    .build()?;
+
+// Second page
+let query = QueryBuilder::new("Property")
+    .skip(20)
+    .top(20)
+    .build()?;
+```
+
+### Getting Total Count
+
+```rust
+let query = QueryBuilder::new("Property")
+    .filter("City eq 'Austin'")
+    .with_count()
+    .top(10)
+    .build()?;
+
+let results = client.execute(&query).await?;
+
+// Access the count
+if let Some(count) = results["@odata.count"].as_u64() {
+    println!("Total matching records: {}", count);
+}
+```
+
+### Fetching Metadata
+
+Retrieve the OData metadata document:
+
+```rust
+let metadata_xml = client.fetch_metadata().await?;
+println!("{}", metadata_xml);
+```
+
+## OData Response Structure
+
+The RESO Web API returns responses in OData format:
+
+```json
+{
+  "value": [
+    {
+      "ListingKey": "12345",
+      "City": "Austin",
+      "ListPrice": 750000
+    },
+    {
+      "ListingKey": "67890",
+      "City": "Austin",
+      "ListPrice": 850000
+    }
+  ],
+  "@odata.context": "https://api.example.com/odata/$metadata#Property",
+  "@odata.count": 42
+}
+```
+
+Key fields:
+- **`value`**: Array of records matching your query
+- **`@odata.count`**: Total count (only when `with_count()` is used)
+- **`@odata.nextLink`**: URL for next page (for server-side pagination)
+
+Access records:
+
+```rust
+let results = client.execute(&query).await?;
+
+if let Some(records) = results["value"].as_array() {
+    for record in records {
+        let listing_key = record["ListingKey"].as_str();
+        let price = record["ListPrice"].as_f64();
+        // ... process record
+    }
+}
+```
 
 ## Error Handling
 
 ```rust
-match client.query::<Property>("Property", None).await {
-    Ok(response) => {
-        // Process response
+use reso_client::{ResoClient, ResoError};
+
+match client.execute(&query).await {
+    Ok(results) => {
+        // Process results
+    }
+    Err(ResoError::Config(msg)) => {
+        eprintln!("Configuration error: {}", msg);
+    }
+    Err(ResoError::Network(msg)) => {
+        eprintln!("Network error: {}", msg);
+    }
+    Err(ResoError::ODataError(msg)) => {
+        eprintln!("OData server error: {}", msg);
     }
     Err(e) => {
         eprintln!("Error: {}", e);
@@ -104,12 +272,74 @@ match client.query::<Property>("Property", None).await {
 }
 ```
 
-## Authentication
+## Advanced Configuration
 
-The client uses OAuth 2.0 Bearer token authentication via the `Authorization` header:
+### Custom Timeout
 
+```rust
+use std::time::Duration;
+
+let config = ClientConfig::new("https://api.mls.com/odata", "token")
+    .with_timeout(Duration::from_secs(60));
+let client = ResoClient::with_config(config)?;
 ```
-Authorization: Bearer {your_server_token}
+
+### Manual Configuration
+
+```rust
+let config = ClientConfig::new(
+    "https://api.mls.com/odata",
+    "your-bearer-token"
+)
+.with_dataset_id("actris_ref")
+.with_timeout(Duration::from_secs(45));
+
+let client = ResoClient::with_config(config)?;
 ```
 
-All requests are made over HTTPS to the RESO Web API endpoints.
+## OData Filter Reference
+
+Common OData 4.0 operators:
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `eq` | Equals | `City eq 'Austin'` |
+| `ne` | Not equals | `Status ne 'Closed'` |
+| `gt` | Greater than | `ListPrice gt 500000` |
+| `ge` | Greater than or equal | `BedroomsTotal ge 3` |
+| `lt` | Less than | `ListPrice lt 1000000` |
+| `le` | Less than or equal | `BedroomsTotal le 5` |
+| `and` | Logical AND | `City eq 'Austin' and ListPrice gt 500000` |
+| `or` | Logical OR | `City eq 'Austin' or City eq 'Cambridge'` |
+| `not` | Logical NOT | `not (City eq 'Austin')` |
+
+String functions:
+- `startswith(field, 'value')`
+- `endswith(field, 'value')`
+- `contains(field, 'value')`
+
+Date functions:
+- `year(field) eq 2025`
+- `month(field) eq 6`
+- `day(field) eq 15`
+
+For complete OData 4.0 filter syntax, see: [OData URL Conventions](https://docs.oasis-open.org/odata/odata/v4.0/odata-v4.0-part2-url-conventions.html)
+
+## Testing
+
+Run the example test:
+
+```bash
+# Set up environment
+cp example.env .env
+# Edit .env with your credentials
+
+# Run the test
+cargo run --example quick_test
+```
+
+## Resources
+
+- [RESO Web API Specification](https://www.reso.org/reso-web-api/)
+- [OData 4.0 Protocol](https://www.odata.org/documentation/)
+- [RESO Data Dictionary](https://www.reso.org/data-dictionary/)
