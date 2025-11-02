@@ -4,7 +4,7 @@
 name = "reso-client"
 version = "0.1.0"
 edition = "2021"
-authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]  # TODO: Update
+authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
 description = "Rust client library for RESO Web API (OData 4.0) servers"
 license = "MIT"
 repository = "https://github.com/jeremeybingham/reso_client"
@@ -28,13 +28,15 @@ serde_json = "1"
 
 # Error Handling
 thiserror = "1"
-anyhow = "1"
 
 # Logging
 tracing = "0.1"
 
 # URL handling
 urlencoding = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
