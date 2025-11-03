@@ -8,7 +8,6 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 🔐 OAuth bearer token authentication
 - 📊 Support for filters, ordering, pagination, and field selection
 - 🔢 Count-only queries for efficient record counting
-- 📈 OData aggregation support via `$apply` (requires server support)
 - 🗂️ Optional dataset ID path support
 - 📖 Metadata retrieval
 - ⚡ Async/await with tokio
@@ -207,7 +206,7 @@ println!("Total: {}", count);
 
 ### OData Aggregation (when supported)
 
-**⚠️ Server Compatibility Note:** The `apply()` method requires server support for OData v4.0 Aggregation Extensions. Not all RESO servers support this feature.
+**⚠️ Server Compatibility, NOT supported by the RESO Web API reference server / `actris_ref` Note:** The `apply()` method requires server support for OData v4.0 Aggregation Extensions. Not all RESO servers support this feature.
 
 ```rust
 // Group by field with aggregation (if server supports $apply)
@@ -219,6 +218,7 @@ let results = client.execute(&query).await?;
 ```
 
 **If your server doesn't support `$apply`**, use multiple filtered queries instead:
+**⚠️ This is the method supported by the RESO Web API reference server / `actris_ref`**
 ```rust
 // Workaround: Use $filter for counts by category
 let statuses = ["Active", "Pending", "Closed"];
