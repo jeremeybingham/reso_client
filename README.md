@@ -11,7 +11,6 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 🗂️ Optional dataset ID path support
 - 📖 Metadata retrieval
 - ⚡ Async/await with tokio
-- ✅ Comprehensive test coverage
 
 ## Quick Start
 ```rust
