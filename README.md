@@ -12,35 +12,6 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 📖 Metadata retrieval
 - ⚡ Async/await with tokio
 
-## Quick Start
-```rust
-use reso_client::{ResoClient, QueryBuilder};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create client from environment variables
-    let client = ResoClient::from_env()?;
-    
-    // Build and execute a query
-    let query = QueryBuilder::new("Property")
-        .filter("City eq 'Austin' and ListPrice gt 500000")
-        .select(&["ListingKey", "City", "ListPrice"])
-        .top(10)
-        .build()?;
-    
-    let results = client.execute(&query).await?;
-    
-    // OData responses have structure: { "value": [...records...], "@odata.count": 123 }
-    if let Some(records) = results["value"].as_array() {
-        println!("Found {} properties", records.len());
-        for record in records {
-            println!("{}", serde_json::to_string_pretty(record)?);
-        }
-    }
-    
-    Ok(())
-}
-```
 
 ## Installation via Github
 
@@ -100,6 +71,36 @@ let client = ResoClient::from_env()?;
 let config = ClientConfig::new("https://api.mls.com/OData", "token")
     .with_dataset_id("actris_ref");
 let client = ResoClient::with_config(config)?;
+```
+
+## Quick Start
+```rust
+use reso_client::{ResoClient, QueryBuilder};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create client from environment variables
+    let client = ResoClient::from_env()?;
+    
+    // Build and execute a query
+    let query = QueryBuilder::new("Property")
+        .filter("City eq 'Austin' and ListPrice gt 500000")
+        .select(&["ListingKey", "City", "ListPrice"])
+        .top(10)
+        .build()?;
+    
+    let results = client.execute(&query).await?;
+    
+    // OData responses have structure: { "value": [...records...], "@odata.count": 123 }
+    if let Some(records) = results["value"].as_array() {
+        println!("Found {} properties", records.len());
+        for record in records {
+            println!("{}", serde_json::to_string_pretty(record)?);
+        }
+    }
+    
+    Ok(())
+}
 ```
 
 ## Usage Examples
