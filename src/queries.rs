@@ -15,6 +15,7 @@ pub struct Query {
     skip: Option<u32>,
     count: bool,
     count_only: bool,
+    apply: Option<String>,
 }
 
 impl Query {
@@ -29,6 +30,7 @@ impl Query {
             skip: None,
             count: false,
             count_only: false,
+            apply: None,
         }
     }
 
@@ -49,6 +51,11 @@ impl Query {
         }
 
         let mut params = Vec::new();
+
+        // $apply
+        if let Some(apply) = &self.apply {
+            params.push(format!("$apply={}", urlencoding::encode(apply)));
+        }
 
         // $filter
         if let Some(filter) = &self.filter {
@@ -145,6 +152,31 @@ impl QueryBuilder {
     /// ```
     pub fn filter(mut self, expression: impl Into<String>) -> Self {
         self.query.filter = Some(expression.into());
+        self
+    }
+
+    /// Add an OData apply expression for aggregations
+    ///
+    /// Pass a complete OData apply string. The library does not parse or validate
+    /// the apply expression - it simply URL-encodes it and adds it to the query.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::QueryBuilder;
+    /// // Group by city with count
+    /// let query = QueryBuilder::new("Property")
+    ///     .apply("groupby((City), aggregate($count as Count))")
+    ///     .build()?;
+    ///
+    /// // Group by multiple fields
+    /// let query = QueryBuilder::new("Property")
+    ///     .apply("groupby((City, PropertyType), aggregate($count as Count))")
+    ///     .build()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn apply(mut self, expression: impl Into<String>) -> Self {
+        self.query.apply = Some(expression.into());
         self
     }
 
