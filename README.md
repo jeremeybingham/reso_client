@@ -7,6 +7,8 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 🔍 Fluent query builder for OData queries
 - 🔐 OAuth bearer token authentication
 - 📊 Support for filters, ordering, pagination, and field selection
+- 🔢 Count-only queries for efficient record counting
+- 📈 OData aggregation support via `$apply` (requires server support)
 - 🗂️ Optional dataset ID path support
 - 📖 Metadata retrieval
 - ⚡ Async/await with tokio
@@ -186,6 +188,50 @@ let results = client.execute(&query).await?;
 // Access the count
 if let Some(count) = results["@odata.count"].as_u64() {
     println!("Total matching records: {}", count);
+}
+```
+
+### Count-Only Queries
+
+Efficiently get just the count without fetching records:
+```rust
+let query = QueryBuilder::new("Property")
+    .filter("City eq 'Austin'")
+    .count()  // Returns just the count via /$count endpoint
+    .build()?;
+
+let results = client.execute(&query).await?;
+let count = results.as_u64().unwrap_or(0);
+println!("Total: {}", count);
+```
+
+### OData Aggregation (when supported)
+
+**⚠️ Server Compatibility Note:** The `apply()` method requires server support for OData v4.0 Aggregation Extensions. Not all RESO servers support this feature.
+
+```rust
+// Group by field with aggregation (if server supports $apply)
+let query = QueryBuilder::new("Property")
+    .apply("groupby((StandardStatus), aggregate($count as TotalCount))")
+    .build()?;
+
+let results = client.execute(&query).await?;
+```
+
+**If your server doesn't support `$apply`**, use multiple filtered queries instead:
+```rust
+// Workaround: Use $filter for counts by category
+let statuses = ["Active", "Pending", "Closed"];
+
+for status in statuses {
+    let query = QueryBuilder::new("Property")
+        .filter(&format!("StandardStatus eq '{}'", status))
+        .count()
+        .build()?;
+
+    let results = client.execute(&query).await?;
+    let count = results.as_u64().unwrap_or(0);
+    println!("{}: {}", status, count);
 }
 ```
 

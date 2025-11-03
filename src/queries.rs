@@ -157,6 +157,10 @@ impl QueryBuilder {
 
     /// Add an OData apply expression for aggregations
     ///
+    /// **⚠️ Server Compatibility Required:** This feature requires server support for
+    /// OData v4.0 Aggregation Extensions. Not all RESO servers support `$apply`.
+    /// If unsupported, the server will return a 400 error.
+    ///
     /// Pass a complete OData apply string. The library does not parse or validate
     /// the apply expression - it simply URL-encodes it and adds it to the query.
     ///
@@ -174,6 +178,28 @@ impl QueryBuilder {
     ///     .apply("groupby((City, PropertyType), aggregate($count as Count))")
     ///     .build()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Alternative for servers without $apply support
+    ///
+    /// If your server doesn't support aggregation, use multiple filtered queries instead:
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, QueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let statuses = ["Active", "Pending", "Closed"];
+    /// for status in statuses {
+    ///     let query = QueryBuilder::new("Property")
+    ///         .filter(&format!("StandardStatus eq '{}'", status))
+    ///         .count()
+    ///         .build()?;
+    ///
+    ///     let response = client.execute(&query).await?;
+    ///     let count = response.as_u64().unwrap_or(0);
+    ///     println!("{}: {}", status, count);
+    /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn apply(mut self, expression: impl Into<String>) -> Self {
         self.query.apply = Some(expression.into());

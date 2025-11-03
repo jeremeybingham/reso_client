@@ -121,6 +121,54 @@ let query = QueryBuilder::new("Resource")  // Required: resource name
 .with_count()  // Adds @odata.count to response
 ```
 
+### Count-Only Queries
+```rust
+// Efficient way to get just the count without fetching records
+.count()  // Returns just the count via /$count endpoint
+```
+
+### OData Aggregation with $apply
+
+**⚠️ Server Compatibility Required**
+
+The `apply()` method supports OData aggregation via the `$apply` parameter. However, **this feature requires server support** for OData v4.0 Aggregation Extensions.
+
+**Not all RESO servers support `$apply`**. If your server doesn't support aggregation, you'll receive a 400 error:
+```
+{"error":{"code":400,"message":"Invalid parameter - $apply"}}
+```
+
+#### Using apply() (when server supports it)
+```rust
+// Group by field with count
+.apply("groupby((StandardStatus), aggregate($count as TotalCount))")
+
+// Group by multiple fields
+.apply("groupby((City, PropertyType), aggregate($count as Count))")
+```
+
+#### Workaround: Using $filter for counts when $apply is not supported
+
+If your server doesn't support `$apply`, use multiple queries with `$filter` instead:
+
+```rust
+// Get counts by status using separate queries
+let statuses = ["Active", "Pending", "Closed", "Expired"];
+
+for status in statuses {
+    let query = QueryBuilder::new("Property")
+        .filter(&format!("StandardStatus eq '{}'", status))
+        .count()
+        .build()?;
+
+    let response = client.execute(&query).await?;
+    let count = response.as_u64().unwrap_or(0);
+    println!("   {}: {}", status, count);
+}
+```
+
+This approach is more widely compatible and works with all RESO servers that support basic filtering.
+
 ## Executing Queries
 
 ### Standard Execution
@@ -440,6 +488,8 @@ let count = response["@odata.count"].as_u64().unwrap_or(0);
 - `top(n: u32) -> Self`
 - `skip(n: u32) -> Self`
 - `with_count() -> Self`
+- `count() -> Self`
+- `apply(expression) -> Self` ⚠️ Requires server support for OData aggregation
 - `build() -> Result<Query>`
 
 ### Query Methods
@@ -456,7 +506,7 @@ let count = response["@odata.count"].as_u64().unwrap_or(0);
 ## Limitations
 
 - No support for `$expand` (navigation properties)
-- No support for `$apply` (aggregation)
+- `$apply` (aggregation) requires server support for OData v4.0 Aggregation Extensions
 - No support for batch requests (`$batch`)
 - No built-in retry logic (implement at application level)
 - No response caching (implement at application level)
