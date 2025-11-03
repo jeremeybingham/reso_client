@@ -14,6 +14,7 @@ pub struct Query {
     top: Option<u32>,
     skip: Option<u32>,
     count: bool,
+    count_only: bool,
 }
 
 impl Query {
@@ -27,12 +28,26 @@ impl Query {
             top: None,
             skip: None,
             count: false,
+            count_only: false,
         }
     }
 
     /// Convert to OData query string
     pub fn to_odata_string(&self) -> String {
         let mut parts = vec![self.resource.clone()];
+
+        // For count-only queries, append /$count and only use filter
+        if self.count_only {
+            parts.push("/$count".to_string());
+
+            if let Some(filter) = &self.filter {
+                parts.push("?".to_string());
+                parts.push(format!("$filter={}", urlencoding::encode(filter)));
+            }
+
+            return parts.concat();
+        }
+
         let mut params = Vec::new();
 
         // $filter
@@ -212,6 +227,23 @@ impl QueryBuilder {
     /// ```
     pub fn with_count(mut self) -> Self {
         self.query.count = true;
+        self
+    }
+
+    /// Create a count-only query
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::QueryBuilder;
+    /// let query = QueryBuilder::new("Property")
+    ///     .filter("City eq 'Austin'")
+    ///     .count()
+    ///     .build()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn count(mut self) -> Self {
+        self.query.count_only = true;
         self
     }
 
