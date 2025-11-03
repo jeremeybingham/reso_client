@@ -5,7 +5,8 @@
 ## Installation
 ```toml
 [dependencies]
-reso-client = "0.1.0"
+# Import the RESO client from GitHub
+reso-client = { git = "https://github.com/jeremeybingham/reso_client" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -129,7 +130,7 @@ let query = QueryBuilder::new("Resource")  // Required: resource name
 
 ### OData Aggregation with $apply
 
-**⚠️ Server Compatibility Required**
+**⚠️ Server Compatibility Required, NOT supported by the RESO Web API reference server / `actris_ref`**
 
 The `apply()` method supports OData aggregation via the `$apply` parameter. However, **this feature requires server support** for OData v4.0 Aggregation Extensions.
 
@@ -148,6 +149,7 @@ The `apply()` method supports OData aggregation via the `$apply` parameter. Howe
 ```
 
 #### Workaround: Using $filter for counts when $apply is not supported
+**⚠️ Use this method for the RESO Web API reference server / `actris_ref`**
 
 If your server doesn't support `$apply`, use multiple queries with `$filter` instead:
 
@@ -354,7 +356,7 @@ let query = QueryBuilder::new("Property")
 
 ## Dataset ID Usage
 
-Some RESO providers require a dataset identifier in the URL path.
+Some RESO providers, including the RESO Web API reference server, require a dataset identifier in the URL path.
 
 ### URL Structure
 
@@ -510,3 +512,4 @@ let count = response["@odata.count"].as_u64().unwrap_or(0);
 - No support for batch requests (`$batch`)
 - No built-in retry logic (implement at application level)
 - No response caching (implement at application level)
+
