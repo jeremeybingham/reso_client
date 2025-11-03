@@ -196,6 +196,48 @@ impl ResoClient {
         Ok(json)
     }
 
+    /// Execute a count-only query and return the count as an integer
+    pub async fn execute_count(&self, query: &crate::queries::Query) -> Result<u64> {
+        use tracing::info;
+
+        let url = self.build_url(&query.to_odata_string());
+
+        info!("Executing count query: {}", url);
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.config.token))
+            .header("Accept", "text/plain")
+            .send()
+            .await
+            .map_err(|e| ResoError::Network(e.to_string()))?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ResoError::ODataError(format!(
+                "Count request failed with status {}: {}",
+                status, body
+            )));
+        }
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ResoError::Parse(format!("Failed to read response: {}", e)))?;
+
+        let count = text
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| ResoError::Parse(format!("Failed to parse count '{}': {}", text, e)))?;
+
+        info!("Count result: {}", count);
+
+        Ok(count)
+    }
+
     /// Fetch $metadata XML
     pub async fn fetch_metadata(&self) -> Result<String> {
         use tracing::info;
