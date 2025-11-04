@@ -1,4 +1,4 @@
-use reso_client::{ResoClient, QueryBuilder, ResoError};
+use reso_client::{QueryBuilder, ResoClient, ResoError};
 
 /// Format a number with thousand separators
 fn format_number(n: f64) -> String {
