@@ -73,6 +73,25 @@ let config = ClientConfig::new("https://api.mls.com/OData", "token")
 let client = ResoClient::with_config(config)?;
 ```
 
+## Testing
+
+### Running Tests
+
+The library includes comprehensive unit tests:
+```bash
+cargo test
+```
+
+### Examples
+
+For working examples and integration tests against real RESO servers, refer to the `examples` directory. Currently there's only one example; `examples/property_test.rs`. Assuming you've set your `.env` variables correctly, the script can be executed to test the client against a RESO server by running:
+
+```bash
+cargo run --example property_test 
+```
+
+The `property_test.rs` script is a simple example that demonstrates how to use the `reso_client` library to search for properties. The script fetches 5 active properties and prints their details, including price, address, and other details. It's configured to work with the RESO Web API reference server / `actris_ref`, but should work with any server that shares the field names used in the query.  
+
 ## Quick Start
 ```rust
 use reso_client::{ResoClient, QueryBuilder};
@@ -356,49 +375,6 @@ Date functions:
 - `day(field) eq 15`
 
 For complete OData 4.0 filter syntax, see: [OData URL Conventions](https://docs.oasis-open.org/odata/odata/v4.0/odata-v4.0-part2-url-conventions.html)
-
-## Testing
-
-### Running Tests
-
-The library includes comprehensive unit tests:
-```bash
-cargo test
-```
-
-### Examples and Integration Tests
-
-For working examples and integration tests against real RESO servers, see the separate examples repository:
-
-**[reso-client-examples](https://github.com/jeremeybingham/reso-client-examples)** *(coming soon)*
-
-This repository includes:
-- Simple usage examples for common queries
-- Complete integration tests against real RESO servers
-- Advanced usage patterns and best practices
-- Step-by-step tutorials for getting started
-
-## Development
-
-### Prerequisites
-
-- Rust 1.70 or later
-- Environment variables configured (see Configuration section)
-
-### Running Quality Checks
-```bash
-# Run tests
-cargo test
-
-# Check formatting
-cargo fmt --check
-
-# Run clippy
-cargo clippy -- -D warnings
-
-# Build documentation
-cargo doc --open
-```
 
 ## License
 
