@@ -146,6 +146,10 @@ impl ResoClient {
     }
 
     /// Build full URL with optional dataset_id
+    ///
+    /// Some RESO servers require a dataset ID in the URL path between the base URL
+    /// and the resource/query path (e.g., `https://api.mls.com/odata/{dataset_id}/Property`).
+    /// This method handles both cases transparently.
     fn build_url(&self, path: &str) -> String {
         match &self.config.dataset_id {
             Some(dataset_id) => format!("{}/{}/{}", self.config.base_url, dataset_id, path),
@@ -153,37 +157,65 @@ impl ResoClient {
         }
     }
 
-    /// Execute a query and return raw JSON
-    pub async fn execute(&self, query: &crate::queries::Query) -> Result<serde_json::Value> {
-        use tracing::{debug, info};
-
-        let url = self.build_url(&query.to_odata_string());
-
-        info!("Executing query: {}", url);
-
+    /// Send an authenticated GET request and handle error responses
+    ///
+    /// This helper method encapsulates the common pattern of:
+    /// 1. Sending a GET request with Authorization header
+    /// 2. Checking the response status
+    /// 3. Converting error responses to appropriate ResoError variants
+    async fn send_authenticated_request(
+        &self,
+        url: &str,
+        accept: &str,
+    ) -> Result<reqwest::Response> {
         let response = self
             .http_client
-            .get(&url)
+            .get(url)
             .header("Authorization", format!("Bearer {}", self.config.token))
-            .header("Accept", "application/json")
+            .header("Accept", accept)
             .send()
             .await
             .map_err(|e| ResoError::Network(e.to_string()))?;
 
         let status = response.status();
 
+        // Check for error responses and extract the body for detailed error information
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(ResoError::ODataError(format!(
-                "Request failed with status {}: {}",
-                status, body
-            )));
+            // from_status() parses OData error format if present and maps to appropriate error variant
+            return Err(ResoError::from_status(status.as_u16(), &body));
         }
 
-        let json = response
+        Ok(response)
+    }
+
+    /// Parse JSON response from a successful request
+    async fn parse_json_response(response: reqwest::Response) -> Result<serde_json::Value> {
+        response
             .json::<serde_json::Value>()
             .await
-            .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e)))?;
+            .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e)))
+    }
+
+    /// Parse text response from a successful request
+    async fn parse_text_response(response: reqwest::Response) -> Result<String> {
+        response
+            .text()
+            .await
+            .map_err(|e| ResoError::Parse(format!("Failed to read response: {}", e)))
+    }
+
+    /// Execute a query and return raw JSON
+    pub async fn execute(&self, query: &crate::queries::Query) -> Result<serde_json::Value> {
+        use tracing::{debug, info};
+
+        let url = self.build_url(&query.to_odata_string());
+        info!("Executing query: {}", url);
+
+        let response = self
+            .send_authenticated_request(&url, "application/json")
+            .await?;
+        let json = Self::parse_json_response(response).await?;
 
         debug!(
             "Query result: {} records",
@@ -196,37 +228,54 @@ impl ResoClient {
         Ok(json)
     }
 
+    /// Execute a direct key access query and return a single record
+    ///
+    /// Direct key access queries (e.g., `Property('12345')`) return a single object
+    /// instead of an array wrapped in `{"value": [...]}`. This method is optimized
+    /// for such queries.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, QueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Fetch a single property by key
+    /// let query = QueryBuilder::by_key("Property", "12345")
+    ///     .select(&["ListingKey", "City", "ListPrice"])
+    ///     .build()?;
+    ///
+    /// let record = client.execute_by_key(&query).await?;
+    ///
+    /// // With expand
+    /// let query = QueryBuilder::by_key("Property", "12345")
+    ///     .expand(&["ListOffice", "ListAgent"])
+    ///     .build()?;
+    ///
+    /// let record = client.execute_by_key(&query).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn execute_by_key(&self, query: &crate::queries::Query) -> Result<serde_json::Value> {
+        use tracing::info;
+
+        let url = self.build_url(&query.to_odata_string());
+        info!("Executing key access query: {}", url);
+
+        let response = self
+            .send_authenticated_request(&url, "application/json")
+            .await?;
+        Self::parse_json_response(response).await
+    }
+
     /// Execute a count-only query and return the count as an integer
     pub async fn execute_count(&self, query: &crate::queries::Query) -> Result<u64> {
         use tracing::info;
 
         let url = self.build_url(&query.to_odata_string());
-
         info!("Executing count query: {}", url);
 
-        let response = self
-            .http_client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.token))
-            .header("Accept", "text/plain")
-            .send()
-            .await
-            .map_err(|e| ResoError::Network(e.to_string()))?;
-
-        let status = response.status();
-
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ResoError::ODataError(format!(
-                "Count request failed with status {}: {}",
-                status, body
-            )));
-        }
-
-        let text = response
-            .text()
-            .await
-            .map_err(|e| ResoError::Parse(format!("Failed to read response: {}", e)))?;
+        let response = self.send_authenticated_request(&url, "text/plain").await?;
+        let text = Self::parse_text_response(response).await?;
 
         let count = text
             .trim()
@@ -243,31 +292,158 @@ impl ResoClient {
         use tracing::info;
 
         let url = self.build_url("$metadata");
-
         info!("Fetching metadata from: {}", url);
 
         let response = self
-            .http_client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.config.token))
-            .header("Accept", "application/xml")
-            .send()
-            .await
-            .map_err(|e| ResoError::Network(e.to_string()))?;
+            .send_authenticated_request(&url, "application/xml")
+            .await?;
+        Self::parse_text_response(response).await
+    }
 
-        let status = response.status();
+    /// Execute a replication query
+    ///
+    /// The replication endpoint is designed for bulk data transfer and supports
+    /// up to 2000 records per request. The response includes a `next` link in
+    /// the headers for pagination through large datasets.
+    ///
+    /// # Important Notes
+    ///
+    /// - Replication functionality requires MLS authorization
+    /// - Results are ordered oldest to newest by default
+    /// - Use `$select` to reduce payload size and improve performance
+    /// - For datasets >10,000 records, replication is required
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, ReplicationQueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = ReplicationQueryBuilder::new("Property")
+    ///     .filter("StandardStatus eq 'Active'")
+    ///     .select(&["ListingKey", "City", "ListPrice"])
+    ///     .top(2000)
+    ///     .build()?;
+    ///
+    /// let response = client.execute_replication(&query).await?;
+    ///
+    /// println!("Retrieved {} records", response.record_count);
+    ///
+    /// // Continue with next link if more records available
+    /// if let Some(next_link) = response.next_link {
+    ///     let next_response = client.execute_next_link(&next_link).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn execute_replication(
+        &self,
+        query: &crate::queries::ReplicationQuery,
+    ) -> Result<crate::replication::ReplicationResponse> {
+        use tracing::{debug, info};
 
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ResoError::ODataError(format!(
-                "Metadata request failed with status {}: {}",
-                status, body
-            )));
-        }
+        let url = self.build_url(&query.to_odata_string());
+        info!("Executing replication query: {}", url);
 
-        response
-            .text()
-            .await
-            .map_err(|e| ResoError::Parse(format!("Failed to read metadata: {}", e)))
+        let response = self
+            .send_authenticated_request(&url, "application/json")
+            .await?;
+
+        // Extract next link from response headers before consuming response
+        // The replication endpoint uses the "next" header (preferred) or "link" header
+        // to indicate more records are available. This must be extracted before reading
+        // the response body since consuming the response moves ownership.
+        let next_link = response
+            .headers()
+            .get("next")
+            .or_else(|| response.headers().get("link"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        debug!("Next link from headers: {:?}", next_link);
+
+        let json = Self::parse_json_response(response).await?;
+
+        // Extract records from OData response envelope
+        // OData wraps result arrays in a "value" field: {"value": [...], "@odata.context": "..."}
+        let records = json
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        debug!("Retrieved {} records", records.len());
+
+        Ok(crate::replication::ReplicationResponse::new(
+            records, next_link,
+        ))
+    }
+
+    /// Execute a next link from a previous replication response
+    ///
+    /// Takes the full URL from a previous replication response's `next_link`
+    /// field and fetches the next batch of records.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, ReplicationQueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = ReplicationQueryBuilder::new("Property")
+    ///     .top(2000)
+    ///     .build()?;
+    ///
+    /// let mut response = client.execute_replication(&query).await?;
+    /// let mut total_records = response.record_count;
+    ///
+    /// // Continue fetching while next link is available
+    /// while let Some(next_link) = response.next_link {
+    ///     response = client.execute_next_link(&next_link).await?;
+    ///     total_records += response.record_count;
+    /// }
+    ///
+    /// println!("Total records fetched: {}", total_records);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn execute_next_link(
+        &self,
+        next_link: &str,
+    ) -> Result<crate::replication::ReplicationResponse> {
+        use tracing::{debug, info};
+
+        info!("Executing next link: {}", next_link);
+
+        let response = self
+            .send_authenticated_request(next_link, "application/json")
+            .await?;
+
+        // Extract next link from response headers before consuming response
+        // The replication endpoint uses the "next" header (preferred) or "link" header
+        // to indicate more records are available. This must be extracted before reading
+        // the response body since consuming the response moves ownership.
+        let next_link = response
+            .headers()
+            .get("next")
+            .or_else(|| response.headers().get("link"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        debug!("Next link from headers: {:?}", next_link);
+
+        let json = Self::parse_json_response(response).await?;
+
+        // Extract records from OData response envelope
+        // OData wraps result arrays in a "value" field: {"value": [...], "@odata.context": "..."}
+        let records = json
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        debug!("Retrieved {} records", records.len());
+
+        Ok(crate::replication::ReplicationResponse::new(
+            records, next_link,
+        ))
     }
 }

@@ -10,6 +10,7 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 🔢 Count-only queries for efficient record counting
 - 🗂️ Optional dataset ID path support
 - 📖 Metadata retrieval
+- 🔄 Replication endpoint support for bulk data transfer (up to 2000 records/request)
 - ⚡ Async/await with tokio
 
 
@@ -77,22 +78,66 @@ let client = ResoClient::with_config(config)?;
 
 ### Running Tests
 
-The library includes comprehensive unit tests:
+The library includes comprehensive test coverage with both unit and integration tests:
+
 ```bash
+# Run all tests (unit + integration)
 cargo test
+
+# Run only unit tests (in src/ modules)
+cargo test --lib
+
+# Run only integration tests (in tests/ directory)
+cargo test --test '*'
+
+# Run specific test file
+cargo test --test queries_tests
 ```
+
+**Test Organization:**
+- **Unit tests**: Internal tests for private functions and implementation details
+- **Integration tests**: Public API tests in `tests/` directory
+  - `tests/queries_tests.rs` - Comprehensive query building and URL generation tests
 
 ### Examples
 
-For working examples and integration tests against real RESO servers, refer to the `examples` directory. Currently there's only one example; `examples/property_test.rs`. Assuming you've set your `.env` variables correctly, the script can be executed to test the client against a RESO server by running:
+The library includes a comprehensive suite of examples in the `examples` directory demonstrating all major functionality. Assuming you've set your `.env` variables correctly, you can run any example with:
 
 ```bash
-cargo run --example property_test 
+cargo run --example <example_name>
 ```
 
-The `property_test.rs` script is a simple example that demonstrates how to use the `reso_client` library to search for properties. The script fetches 5 active properties and prints their details, including price, address, and other details. It's configured to work with the RESO Web API reference server / `actris_ref`, but should work with any server that shares the field names used in the query.  
+#### Available Examples
+
+**Basic Usage:**
+- `test_connectivity` - Test basic API connectivity and authentication
+- `test_property` - Property resource queries with filtering and field selection
+- `test_member` - Query Member resource for agent/broker information
+
+**Query Features:**
+- `test_filters` - OData filter syntax (comparison, logical operators, string functions)
+- `test_select` - Field selection and projection to optimize response size
+- `test_count_only` - Efficient count-only queries using `/$count` endpoint
+- `test_pagination_nextlink` - Server-side pagination with `@odata.nextLink`
+
+**Analysis Examples:**
+- `analyze_property_fields` - Analyze field usage across 200 active listings to identify which fields are most populated; generates a detailed JSON report with recommended field sets (minimal, standard, comprehensive)
+- `analyze_active_listings` - Statistical analysis of 200 active residential listings including price analysis, property type distribution, geographic distribution, bedroom/bathroom statistics, size metrics, and photo counts
+
+**Advanced Features:**
+- `test_replication` - Replication endpoint for bulk data transfer (up to 2000 records/request) (not supported by `actris_ref`)
+- `test_metadata` - Fetch and parse OData metadata documents
+- `test_core_queries` - Comprehensive collection of core RESO query patterns
+
+**Server-Specific (requires support):**
+- `test_apply` - OData aggregation with `$apply` parameter (not supported by `actris_ref`)
+- `test_expand` - Navigation property expansion (not supported by `actris_ref`)
+
+All examples include detailed comments, error handling, and work with the RESO Web API reference server (`actris_ref`) unless otherwise noted.  
 
 ## Quick Start
+
+### Standard Queries
 ```rust
 use reso_client::{ResoClient, QueryBuilder};
 
@@ -100,16 +145,16 @@ use reso_client::{ResoClient, QueryBuilder};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create client from environment variables
     let client = ResoClient::from_env()?;
-    
+
     // Build and execute a query
     let query = QueryBuilder::new("Property")
         .filter("City eq 'Austin' and ListPrice gt 500000")
         .select(&["ListingKey", "City", "ListPrice"])
         .top(10)
         .build()?;
-    
+
     let results = client.execute(&query).await?;
-    
+
     // OData responses have structure: { "value": [...records...], "@odata.count": 123 }
     if let Some(records) = results["value"].as_array() {
         println!("Found {} properties", records.len());
@@ -117,7 +162,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(record)?);
         }
     }
-    
+
+    Ok(())
+}
+```
+
+### Replication Queries (Bulk Data Transfer)
+```rust
+use reso_client::{ResoClient, ReplicationQueryBuilder};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = ResoClient::from_env()?;
+
+    // Build replication query (up to 2000 records per request)
+    let query = ReplicationQueryBuilder::new("Property")
+        .filter("StandardStatus eq 'Active'")
+        .top(2000)
+        .build()?;
+
+    let response = client.execute_replication(&query).await?;
+
+    println!("Retrieved {} records", response.record_count);
+
+    // Continue with next link if available
+    if response.has_more() {
+        let next_response = client.execute_next_link(
+            response.next_link().unwrap()
+        ).await?;
+        println!("Retrieved {} more records", next_response.record_count);
+    }
+
     Ok(())
 }
 ```
@@ -260,6 +335,63 @@ Retrieve the OData metadata document:
 ```rust
 let metadata_xml = client.fetch_metadata().await?;
 println!("{}", metadata_xml);
+```
+
+### Replication Queries
+
+The replication endpoint is designed for bulk data transfer and synchronization of large datasets (>10,000 records). It supports up to 2000 records per request (vs 200 for standard queries) and uses header-based pagination.
+
+**Important notes:**
+- Requires MLS authorization
+- Results are ordered oldest to newest by default
+- No support for `$skip`, `$orderby`, `$apply`, or count options
+- Use `$select` to reduce payload size and improve performance
+
+```rust
+use reso_client::{ResoClient, ReplicationQueryBuilder};
+
+// Build a replication query
+let query = ReplicationQueryBuilder::new("Property")
+    .filter("StandardStatus eq 'Active'")
+    .select(&["ListingKey", "City", "ListPrice"])
+    .top(2000)  // Maximum: 2000
+    .build()?;
+
+// Execute the query
+let response = client.execute_replication(&query).await?;
+
+println!("Retrieved {} records", response.record_count);
+
+// Process records
+for record in &response.records {
+    let key = record["ListingKey"].as_str().unwrap_or("");
+    let city = record["City"].as_str().unwrap_or("");
+    println!("{}: {}", key, city);
+}
+
+// Continue with next link if more records available
+if let Some(next_link) = response.next_link {
+    let next_response = client.execute_next_link(&next_link).await?;
+    println!("Retrieved {} more records", next_response.record_count);
+}
+```
+
+**Fetching all records with pagination:**
+```rust
+let mut query = ReplicationQueryBuilder::new("Property")
+    .top(2000)
+    .build()?;
+
+let mut response = client.execute_replication(&query).await?;
+let mut all_records = response.records;
+
+// Continue fetching while next link is available
+while let Some(next_link) = response.next_link {
+    response = client.execute_next_link(&next_link).await?;
+    all_records.extend(response.records);
+}
+
+println!("Total records fetched: {}", all_records.len());
 ```
 
 ## OData Response Structure

@@ -1,18 +1,23 @@
-# .gitignore
+# Rust
 /target/
-Cargo.lock  # For libraries, commit for binaries
+Cargo.lock
 **/*.rs.bk
+*.pdb
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
-
-# Environment
-.env
-.env.local
+*~
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local

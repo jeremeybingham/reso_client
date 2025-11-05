@@ -35,11 +35,13 @@
 pub mod client;
 pub mod error;
 pub mod queries;
+pub mod replication;
 
 // Re-export main types for convenience
 pub use client::{ClientConfig, ResoClient};
 pub use error::{ResoError, Result};
-pub use queries::{Query, QueryBuilder};
+pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
+pub use replication::ReplicationResponse;
 
 // Re-export serde_json for convenience
 pub use serde_json::Value as JsonValue;

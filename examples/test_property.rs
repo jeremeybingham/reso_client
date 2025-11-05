@@ -158,8 +158,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("❌ Network error: {}", msg);
             eprintln!("\nCheck your internet connection and API endpoint.");
         }
-        Err(ResoError::ODataError(msg)) => {
-            eprintln!("❌ API error: {}", msg);
+        Err(ResoError::ODataError {
+            message,
+            status_code,
+        }) => {
+            eprintln!("❌ API error ({}): {}", status_code, message);
             eprintln!("\nThe query may be invalid or the API may have returned an error.");
         }
         Err(ResoError::Parse(msg)) => {

@@ -2,7 +2,7 @@
 
 [package]
 name = "reso-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
 description = "Rust client library for RESO Web API (OData 4.0) servers"
