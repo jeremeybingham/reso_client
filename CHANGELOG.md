@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Examples demonstrate both successful queries and error handling patterns
 - Clear indication of server-specific requirements (e.g., `$apply`, `$expand`)
 
-## [0.1.0] - YYYY-MM-DD
+## [0.1.0] - 2025-10-19
 
 ### Added
 - Initial release of reso-client
