@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for status in &statuses {
         let query = QueryBuilder::new("Property")
-            .filter(&format!("StandardStatus eq '{}'", status))
+            .filter(format!("StandardStatus eq '{}'", status))
             .count()
             .build()?;
 

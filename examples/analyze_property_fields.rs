@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter(|s| {
             let rate = s.population_rate(total_records);
-            rate >= 40.0 && rate < 80.0
+            (40.0..80.0).contains(&rate)
         })
         .count();
     let rarely_used = sorted_stats

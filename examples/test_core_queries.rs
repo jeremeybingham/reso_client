@@ -642,7 +642,7 @@ async fn test_multiple_field_filter(client: &ResoClient) -> Result<(), Box<dyn s
                 println!("Testing with: {} {}", first_name, last_name);
 
                 let query = QueryBuilder::new("Member")
-                    .filter(&format!(
+                    .filter(format!(
                         "MemberFirstName eq '{}' and MemberLastName eq '{}'",
                         first_name, last_name
                     ))
