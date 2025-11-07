@@ -5,6 +5,11 @@
 //! This library provides a Rust interface for communicating with RESO Web API
 //! (OData 4.0) compliant servers.
 //!
+//! ## Stability
+//!
+//! This library is pre-1.0, meaning the API may change between minor versions.
+//! It follows semantic versioning, but breaking changes may occur in 0.x releases.
+//!
 //! # Quick Start
 //!
 //! ```no_run
