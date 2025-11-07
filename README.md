@@ -1,5 +1,11 @@
 # RESO Client Library
 
+[![CI](https://github.com/jeremeybingham/reso_client/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso_client/actions)
+[![codecov](https://codecov.io/gh/jeremeybingham/reso_client/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso_client)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Crates.io](https://img.shields.io/crates/v/reso-client.svg)](https://crates.io/crates/reso-client)
+[![Documentation](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
+
 A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) servers using OData 4.0.
 
 ## Features
