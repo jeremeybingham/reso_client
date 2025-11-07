@@ -1,3 +1,8 @@
+[![Crates.io](https://img.shields.io/crates/v/reso-client.svg)](https://crates.io/crates/reso-client)
+[![Documentation](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/jeremeybingham/reso_client/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso_client/actions)
+
 # RESO Client Library
 
 A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) servers using OData 4.0.
@@ -320,7 +325,7 @@ let statuses = ["Active", "Pending", "Closed"];
 
 for status in statuses {
     let query = QueryBuilder::new("Property")
-        .filter(&format!("StandardStatus eq '{}'", status))
+        .filter(format!("StandardStatus eq '{}'", status))
         .count()
         .build()?;
 
