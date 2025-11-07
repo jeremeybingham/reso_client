@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Searching for members with first name: {}\n", search_name);
 
                         let query3 = QueryBuilder::new("Member")
-                            .filter(format!("MemberFirstName eq '{}'", search_name))
+                            .filter(&format!("MemberFirstName eq '{}'", search_name))
                             .select(&[
                                 "MemberKey",
                                 "MemberFirstName",
@@ -197,7 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Test 4: Count total members
-    println!("📝 Test 4: Count total members");
+    println!("📝 Test 4: Count total members - ⚠️ ($count will fail with 404 on actris_ref)");
     println!("{}", "=".repeat(70));
 
     let query4 = QueryBuilder::new("Member").count().build()?;
@@ -214,14 +214,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Test 5: Count by member status
-    println!("📝 Test 5: Count members by status");
+    println!("📝 Test 5: Count members by status - ⚠️ ($count will fail with 404 on actris_ref)");
     println!("{}", "=".repeat(70));
 
     let statuses = ["Active", "Inactive", "Suspended"];
 
     for status in &statuses {
         let query = QueryBuilder::new("Member")
-            .filter(format!("MemberStatus eq '{}'", status))
+            .filter(&format!("MemberStatus eq '{}'", status))
             .count()
             .build()?;
 
