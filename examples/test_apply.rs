@@ -237,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   let statuses = [\"Active\", \"Pending\", \"Closed\"];");
         println!("   for status in statuses {{");
         println!("       let query = QueryBuilder::new(\"Property\")");
-        println!("           .filter(&format!(\"StandardStatus eq '{{}}'\", status))");
+        println!("           .filter(format!(\"StandardStatus eq '{{}}'\", status))");
         println!("           .count()");
         println!("           .build()?;");
         println!("       let count = client.execute_count(&query).await?;");
