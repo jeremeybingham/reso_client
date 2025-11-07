@@ -4,7 +4,7 @@
 name = "reso-client"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.87.0"
 authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
 description = "Rust client library for RESO Web API (OData 4.0) servers"
 license = "MIT"
