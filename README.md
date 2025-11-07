@@ -7,12 +7,13 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 - 🔍 Fluent query builder for OData queries
 - 🔐 OAuth bearer token authentication
 - 📊 Support for filters, ordering, pagination, and field selection
-- 🔢 Count-only queries for efficient record counting
+- 🔢 Count-only queries for efficient record counting ⚠️
 - 🗂️ Optional dataset ID path support
 - 📖 Metadata retrieval
-- 🔄 Replication endpoint support for bulk data transfer (up to 2000 records/request)
+- 🔄 Replication endpoint support for bulk data transfer (up to 2000 records/request) ⚠️
 - ⚡ Async/await with tokio
 
+⚠️ *Some features not supported by the RESO Web API / `actris_ref` test server.*
 
 ## Installation via Github
 
@@ -100,8 +101,7 @@ cargo test --test queries_tests
   - `tests/queries_tests.rs` - Comprehensive query building and URL generation tests
 
 ### Examples
-
-The library includes a comprehensive suite of examples in the `examples` directory demonstrating all major functionality. Assuming you've set your `.env` variables correctly, you can run any example with:
+All examples include detailed comments, error handling, and work with the RESO Web API reference server / `actris_ref` unless otherwise noted. The library includes a comprehensive suite of examples in the `examples` directory demonstrating all major functionality. Assuming you've set your `.env` variables correctly, you can run any example with:
 
 ```bash
 cargo run --example <example_name>
@@ -113,27 +113,28 @@ cargo run --example <example_name>
 - `test_connectivity` - Test basic API connectivity and authentication
 - `test_property` - Property resource queries with filtering and field selection
 - `test_member` - Query Member resource for agent/broker information
+- `test_metadata` - Fetch and parse OData metadata documents
+- `test_core_queries` - Tests the "Core Queries" specified in the [RESO Web API reference documentation](https://transport.reso.org/proposals/web-api-core.html#28-core-query-examples)
 
 **Query Features:**
 - `test_filters` - OData filter syntax (comparison, logical operators, string functions)
 - `test_select` - Field selection and projection to optimize response size
-- `test_count_only` - Efficient count-only queries using `/$count` endpoint
-- `test_pagination_nextlink` - Server-side pagination with `@odata.nextLink`
 
 **Analysis Examples:**
-- `analyze_property_fields` - Analyze field usage across 200 active listings to identify which fields are most populated; generates a detailed JSON report with recommended field sets (minimal, standard, comprehensive)
+- `analyze_property_fields` - Analyze field usage across 200 active listings to identify which fields are most populated; generates `property_field_analysis_report.json` with recommended field sets (minimal, standard, comprehensive)
 - `analyze_active_listings` - Statistical analysis of 200 active residential listings including price analysis, property type distribution, geographic distribution, bedroom/bathroom statistics, size metrics, and photo counts
 
-**Advanced Features:**
-- `test_replication` - Replication endpoint for bulk data transfer (up to 2000 records/request) (not supported by `actris_ref`)
-- `test_metadata` - Fetch and parse OData metadata documents
-- `test_core_queries` - Comprehensive collection of core RESO query patterns
 
-**Server-Specific (requires support):**
-- `test_apply` - OData aggregation with `$apply` parameter (not supported by `actris_ref`)
-- `test_expand` - Navigation property expansion (not supported by `actris_ref`)
+⚠️ **Server-Specific (currently untestested, requires server support):**
 
-All examples include detailed comments, error handling, and work with the RESO Web API reference server (`actris_ref`) unless otherwise noted.  
+The `$count`, `$apply`, and `$expand` features are not supported by the RESO Web API test server / `actris_ref`. The Replication endpoint is also not supported by default on `actris_ref`. Examples using these features will fail with `404` or `401` errors.
+
+- ⚠️ `test_replication` - Replication endpoint for bulk data transfer (up to 2000 records/request)
+- ⚠️ `test_count_only` - Efficient count-only queries using `/$count` endpoint 
+- ⚠️ `test_pagination_nextlink` - Server-side pagination with `@odata.nextLink`
+- ⚠️ `test_apply` - OData aggregation with `$apply` parameter
+- ⚠️ `test_expand` - Navigation property expansion with `$expand` parameter
+
 
 ## Quick Start
 
