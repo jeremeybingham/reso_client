@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-11-07
+
+### Added
+- Comprehensive documentation with examples to all public APIs
+- Implemented code coverage tracking Codecov.io
+
+### Documentation
+- Updated README.md with badges to prep for crates.io release
+
+
 ## [0.2.0] - 2025-11-05
 
 ### Added
