@@ -21,13 +21,12 @@ A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) ser
 
 ⚠️ *Some features not supported by the RESO Web API / `actris_ref` test server.*
 
-## Installation via Github
+## Installation
 
-Pending Cargo crate publication, use the Github repository to install - add to your `Cargo.toml`:
+add to your `Cargo.toml`:
 ```toml
 [dependencies]
-# Import the RESO client from GitHub
-reso-client = { git = "https://github.com/jeremeybingham/reso_client" }
+reso-client = "0.2.1"
 ```
 
 ## Configuration
