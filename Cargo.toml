@@ -4,6 +4,7 @@
 name = "reso-client"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.70"
 authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
 description = "Rust client library for RESO Web API (OData 4.0) servers"
 license = "MIT"
@@ -11,8 +12,14 @@ repository = "https://github.com/jeremeybingham/reso_client"
 homepage = "https://github.com/jeremeybingham/reso_client"
 documentation = "https://docs.rs/reso-client"
 readme = "README.md"
-keywords = ["reso", "odata", "real-estate", "mls"]
+keywords = ["reso", "odata", "real-estate", "mls", "api"]
 categories = ["api-bindings", "web-programming::http-client"]
+exclude = [
+    ".github/",
+    ".gitignore",
+    "*.json",
+    ".env*",
+]
 
 [lib]
 name = "reso_client"
