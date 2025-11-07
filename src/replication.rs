@@ -47,6 +47,20 @@ pub struct ReplicationResponse {
 
 impl ReplicationResponse {
     /// Create a new replication response
+    ///
+    /// This is typically called internally by the client. You usually don't
+    /// need to construct this yourself.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::ReplicationResponse;
+    /// # use serde_json::json;
+    /// let records = vec![json!({"ListingKey": "12345"})];
+    /// let response = ReplicationResponse::new(records, None);
+    /// assert_eq!(response.record_count, 1);
+    /// assert!(!response.has_more());
+    /// ```
     pub fn new(records: Vec<JsonValue>, next_link: Option<String>) -> Self {
         let record_count = records.len();
         Self {
@@ -57,11 +71,57 @@ impl ReplicationResponse {
     }
 
     /// Check if there are more records available
+    ///
+    /// Returns `true` if there's a next link available for pagination.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, ReplicationQueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = ReplicationQueryBuilder::new("Property")
+    ///     .top(2000)
+    ///     .build()?;
+    ///
+    /// let response = client.execute_replication(&query).await?;
+    ///
+    /// if response.has_more() {
+    ///     println!("More records available!");
+    ///     let next_response = client.execute_next_link(
+    ///         response.next_link().unwrap()
+    ///     ).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn has_more(&self) -> bool {
         self.next_link.is_some()
     }
 
     /// Get the next link URL if available
+    ///
+    /// Returns `Some(&str)` with the URL for the next page, or `None` if
+    /// there are no more records.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, ReplicationQueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = ReplicationQueryBuilder::new("Property").build()?;
+    /// let mut response = client.execute_replication(&query).await?;
+    /// let mut all_records = response.records.clone();
+    ///
+    /// // Fetch all pages
+    /// while let Some(next_url) = response.next_link() {
+    ///     response = client.execute_next_link(next_url).await?;
+    ///     all_records.extend(response.records.clone());
+    /// }
+    ///
+    /// println!("Total records: {}", all_records.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn next_link(&self) -> Option<&str> {
         self.next_link.as_deref()
     }

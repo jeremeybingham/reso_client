@@ -5,6 +5,17 @@
 use crate::error::{ResoError, Result};
 
 /// A structured RESO/OData query
+///
+/// Represents a complete OData query with all its parameters.
+/// Use [`QueryBuilder`] to construct queries with a fluent API.
+///
+/// # Examples
+///
+/// ```
+/// # use reso_client::Query;
+/// // Direct construction (prefer QueryBuilder for fluent API)
+/// let query = Query::new("Property");
+/// ```
 #[derive(Debug, Clone)]
 pub struct Query {
     resource: String,
@@ -39,6 +50,16 @@ pub struct ReplicationQuery {
 
 impl Query {
     /// Create a new query for a resource
+    ///
+    /// Creates a basic query with no filters or parameters.
+    /// Use [`QueryBuilder`] for a more convenient fluent API.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::Query;
+    /// let query = Query::new("Property");
+    /// ```
     pub fn new(resource: impl Into<String>) -> Self {
         Self {
             resource: resource.into(),
@@ -58,6 +79,20 @@ impl Query {
     /// Convert to OData query string
     ///
     /// Generates the URL path and query parameters according to OData v4.0 specification.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::QueryBuilder;
+    /// let query = QueryBuilder::new("Property")
+    ///     .filter("City eq 'Austin'")
+    ///     .top(10)
+    ///     .build()?;
+    ///
+    /// let url = query.to_odata_string();
+    /// // Returns: "Property?$filter=City%20eq%20%27Austin%27&$top=10"
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn to_odata_string(&self) -> String {
         let mut parts = vec![self.resource.clone()];
 
@@ -152,6 +187,16 @@ impl Query {
 
 impl ReplicationQuery {
     /// Create a new replication query for a resource
+    ///
+    /// Creates a basic replication query. Use [`ReplicationQueryBuilder`]
+    /// for a more convenient fluent API.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::queries::ReplicationQuery;
+    /// let query = ReplicationQuery::new("Property");
+    /// ```
     pub fn new(resource: impl Into<String>) -> Self {
         Self {
             resource: resource.into(),
@@ -164,6 +209,20 @@ impl ReplicationQuery {
     /// Convert to OData replication query string
     ///
     /// Generates URL path: `{resource}/replication?{params}`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::ReplicationQueryBuilder;
+    /// let query = ReplicationQueryBuilder::new("Property")
+    ///     .filter("StandardStatus eq 'Active'")
+    ///     .top(2000)
+    ///     .build()?;
+    ///
+    /// let url = query.to_odata_string();
+    /// // Returns: "Property/replication?$filter=StandardStatus%20eq%20%27Active%27&$top=2000"
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn to_odata_string(&self) -> String {
         let mut parts = vec![self.resource.clone(), "/replication".to_string()];
 
@@ -193,6 +252,15 @@ impl ReplicationQuery {
     }
 
     /// Get the resource name
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::ReplicationQueryBuilder;
+    /// let query = ReplicationQueryBuilder::new("Property").build()?;
+    /// assert_eq!(query.resource(), "Property");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn resource(&self) -> &str {
         &self.resource
     }

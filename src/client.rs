@@ -7,6 +7,36 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// Configuration for RESO client
+///
+/// Holds all configuration needed to connect to a RESO Web API server,
+/// including the base URL, authentication token, optional dataset ID,
+/// and HTTP timeout settings.
+///
+/// # Examples
+///
+/// ```
+/// # use reso_client::ClientConfig;
+/// # use std::time::Duration;
+/// // Create basic configuration
+/// let config = ClientConfig::new(
+///     "https://api.mls.com/odata",
+///     "your-token"
+/// );
+///
+/// // With dataset ID
+/// let config = ClientConfig::new(
+///     "https://api.mls.com/odata",
+///     "your-token"
+/// )
+/// .with_dataset_id("actris_ref");
+///
+/// // With custom timeout
+/// let config = ClientConfig::new(
+///     "https://api.mls.com/odata",
+///     "your-token"
+/// )
+/// .with_timeout(Duration::from_secs(60));
+/// ```
 #[derive(Clone)]
 pub struct ClientConfig {
     /// Base URL of the RESO Web API server
@@ -41,6 +71,15 @@ impl ClientConfig {
     /// - `RESO_TOKEN` - OAuth bearer token
     /// - `RESO_DATASET_ID` (optional) - Dataset ID inserted in URL path
     /// - `RESO_TIMEOUT` (optional) - Timeout in seconds (default: 30)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::ClientConfig;
+    /// // Reads RESO_BASE_URL, RESO_TOKEN, and optional variables from environment
+    /// let config = ClientConfig::from_env()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn from_env() -> Result<Self> {
         let base_url = std::env::var("RESO_BASE_URL")
             .map_err(|_| ResoError::Config("RESO_BASE_URL not set".into()))?;
@@ -64,6 +103,16 @@ impl ClientConfig {
     }
 
     /// Create configuration manually
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::ClientConfig;
+    /// let config = ClientConfig::new(
+    ///     "https://api.mls.com/odata",
+    ///     "your-bearer-token"
+    /// );
+    /// ```
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -74,12 +123,32 @@ impl ClientConfig {
     }
 
     /// Set dataset ID
+    ///
+    /// Some RESO servers require a dataset identifier in the URL path.
+    /// When set, URLs will be formatted as: `{base_url}/{dataset_id}/{resource}`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::ClientConfig;
+    /// let config = ClientConfig::new("https://api.mls.com/odata", "token")
+    ///     .with_dataset_id("actris_ref");
+    /// ```
     pub fn with_dataset_id(mut self, dataset_id: impl Into<String>) -> Self {
         self.dataset_id = Some(dataset_id.into());
         self
     }
 
     /// Set custom timeout
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::ClientConfig;
+    /// # use std::time::Duration;
+    /// let config = ClientConfig::new("https://api.mls.com/odata", "token")
+    ///     .with_timeout(Duration::from_secs(60));
+    /// ```
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -141,6 +210,16 @@ impl ResoClient {
     }
 
     /// Get the base URL
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, ClientConfig};
+    /// let config = ClientConfig::new("https://api.mls.com/odata", "token");
+    /// let client = ResoClient::with_config(config)?;
+    /// assert_eq!(client.base_url(), "https://api.mls.com/odata");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn base_url(&self) -> &str {
         &self.config.base_url
     }
@@ -206,6 +285,37 @@ impl ResoClient {
     }
 
     /// Execute a query and return raw JSON
+    ///
+    /// Executes a standard OData query and returns the full JSON response.
+    /// The response follows the OData format with records in a `value` array.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, QueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = QueryBuilder::new("Property")
+    ///     .filter("City eq 'Austin'")
+    ///     .select(&["ListingKey", "City", "ListPrice"])
+    ///     .top(10)
+    ///     .build()?;
+    ///
+    /// let results = client.execute(&query).await?;
+    ///
+    /// // Access records from OData response
+    /// if let Some(records) = results["value"].as_array() {
+    ///     for record in records {
+    ///         println!("{}", record["ListingKey"]);
+    ///     }
+    /// }
+    ///
+    /// // Access count if requested with with_count()
+    /// if let Some(count) = results["@odata.count"].as_u64() {
+    ///     println!("Total: {}", count);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn execute(&self, query: &crate::queries::Query) -> Result<serde_json::Value> {
         use tracing::{debug, info};
 
@@ -268,6 +378,26 @@ impl ResoClient {
     }
 
     /// Execute a count-only query and return the count as an integer
+    ///
+    /// Uses the OData `/$count` endpoint to efficiently get just the count
+    /// without fetching any records. More efficient than using `with_count()`
+    /// when you only need the count.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, QueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = QueryBuilder::new("Property")
+    ///     .filter("City eq 'Austin'")
+    ///     .count()
+    ///     .build()?;
+    ///
+    /// let count = client.execute_count(&query).await?;
+    /// println!("Total properties in Austin: {}", count);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn execute_count(&self, query: &crate::queries::Query) -> Result<u64> {
         use tracing::info;
 
@@ -288,6 +418,22 @@ impl ResoClient {
     }
 
     /// Fetch $metadata XML
+    ///
+    /// Retrieves the OData metadata document which describes the schema,
+    /// entity types, properties, and relationships available in the API.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::ResoClient;
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let metadata = client.fetch_metadata().await?;
+    ///
+    /// // Parse or save the XML metadata
+    /// println!("Metadata length: {} bytes", metadata.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn fetch_metadata(&self) -> Result<String> {
         use tracing::info;
 

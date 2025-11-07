@@ -1,10 +1,55 @@
 // src/error.rs
 
 //! Error types for the RESO client library
+//!
+//! This module defines all error types that can occur when using the RESO client.
+//! Errors are categorized by their source and include detailed context.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! # use reso_client::{ResoClient, QueryBuilder, ResoError};
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = ResoClient::from_env()?;
+//! let query = QueryBuilder::new("Property")
+//!     .filter("City eq 'Austin'")
+//!     .build()?;
+//!
+//! match client.execute(&query).await {
+//!     Ok(results) => {
+//!         println!("Success!");
+//!     }
+//!     Err(ResoError::Unauthorized { message, .. }) => {
+//!         eprintln!("Auth failed: {}", message);
+//!     }
+//!     Err(ResoError::NotFound { message, .. }) => {
+//!         eprintln!("Resource not found: {}", message);
+//!     }
+//!     Err(ResoError::Network(msg)) => {
+//!         eprintln!("Network error: {}", msg);
+//!     }
+//!     Err(e) => {
+//!         eprintln!("Other error: {}", e);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use thiserror::Error;
 
-/// Result type alias
+/// Result type alias for RESO client operations
+///
+/// # Examples
+///
+/// ```
+/// # use reso_client::Result;
+/// fn parse_value(s: &str) -> Result<i32> {
+///     s.parse().map_err(|_| {
+///         reso_client::ResoError::Parse("Invalid integer".to_string())
+///     })
+/// }
+/// ```
 pub type Result<T> = std::result::Result<T, ResoError>;
 
 /// OData error response format
@@ -31,6 +76,28 @@ pub struct ODataErrorDetail {
 }
 
 /// RESO client errors
+///
+/// All errors that can occur when using the RESO client library.
+/// Each variant includes contextual information to help diagnose issues.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use reso_client::{ResoClient, ResoError};
+/// # async fn example() {
+/// let result = ResoClient::from_env();
+/// match result {
+///     Err(ResoError::Config(msg)) => {
+///         eprintln!("Configuration error: {}", msg);
+///         eprintln!("Make sure RESO_BASE_URL and RESO_TOKEN are set");
+///     }
+///     Ok(client) => {
+///         println!("Client created successfully");
+///     }
+///     _ => {}
+/// }
+/// # }
+/// ```
 #[derive(Debug, Error)]
 pub enum ResoError {
     /// Configuration error
