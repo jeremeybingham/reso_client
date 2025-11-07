@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Searching for members with first name: {}\n", search_name);
 
                         let query3 = QueryBuilder::new("Member")
-                            .filter(&format!("MemberFirstName eq '{}'", search_name))
+                            .filter(format!("MemberFirstName eq '{}'", search_name))
                             .select(&[
                                 "MemberKey",
                                 "MemberFirstName",
@@ -221,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for status in &statuses {
         let query = QueryBuilder::new("Member")
-            .filter(&format!("MemberStatus eq '{}'", status))
+            .filter(format!("MemberStatus eq '{}'", status))
             .count()
             .build()?;
 
