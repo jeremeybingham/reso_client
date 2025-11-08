@@ -83,8 +83,8 @@ let client = ResoClient::with_config(config)?;
 ## Testing
 
 ### Test Coverage
-
-The library maintains comprehensive test coverage (~90% estimated) with **183 total tests**:
+[![codecov](https://codecov.io/gh/jeremeybingham/reso_client/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso_client)
+The library maintains comprehensive test coverage with **183 total tests**:
 
 - **74 unit tests** - Testing internal implementation details in `src/` modules:
   - 27 tests in `src/error.rs` - Error handling, HTTP status mapping, OData error parsing
