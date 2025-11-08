@@ -424,3 +424,70 @@ fn test_key_access_rejects_count_only() {
         assert!(matches!(e, ResoError::InvalidQuery(_)));
     }
 }
+
+// Count-only query tests
+
+#[test]
+fn test_count_only_query_basic() {
+    let query = QueryBuilder::new("Property").count().build().unwrap();
+
+    assert_eq!(query.to_odata_string(), "Property/$count");
+}
+
+#[test]
+fn test_count_only_query_with_filter() {
+    let query = QueryBuilder::new("Property")
+        .filter("City eq 'Austin'")
+        .count()
+        .build()
+        .unwrap();
+
+    let url = query.to_odata_string();
+    assert!(url.starts_with("Property/$count?"));
+    assert!(url.contains("$filter=City%20eq%20%27Austin%27"));
+}
+
+// Apply parameter tests
+
+#[test]
+fn test_query_with_apply() {
+    let query = QueryBuilder::new("Property")
+        .apply("groupby((City), aggregate($count as Count))")
+        .build()
+        .unwrap();
+
+    let url = query.to_odata_string();
+    assert!(url.contains("$apply=groupby"));
+}
+
+#[test]
+fn test_query_with_apply_and_filter() {
+    let query = QueryBuilder::new("Property")
+        .filter("StandardStatus eq 'Active'")
+        .apply("groupby((City))")
+        .build()
+        .unwrap();
+
+    let url = query.to_odata_string();
+    assert!(url.contains("$apply=groupby"));
+    assert!(url.contains("$filter="));
+}
+
+// ReplicationQuery getter tests
+
+#[test]
+fn test_replication_query_resource_getter() {
+    let query = ReplicationQueryBuilder::new("Property")
+        .filter("City eq 'Austin'")
+        .build()
+        .unwrap();
+
+    assert_eq!(query.resource(), "Property");
+}
+
+#[test]
+fn test_replication_query_resource_getter_different_resource() {
+    let query = ReplicationQueryBuilder::new("Member").build().unwrap();
+
+    assert_eq!(query.resource(), "Member");
+}
