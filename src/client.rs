@@ -593,3 +593,380 @@ impl ResoClient {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to clean up env vars after tests
+    fn cleanup_env_vars() {
+        std::env::remove_var("RESO_BASE_URL");
+        std::env::remove_var("RESO_TOKEN");
+        std::env::remove_var("RESO_DATASET_ID");
+        std::env::remove_var("RESO_TIMEOUT");
+    }
+
+    #[test]
+    fn test_config_new_basic() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token");
+
+        assert_eq!(config.base_url, "https://api.example.com/odata");
+        assert_eq!(config.token, "test-token");
+        assert_eq!(config.dataset_id, None);
+        assert_eq!(config.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_config_new_trailing_slash_removed() {
+        let config = ClientConfig::new("https://api.example.com/odata/", "test-token");
+
+        assert_eq!(config.base_url, "https://api.example.com/odata");
+        assert!(!config.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn test_config_new_multiple_trailing_slashes() {
+        let config = ClientConfig::new("https://api.example.com/odata///", "test-token");
+
+        // Only the trailing slashes are removed
+        assert_eq!(config.base_url, "https://api.example.com/odata");
+    }
+
+    #[test]
+    fn test_config_with_dataset_id() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token")
+            .with_dataset_id("actris_ref");
+
+        assert_eq!(config.dataset_id, Some("actris_ref".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_timeout() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token")
+            .with_timeout(Duration::from_secs(60));
+
+        assert_eq!(config.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_config_builder_chaining() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token")
+            .with_dataset_id("my_dataset")
+            .with_timeout(Duration::from_secs(120));
+
+        assert_eq!(config.dataset_id, Some("my_dataset".to_string()));
+        assert_eq!(config.timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_config_from_env_success() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        assert_eq!(config.base_url, "https://api.example.com/odata");
+        assert_eq!(config.token, "my-test-token");
+        assert_eq!(config.dataset_id, None);
+        assert_eq!(config.timeout, Duration::from_secs(30));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_from_env_with_dataset_id() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+        std::env::set_var("RESO_DATASET_ID", "actris_ref");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        assert_eq!(config.dataset_id, Some("actris_ref".to_string()));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_from_env_with_custom_timeout() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+        std::env::set_var("RESO_TIMEOUT", "120");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        assert_eq!(config.timeout, Duration::from_secs(120));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_from_env_invalid_timeout_uses_default() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+        std::env::set_var("RESO_TIMEOUT", "invalid");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        // Invalid timeout should fall back to default (30)
+        assert_eq!(config.timeout, Duration::from_secs(30));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_from_env_missing_base_url() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+
+        let result = ClientConfig::from_env();
+
+        assert!(result.is_err());
+        match result {
+            Err(ResoError::Config(msg)) => {
+                assert!(msg.contains("RESO_BASE_URL"));
+            }
+            _ => panic!("Expected Config error"),
+        }
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_from_env_missing_token() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+
+        let result = ClientConfig::from_env();
+
+        assert!(result.is_err());
+        match result {
+            Err(ResoError::Config(msg)) => {
+                assert!(msg.contains("RESO_TOKEN"));
+            }
+            _ => panic!("Expected Config error"),
+        }
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_from_env_trailing_slash_removed() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata/");
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        assert_eq!(config.base_url, "https://api.example.com/odata");
+        assert!(!config.base_url.ends_with('/'));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_debug_redacts_token() {
+        let config = ClientConfig::new("https://api.example.com/odata", "super-secret-token");
+
+        let debug_str = format!("{:?}", config);
+
+        assert!(debug_str.contains("ClientConfig"));
+        assert!(debug_str.contains("https://api.example.com/odata"));
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("super-secret-token"));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token")
+            .with_dataset_id("test_dataset")
+            .with_timeout(Duration::from_secs(45));
+
+        let cloned = config.clone();
+
+        assert_eq!(cloned.base_url, config.base_url);
+        assert_eq!(cloned.token, config.token);
+        assert_eq!(cloned.dataset_id, config.dataset_id);
+        assert_eq!(cloned.timeout, config.timeout);
+    }
+
+    #[test]
+    fn test_client_base_url() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token");
+        let client = ResoClient::with_config(config).unwrap();
+
+        assert_eq!(client.base_url(), "https://api.example.com/odata");
+    }
+
+    #[test]
+    fn test_client_build_url_without_dataset_id() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let url = client.build_url("Property");
+        assert_eq!(url, "https://api.example.com/odata/Property");
+
+        let url_with_query = client.build_url("Property?$top=10");
+        assert_eq!(url_with_query, "https://api.example.com/odata/Property?$top=10");
+    }
+
+    #[test]
+    fn test_client_build_url_with_dataset_id() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token")
+            .with_dataset_id("actris_ref");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let url = client.build_url("Property");
+        assert_eq!(url, "https://api.example.com/odata/actris_ref/Property");
+
+        let url_with_query = client.build_url("Property?$top=10");
+        assert_eq!(
+            url_with_query,
+            "https://api.example.com/odata/actris_ref/Property?$top=10"
+        );
+    }
+
+    #[test]
+    fn test_client_build_url_complex_path() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let url = client.build_url("Property/$count");
+        assert_eq!(url, "https://api.example.com/odata/Property/$count");
+
+        let url_metadata = client.build_url("$metadata");
+        assert_eq!(url_metadata, "https://api.example.com/odata/$metadata");
+    }
+
+    #[test]
+    fn test_client_build_url_with_dataset_id_complex() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token")
+            .with_dataset_id("my_dataset");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let url = client.build_url("Property/replication");
+        assert_eq!(
+            url,
+            "https://api.example.com/odata/my_dataset/Property/replication"
+        );
+
+        let url_with_query = client.build_url("Property?$filter=City%20eq%20%27Austin%27");
+        assert_eq!(
+            url_with_query,
+            "https://api.example.com/odata/my_dataset/Property?$filter=City%20eq%20%27Austin%27"
+        );
+    }
+
+    #[test]
+    fn test_client_with_config_success() {
+        let config = ClientConfig::new("https://api.example.com/odata", "test-token");
+        let result = ResoClient::with_config(config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_client_from_env_success() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_TOKEN", "test-token");
+
+        let result = ResoClient::from_env();
+
+        assert!(result.is_ok());
+        let client = result.unwrap();
+        assert_eq!(client.base_url(), "https://api.example.com/odata");
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_client_from_env_missing_vars() {
+        cleanup_env_vars();
+
+        let result = ResoClient::from_env();
+
+        assert!(result.is_err());
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_config_timeout_values() {
+        let config1 = ClientConfig::new("https://api.example.com/odata", "token")
+            .with_timeout(Duration::from_secs(1));
+        assert_eq!(config1.timeout, Duration::from_secs(1));
+
+        let config2 = ClientConfig::new("https://api.example.com/odata", "token")
+            .with_timeout(Duration::from_secs(300));
+        assert_eq!(config2.timeout, Duration::from_secs(300));
+
+        let config3 = ClientConfig::new("https://api.example.com/odata", "token")
+            .with_timeout(Duration::from_millis(500));
+        assert_eq!(config3.timeout, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_config_empty_dataset_id() {
+        let config = ClientConfig::new("https://api.example.com/odata", "token")
+            .with_dataset_id("");
+
+        assert_eq!(config.dataset_id, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_config_special_characters_in_dataset_id() {
+        let config = ClientConfig::new("https://api.example.com/odata", "token")
+            .with_dataset_id("dataset-with-dashes_and_underscores");
+
+        assert_eq!(
+            config.dataset_id,
+            Some("dataset-with-dashes_and_underscores".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_url_empty_path() {
+        let config = ClientConfig::new("https://api.example.com/odata", "token");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let url = client.build_url("");
+        assert_eq!(url, "https://api.example.com/odata/");
+    }
+
+    #[test]
+    fn test_build_url_with_dataset_empty_path() {
+        let config = ClientConfig::new("https://api.example.com/odata", "token")
+            .with_dataset_id("my_dataset");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let url = client.build_url("");
+        assert_eq!(url, "https://api.example.com/odata/my_dataset/");
+    }
+
+    #[test]
+    fn test_config_from_env_timeout_zero() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_TOKEN", "token");
+        std::env::set_var("RESO_TIMEOUT", "0");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        assert_eq!(config.timeout, Duration::from_secs(0));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    fn test_base_url_no_trailing_slash() {
+        let config = ClientConfig::new("https://api.example.com/odata", "token");
+        let client = ResoClient::with_config(config).unwrap();
+
+        let base = client.base_url();
+        assert!(!base.ends_with('/'));
+    }
+}
