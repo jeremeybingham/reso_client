@@ -1,0 +1,103 @@
+# RESO Web API Rust Client Library
+
+> A Rust client library for RESO Web API servers using OData 4.0. Provides type-safe query building, OAuth bearer token authentication, and comprehensive support for real estate MLS data access including standard queries, replication, filtering, pagination, and field selection.
+
+This library enables developers to interact with Real Estate Standards Organization (RESO) Web API servers, which provide standardized access to Multiple Listing Service (MLS) data through OData 4.0 REST APIs. It offers a fluent query builder for constructing OData queries, automatic URL encoding, async/await support with tokio, and comprehensive error handling.
+
+## Core Documentation
+
+- [README.md](README.md): Quick start guide, installation instructions, basic usage examples, and feature overview
+- [USAGE.md](USAGE.md): Complete API reference with detailed examples for all features including query building, filtering, pagination, replication, error handling, and troubleshooting
+- [CHANGELOG.md](CHANGELOG.md): Version history and release notes
+
+## Key Concepts
+
+**RESO (Real Estate Standards Organization)**: Creates data standards for the real estate industry. The RESO Web API is a standardized REST API specification built on OData 4.0 for accessing MLS data.
+
+**OData 4.0**: Open standard protocol for building and consuming RESTful APIs. The library handles OData query syntax including $filter, $select, $orderby, $top, $skip, and $count.
+
+**Resources**: Entities like Property, Member (agents), Office, Media, and OpenHouse that can be queried through the API.
+
+**Authentication**: OAuth bearer token authentication required for all API requests.
+
+## Getting Started
+
+**Installation**: Add to Cargo.toml: `reso-client = "0.2.1"`
+
+**Configuration**: Set environment variables RESO_BASE_URL and RESO_TOKEN (optionally RESO_DATASET_ID and RESO_TIMEOUT)
+
+**Basic Usage**:
+```rust
+let client = ResoClient::from_env()?;
+let query = QueryBuilder::new("Property")
+    .filter("City eq 'Austin' and ListPrice gt 500000")
+    .select(&["ListingKey", "City", "ListPrice"])
+    .top(10)
+    .build()?;
+let results = client.execute(&query).await?;
+```
+
+## Examples
+
+The library includes comprehensive examples in the `examples/` directory:
+
+- Basic: `test_connectivity`, `test_property`, `test_member`
+- Query Features: `test_filters`, `test_select`
+- Analysis: `analyze_property_fields`, `analyze_active_listings`
+- Advanced: `test_replication`, `test_metadata`, `test_core_queries`
+
+Run examples with: `cargo run --example <name>`
+
+## API Reference Summary
+
+**Client Types**:
+- `ResoClient`: HTTP client for RESO API
+- `ClientConfig`: Configuration builder
+- `QueryBuilder`: OData query builder for standard queries
+- `ReplicationQueryBuilder`: Builder for bulk data transfer (up to 2000 records/request)
+
+**Query Methods**:
+- `filter()`: Add OData filter expression
+- `select()`: Choose specific fields
+- `order_by()`: Sort results
+- `top()`: Limit results
+- `skip()`: Skip results for pagination
+- `with_count()`: Include total count
+- `count()`: Count-only query via /$count endpoint
+
+**Execution Methods**:
+- `execute()`: Execute standard query
+- `execute_by_key()`: Direct key access query
+- `execute_count()`: Execute count-only query
+- `execute_replication()`: Execute replication query for bulk data
+- `fetch_metadata()`: Fetch OData metadata XML
+
+## Common Patterns
+
+**Filter Syntax**: `"City eq 'Austin'"`, `"ListPrice gt 500000"`, `"City eq 'Austin' and ListPrice gt 500000"`
+
+**Pagination**: Use `top()` and `skip()` for client-side pagination, or use replication queries with next links for bulk data
+
+**Error Handling**: Comprehensive error types including Config, Network, Unauthorized, Forbidden, NotFound, RateLimited, ServerError, ODataError, Parse, and InvalidQuery
+
+**Replication**: For bulk data transfer (>10,000 records), use ReplicationQueryBuilder with up to 2000 records per request and header-based pagination
+
+## Important Notes
+
+- Some features require specific server support: $expand (navigation properties), $apply (aggregation), and replication endpoint
+- The RESO Web API reference server (actris_ref) has limited feature support
+- Always use $select to reduce payload size and improve performance
+- Bearer tokens are automatically redacted in debug output for security
+- The library is async/await with tokio and supports concurrent requests
+- ResoClient is Send + Sync and can be shared across threads via Arc
+
+## Testing
+
+The library has comprehensive test coverage with 183 total tests (74 unit tests, 58 integration tests, 51 doc tests). Run tests with `cargo test`.
+
+## Resources
+
+- Repository: https://github.com/jeremeybingham/reso_client
+- RESO Web API: https://www.reso.org/reso-web-api/
+- OData 4.0: https://www.odata.org/documentation/
+- RESO Data Dictionary: https://www.reso.org/data-dictionary/
