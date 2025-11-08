@@ -597,6 +597,7 @@ impl ResoClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Helper to clean up env vars after tests
     fn cleanup_env_vars() {
@@ -659,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_success() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
@@ -675,6 +677,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_with_dataset_id() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
@@ -689,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_with_custom_timeout() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
@@ -703,6 +707,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_invalid_timeout_uses_default() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
@@ -718,6 +723,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_missing_base_url() {
         cleanup_env_vars();
         std::env::set_var("RESO_TOKEN", "my-test-token");
@@ -736,6 +742,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_missing_token() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
@@ -754,6 +761,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_trailing_slash_removed() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata/");
@@ -869,6 +877,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_client_from_env_success() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
@@ -884,6 +893,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_client_from_env_missing_vars() {
         cleanup_env_vars();
 
@@ -948,6 +958,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env_timeout_zero() {
         cleanup_env_vars();
         std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
