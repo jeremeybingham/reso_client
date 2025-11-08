@@ -82,12 +82,23 @@ let client = ResoClient::with_config(config)?;
 
 ## Testing
 
+### Test Coverage
+
+The library maintains comprehensive test coverage (~90% estimated) with **183 total tests**:
+
+- **74 unit tests** - Testing internal implementation details in `src/` modules:
+  - 27 tests in `src/error.rs` - Error handling, HTTP status mapping, OData error parsing
+  - 17 tests in `src/replication.rs` - Replication response handling and pagination
+  - 30 tests in `src/client.rs` - Client configuration, environment variables, URL building
+- **58 integration tests** - Testing public API in `tests/` directory:
+  - 36 tests in `tests/queries_tests.rs` - Query building and URL generation
+  - 22 tests in `tests/client_http_tests.rs` - HTTP operations with mocked servers
+- **51 doc tests** - Code examples in documentation comments
+
 ### Running Tests
 
-The library includes comprehensive test coverage with both unit and integration tests:
-
 ```bash
-# Run all tests (unit + integration)
+# Run all tests (unit + integration + doc tests)
 cargo test
 
 # Run only unit tests (in src/ modules)
@@ -98,12 +109,17 @@ cargo test --test '*'
 
 # Run specific test file
 cargo test --test queries_tests
+
+# Run tests for a specific module
+cargo test --lib error
+cargo test --lib client
 ```
 
 **Test Organization:**
 - **Unit tests**: Internal tests for private functions and implementation details
-- **Integration tests**: Public API tests in `tests/` directory
+- **Integration tests**: Public API tests in `tests/` directory using HTTP mocking
   - `tests/queries_tests.rs` - Comprehensive query building and URL generation tests
+  - `tests/client_http_tests.rs` - HTTP client operations with wiremock server mocking
 
 ### Examples
 All examples include detailed comments, error handling, and work with the RESO Web API reference server / `actris_ref` unless otherwise noted. The library includes a comprehensive suite of examples in the `examples` directory demonstrating all major functionality. Assuming you've set your `.env` variables correctly, you can run any example with:

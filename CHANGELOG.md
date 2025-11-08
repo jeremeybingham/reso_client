@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Comprehensive test coverage improvements (44% → ~90% estimated):
+  - **27 unit tests** for error module (`src/error.rs`) covering error body parsing, HTTP status mapping, Display traits, and OData error deserialization
+  - **17 unit tests** for replication module (`src/replication.rs`) covering ReplicationResponse construction, helper methods, and edge cases
+  - **30 unit tests** for client module (`src/client.rs`) covering ClientConfig construction, environment variable handling, and URL building logic
+  - **22 HTTP integration tests** (`tests/client_http_tests.rs`) using wiremock for testing HTTP operations without requiring live API servers
+- Test infrastructure improvements:
+  - Added `wiremock` dependency for HTTP mocking in integration tests
+  - Added `serial_test` dependency to prevent race conditions in environment variable tests
+  - Fixed test isolation issues by marking environment-dependent tests with `#[serial]` attribute
+- Test suite now includes **183 total tests**: 74 library unit tests, 22 HTTP integration tests, 36 query integration tests, and 51 doc tests
+
+### Changed
+- Updated test documentation to clarify test count and organization
+
 ## [0.2.1] - 2025-11-07
 
 ### Added
