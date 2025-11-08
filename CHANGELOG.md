@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `serial_test` dependency to prevent race conditions in environment variable tests
   - Fixed test isolation issues by marking environment-dependent tests with `#[serial]` attribute
 - Test suite now includes **183 total tests**: 74 library unit tests, 22 HTTP integration tests, 36 query integration tests, and 51 doc tests
+- CLAUDE.md file for Claude LLM integration
+- llms.txt file for general llm integration
 
 ### Changed
 - Updated test documentation to clarify test count and organization
