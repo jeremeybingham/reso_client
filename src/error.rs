@@ -449,10 +449,7 @@ mod tests {
             message: "Database error".to_string(),
             status_code: 500,
         };
-        assert_eq!(
-            format!("{}", error),
-            "Server Error (500): Database error"
-        );
+        assert_eq!(format!("{}", error), "Server Error (500): Database error");
     }
 
     #[test]

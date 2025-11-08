@@ -219,10 +219,8 @@ mod tests {
     #[test]
     fn test_has_more_true() {
         let records = vec![json!({"key": "value"})];
-        let response = ReplicationResponse::new(
-            records,
-            Some("https://api.example.com/next".to_string()),
-        );
+        let response =
+            ReplicationResponse::new(records, Some("https://api.example.com/next".to_string()));
 
         assert!(response.has_more());
     }
@@ -281,10 +279,8 @@ mod tests {
     #[test]
     fn test_clone_trait() {
         let records = vec![json!({"key": "value"})];
-        let original = ReplicationResponse::new(
-            records,
-            Some("https://api.example.com/next".to_string()),
-        );
+        let original =
+            ReplicationResponse::new(records, Some("https://api.example.com/next".to_string()));
 
         let cloned = original.clone();
 
@@ -296,10 +292,8 @@ mod tests {
     #[test]
     fn test_debug_trait() {
         let records = vec![json!({"key": "value"})];
-        let response = ReplicationResponse::new(
-            records,
-            Some("https://api.example.com/next".to_string()),
-        );
+        let response =
+            ReplicationResponse::new(records, Some("https://api.example.com/next".to_string()));
 
         let debug_str = format!("{:?}", response);
         assert!(debug_str.contains("ReplicationResponse"));

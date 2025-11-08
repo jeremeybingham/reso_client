@@ -818,7 +818,10 @@ mod tests {
         assert_eq!(url, "https://api.example.com/odata/Property");
 
         let url_with_query = client.build_url("Property?$top=10");
-        assert_eq!(url_with_query, "https://api.example.com/odata/Property?$top=10");
+        assert_eq!(
+            url_with_query,
+            "https://api.example.com/odata/Property?$top=10"
+        );
     }
 
     #[test]
@@ -921,8 +924,8 @@ mod tests {
 
     #[test]
     fn test_config_empty_dataset_id() {
-        let config = ClientConfig::new("https://api.example.com/odata", "token")
-            .with_dataset_id("");
+        let config =
+            ClientConfig::new("https://api.example.com/odata", "token").with_dataset_id("");
 
         assert_eq!(config.dataset_id, Some("".to_string()));
     }

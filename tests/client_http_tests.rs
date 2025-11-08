@@ -156,7 +156,10 @@ async fn test_execute_replication_success() {
                         {"ListingKey": "2"}
                     ]
                 }))
-                .insert_header("next", "https://api.example.com/Property/replication?skip=2"),
+                .insert_header(
+                    "next",
+                    "https://api.example.com/Property/replication?skip=2",
+                ),
         )
         .mount(&mock_server)
         .await;
@@ -258,14 +261,12 @@ async fn test_execute_401_unauthorized() {
 
     Mock::given(method("GET"))
         .and(path("/Property"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "error": {
-                    "code": "Unauthorized",
-                    "message": "Invalid authentication token"
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": {
+                "code": "Unauthorized",
+                "message": "Invalid authentication token"
+            }
+        })))
         .mount(&mock_server)
         .await;
 
@@ -294,14 +295,12 @@ async fn test_execute_403_forbidden() {
 
     Mock::given(method("GET"))
         .and(path("/Property"))
-        .respond_with(
-            ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "error": {
-                    "code": "Forbidden",
-                    "message": "Access to this resource is forbidden"
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "error": {
+                "code": "Forbidden",
+                "message": "Access to this resource is forbidden"
+            }
+        })))
         .mount(&mock_server)
         .await;
 
@@ -359,14 +358,12 @@ async fn test_execute_429_rate_limited() {
 
     Mock::given(method("GET"))
         .and(path("/Property"))
-        .respond_with(
-            ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "error": {
-                    "code": "TooManyRequests",
-                    "message": "Rate limit exceeded"
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+            "error": {
+                "code": "TooManyRequests",
+                "message": "Rate limit exceeded"
+            }
+        })))
         .mount(&mock_server)
         .await;
 
@@ -453,14 +450,12 @@ async fn test_execute_400_bad_request() {
 
     Mock::given(method("GET"))
         .and(path("/Property"))
-        .respond_with(
-            ResponseTemplate::new(400).set_body_json(serde_json::json!({
-                "error": {
-                    "code": "InvalidFilter",
-                    "message": "The filter expression is invalid"
-                }
-            })),
-        )
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {
+                "code": "InvalidFilter",
+                "message": "The filter expression is invalid"
+            }
+        })))
         .mount(&mock_server)
         .await;
 
