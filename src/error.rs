@@ -199,3 +199,291 @@ impl ResoError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_error_body_valid_odata_error() {
+        let body = r#"{"error": {"code": "InvalidFilter", "message": "The filter expression is invalid"}}"#;
+        let result = ResoError::parse_error_body(body);
+        assert_eq!(
+            result,
+            "The filter expression is invalid (code: InvalidFilter)"
+        );
+    }
+
+    #[test]
+    fn test_parse_error_body_valid_odata_error_no_code() {
+        let body = r#"{"error": {"code": "", "message": "Something went wrong"}}"#;
+        let result = ResoError::parse_error_body(body);
+        assert_eq!(result, "Something went wrong");
+    }
+
+    #[test]
+    fn test_parse_error_body_malformed_json() {
+        let body = "This is not JSON at all";
+        let result = ResoError::parse_error_body(body);
+        assert_eq!(result, "This is not JSON at all");
+    }
+
+    #[test]
+    fn test_parse_error_body_wrong_json_structure() {
+        let body = r#"{"message": "Error without proper structure"}"#;
+        let result = ResoError::parse_error_body(body);
+        assert_eq!(result, r#"{"message": "Error without proper structure"}"#);
+    }
+
+    #[test]
+    fn test_parse_error_body_long_body_truncation() {
+        let long_body = "x".repeat(600);
+        let result = ResoError::parse_error_body(&long_body);
+        assert!(result.len() <= 515); // 500 + "... (truncated)"
+        assert!(result.ends_with("... (truncated)"));
+    }
+
+    #[test]
+    fn test_parse_error_body_exact_500_chars() {
+        let body = "x".repeat(500);
+        let result = ResoError::parse_error_body(&body);
+        assert_eq!(result, body);
+        assert!(!result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_from_status_401_unauthorized() {
+        let error = ResoError::from_status(401, "Authentication failed");
+        match error {
+            ResoError::Unauthorized {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Authentication failed");
+                assert_eq!(status_code, 401);
+            }
+            _ => panic!("Expected Unauthorized error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_403_forbidden() {
+        let error = ResoError::from_status(403, "Access denied");
+        match error {
+            ResoError::Forbidden {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Access denied");
+                assert_eq!(status_code, 403);
+            }
+            _ => panic!("Expected Forbidden error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_404_not_found() {
+        let error = ResoError::from_status(404, "Resource not found");
+        match error {
+            ResoError::NotFound {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Resource not found");
+                assert_eq!(status_code, 404);
+            }
+            _ => panic!("Expected NotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_429_rate_limited() {
+        let error = ResoError::from_status(429, "Too many requests");
+        match error {
+            ResoError::RateLimited {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Too many requests");
+                assert_eq!(status_code, 429);
+            }
+            _ => panic!("Expected RateLimited error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_500_server_error() {
+        let error = ResoError::from_status(500, "Internal server error");
+        match error {
+            ResoError::ServerError {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Internal server error");
+                assert_eq!(status_code, 500);
+            }
+            _ => panic!("Expected ServerError error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_503_server_error() {
+        let error = ResoError::from_status(503, "Service unavailable");
+        match error {
+            ResoError::ServerError {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Service unavailable");
+                assert_eq!(status_code, 503);
+            }
+            _ => panic!("Expected ServerError error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_400_odata_error() {
+        let error = ResoError::from_status(400, "Bad request");
+        match error {
+            ResoError::ODataError {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Bad request");
+                assert_eq!(status_code, 400);
+            }
+            _ => panic!("Expected ODataError error"),
+        }
+    }
+
+    #[test]
+    fn test_from_status_with_odata_json() {
+        let body = r#"{"error": {"code": "InvalidQuery", "message": "Query syntax error"}}"#;
+        let error = ResoError::from_status(400, body);
+        match error {
+            ResoError::ODataError {
+                message,
+                status_code,
+            } => {
+                assert_eq!(message, "Query syntax error (code: InvalidQuery)");
+                assert_eq!(status_code, 400);
+            }
+            _ => panic!("Expected ODataError error"),
+        }
+    }
+
+    #[test]
+    fn test_odata_error_response_deserialization() {
+        let json = r#"{"error": {"code": "TestCode", "message": "Test message"}}"#;
+        let result: std::result::Result<ODataErrorResponse, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.error.code, "TestCode");
+        assert_eq!(response.error.message, "Test message");
+    }
+
+    #[test]
+    fn test_odata_error_response_missing_code() {
+        let json = r#"{"error": {"message": "Test message"}}"#;
+        let result: std::result::Result<ODataErrorResponse, _> = serde_json::from_str(json);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.error.code, ""); // Default value
+        assert_eq!(response.error.message, "Test message");
+    }
+
+    #[test]
+    fn test_error_display_config() {
+        let error = ResoError::Config("Missing RESO_TOKEN".to_string());
+        assert_eq!(
+            format!("{}", error),
+            "Configuration error: Missing RESO_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_error_display_network() {
+        let error = ResoError::Network("Connection timeout".to_string());
+        assert_eq!(format!("{}", error), "Network error: Connection timeout");
+    }
+
+    #[test]
+    fn test_error_display_unauthorized() {
+        let error = ResoError::Unauthorized {
+            message: "Invalid token".to_string(),
+            status_code: 401,
+        };
+        assert_eq!(format!("{}", error), "Unauthorized (401): Invalid token");
+    }
+
+    #[test]
+    fn test_error_display_forbidden() {
+        let error = ResoError::Forbidden {
+            message: "No access".to_string(),
+            status_code: 403,
+        };
+        assert_eq!(format!("{}", error), "Forbidden (403): No access");
+    }
+
+    #[test]
+    fn test_error_display_not_found() {
+        let error = ResoError::NotFound {
+            message: "Property not found".to_string(),
+            status_code: 404,
+        };
+        assert_eq!(format!("{}", error), "Not Found (404): Property not found");
+    }
+
+    #[test]
+    fn test_error_display_rate_limited() {
+        let error = ResoError::RateLimited {
+            message: "Slow down".to_string(),
+            status_code: 429,
+        };
+        assert_eq!(format!("{}", error), "Rate Limited (429): Slow down");
+    }
+
+    #[test]
+    fn test_error_display_server_error() {
+        let error = ResoError::ServerError {
+            message: "Database error".to_string(),
+            status_code: 500,
+        };
+        assert_eq!(
+            format!("{}", error),
+            "Server Error (500): Database error"
+        );
+    }
+
+    #[test]
+    fn test_error_display_odata_error() {
+        let error = ResoError::ODataError {
+            message: "Invalid filter".to_string(),
+            status_code: 400,
+        };
+        assert_eq!(format!("{}", error), "OData error (400): Invalid filter");
+    }
+
+    #[test]
+    fn test_error_display_parse() {
+        let error = ResoError::Parse("JSON parse failed".to_string());
+        assert_eq!(format!("{}", error), "Parse error: JSON parse failed");
+    }
+
+    #[test]
+    fn test_error_display_invalid_query() {
+        let error = ResoError::InvalidQuery("Cannot use $filter with key access".to_string());
+        assert_eq!(
+            format!("{}", error),
+            "Invalid query: Cannot use $filter with key access"
+        );
+    }
+
+    #[test]
+    fn test_error_debug_trait() {
+        let error = ResoError::Config("test".to_string());
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("Config"));
+        assert!(debug_str.contains("test"));
+    }
+}
