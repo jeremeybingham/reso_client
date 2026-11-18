@@ -160,8 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Errors are `ResoError` values (`Config`, `Network`, `Unauthorized`, `RateLimited`, `ODataError` and others), so
 callers can tell a bad token from a server fault or a rate limit.
 
-[USAGE.md](USAGE.md) is the full reference: every query option, count-only queries, `$expand`, `$apply`, the current
-(Bridge) replication API, response structure, error handling and troubleshooting.
+The API reference is the rustdoc: `cargo doc --open`, or [docs.rs](https://docs.rs/reso-client). Agents and
+contributors start from [AGENTS.md](AGENTS.md).
 
 ## Examples
 
@@ -190,7 +190,7 @@ cargo doc --open
 ```
 
 Unit tests live next to the code in `src/`; integration tests in `tests/` use wiremock servers. Contribution rules are
-in [CLAUDE.md](CLAUDE.md).
+in [AGENTS.md](AGENTS.md).
 
 ## License
 
