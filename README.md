@@ -1,4 +1,4 @@
-# RESO Web API Rust Client Library
+# reso-client
 
 [![CI](https://github.com/jeremeybingham/reso_client/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso_client/actions)
 [![codecov](https://codecov.io/gh/jeremeybingham/reso_client/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso_client)
@@ -6,539 +6,199 @@
 [![Crates.io](https://img.shields.io/crates/v/reso-client.svg)](https://crates.io/crates/reso-client)
 [![Documentation](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
 
-A Rust client library for [RESO Web API](https://www.reso.org/reso-web-api/) servers using OData 4.0.
+A Rust library for reading real estate data from [RESO Web API](https://www.reso.org/reso-web-api/) servers
+(OData 4.0), on its way to becoming an **ingest layer** for many RESO servers at once.
 
-## Features
+## Goal
 
-- 🔍 Fluent query builder for OData queries
-- 🔐 OAuth bearer token authentication
-- 📊 Support for filters, ordering, pagination, and field selection
-- 🔢 Count-only queries for efficient record counting ⚠️
-- 🗂️ Optional dataset ID path support
-- 📖 Metadata retrieval
-- 🔄 Replication endpoint support for bulk data transfer (up to 2000 records/request) ⚠️
-- ⚡ Async/await with tokio
+reso-client is meant to sit between one or more RESO Web API servers and the applications that use their data.
+It should:
 
-⚠️ *Some features not supported by the RESO Web API / `actris_ref` test server.*
+- connect to many RESO-compliant servers, each with its own credentials and limits;
+- discover the resources each server offers and pull every one the account is licensed for;
+- follow the API's rules: OAuth2, server-driven paging, RESO-standard replication, rate limits and retries;
+- keep each server's data current with incremental, resumable syncs, including deletes;
+- hand the records over **raw**, tagged with where they came from, in a few file formats (NDJSON first, then Parquet).
+
+A typical user is an aggregator pulling from many MLS vendors into its own store. Transforming records,
+de-duplicating across MLSs, mapping local fields and enforcing data-licence rules are the consuming application's
+job, not this crate's. The crate stays resource-agnostic: resource and field names are strings and records are raw
+JSON, so it works with any server's schema, including [Data Dictionary 2.1](https://dd.reso.org/DD2.1/).
+
+The plan is tracked in [#18](https://github.com/jeremeybingham/reso_client/issues/18) and the
+[Ingest layer milestone](https://github.com/jeremeybingham/reso_client/milestone/1).
+
+## Current state (v0.2.1)
+
+Today the crate is a well-tested OData query client for **one server with one fixed bearer token**.
+
+What works:
+
+- Fluent `QueryBuilder`: `$filter`, `$select`, `$orderby`, `$top`/`$skip`, `$count`, `$expand`, `$apply`, lookup
+  by key.
+- Count-only queries (`/$count`) and raw `$metadata` retrieval (returned as an XML string, not parsed).
+- Typed errors (`ResoError`) mapped from HTTP status codes and OData error bodies.
+- Configuration from environment variables or code; several clients can run side by side.
+- Async on tokio; about 180 unit, integration and doc tests, with HTTP mocked by wiremock.
+
+Known limits, each covered by a milestone issue:
+
+| Limit | Issue |
+|---|---|
+| `execute_next_link` reads only response headers, so a standard result set cannot be paged past the second page | [#19](https://github.com/jeremeybingham/reso_client/issues/19) |
+| Replication follows Bridge Interactive's `/replication` endpoint, not RESO-standard replication (`ModificationTimestamp` order plus `@odata.nextLink`), so it fails on most other vendors | [#20](https://github.com/jeremeybingham/reso_client/issues/20) |
+| Static bearer token only; no OAuth2 client credentials or token refresh | [#21](https://github.com/jeremeybingham/reso_client/issues/21) |
+| No retry, backoff or rate limiting; `Retry-After` is ignored | [#22](https://github.com/jeremeybingham/reso_client/issues/22) |
+| `$metadata` is not parsed, so resources, keys and fields cannot be discovered | [#23](https://github.com/jeremeybingham/reso_client/issues/23) |
+| `$select`/`$expand` lists are not URL-encoded; `dataset_id` is a Bridge-specific path segment | [#31](https://github.com/jeremeybingham/reso_client/issues/31) |
+
+## Roadmap
+
+The milestone is split into phases. Phases A and B make the low-level client correct against real servers; phase C
+builds the ingest layer on top of it, most likely as a second crate (`reso-ingest`) with a CLI.
+
+**Phase A: correct against real servers**
+
+1. [#19](https://github.com/jeremeybingham/reso_client/issues/19) Standard paging: follow `@odata.nextLink` and add a
+   page iterator.
+2. [#20](https://github.com/jeremeybingham/reso_client/issues/20) RESO-standard replication (`ModificationTimestamp`
+   plus nextLink).
+3. [#21](https://github.com/jeremeybingham/reso_client/issues/21) OAuth2 client credentials with token caching and
+   refresh.
+4. [#22](https://github.com/jeremeybingham/reso_client/issues/22) Retry, backoff and client-side rate limiting.
+
+**Phase B: knowing what a server has**
+
+5. [#23](https://github.com/jeremeybingham/reso_client/issues/23) Parse `$metadata` into a model (entity sets, keys,
+   fields, types, lookups).
+
+**Phase C: the ingest layer**
+
+6. [#24](https://github.com/jeremeybingham/reso_client/issues/24) Multi-server TOML configuration (secrets from
+   environment variables).
+7. [#25](https://github.com/jeremeybingham/reso_client/issues/25) NDJSON output with source tags and a run manifest.
+8. [#26](https://github.com/jeremeybingham/reso_client/issues/26) Incremental sync with checkpoints and resume.
+9. [#27](https://github.com/jeremeybingham/reso_client/issues/27) Deletes and reconciliation.
+10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`.
+11. [#29](https://github.com/jeremeybingham/reso_client/issues/29) Parquet output with a schema from `$metadata`.
+
+**Later or optional**
+
+- [#30](https://github.com/jeremeybingham/reso_client/issues/30) Media file download.
+- [#31](https://github.com/jeremeybingham/reso_client/issues/31) Small fixes (any time).
+
+**Test server.** Mock servers cover most of the work, but checking real-server behaviour needs read-only access to a
+RESO Web API server certified for Data Dictionary 2.1
+([#32](https://github.com/jeremeybingham/reso_client/issues/32), help wanted). Without one, #23 and the DD 2.1 plan
+([#17](https://github.com/jeremeybingham/reso_client/issues/17)) are blocked, and #19-#21, #26, #27, #29 and #30 can
+be built but not confirmed against a live server.
+
+Phase A is planned as v0.3.0. Expect breaking changes before 1.0; they are recorded in the [changelog](CHANGELOG.md).
 
 ## Installation
 
-add to your `Cargo.toml`:
 ```toml
 [dependencies]
 reso-client = "0.2.1"
 ```
 
+Requires Rust 1.87 or later.
+
 ## Configuration
 
-### Environment Variables
+`ResoClient::from_env()` reads these variables (a `.env` file works too; see [example.env](example.env)):
 
-The client reads configuration from environment variables:
+| Variable | Required | Description |
+|---|---|---|
+| `RESO_BASE_URL` | Yes | Base URL of the server's OData service |
+| `RESO_TOKEN` | Yes | Bearer token |
+| `RESO_DATASET_ID` | No | Dataset segment inserted after the base URL (Bridge Interactive servers use it) |
+| `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
 
-| Variable | Required | Description | Example |
-|----------|----------|-------------|---------|
-| `RESO_BASE_URL` | Yes | Base URL of the RESO Web API server | `https://api.bridgedataoutput.com/api/v2/OData` |
-| `RESO_TOKEN` | Yes | OAuth bearer token for authentication | `your-token-here` |
-| `RESO_DATASET_ID` | No | Dataset identifier (see below) | `actris_ref` |
-| `RESO_TIMEOUT` | No | HTTP timeout in seconds (default: 30) | `60` |
+Or configure in code:
 
-Create a `.env` file:
-```bash
-RESO_BASE_URL=https://api.bridgedataoutput.com/api/v2/OData
-RESO_TOKEN=your-token-here
-RESO_DATASET_ID=actris_ref
-RESO_TIMEOUT=30
-```
-
-### Dataset ID Explained
-
-Configured to handle the Bridges/ACTRIS RESO Web API Reference Server, which uses a dataset identifier in the URL path. The dataset ID is inserted between the base URL and the resource name.
-
-**Without dataset ID:**
-```
-https://api.mls.com/OData/Property
-```
-
-**With dataset ID:**
-```
-https://api.mls.com/OData/actris_ref/Property
-https://api.mls.com/OData/actris_ref/$metadata
-```
-
-When to use:
-- **Required**: If your RESO provider's API documentation shows URLs with a dataset/database identifier
-- **Optional**: If your provider uses a simple base URL structure
-
-You can set it via environment variable or programmatically:
-```rust
-// Via environment
-let client = ResoClient::from_env()?;
-
-// Via builder
-let config = ClientConfig::new("https://api.mls.com/OData", "token")
-    .with_dataset_id("actris_ref");
-let client = ResoClient::with_config(config)?;
-```
-
-## Testing
-
-### Test Coverage
-[![codecov](https://codecov.io/gh/jeremeybingham/reso_client/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso_client)
-The library maintains comprehensive test coverage with **183 total tests**:
-
-- **74 unit tests** - Testing internal implementation details in `src/` modules:
-  - 27 tests in `src/error.rs` - Error handling, HTTP status mapping, OData error parsing
-  - 17 tests in `src/replication.rs` - Replication response handling and pagination
-  - 30 tests in `src/client.rs` - Client configuration, environment variables, URL building
-- **58 integration tests** - Testing public API in `tests/` directory:
-  - 36 tests in `tests/queries_tests.rs` - Query building and URL generation
-  - 22 tests in `tests/client_http_tests.rs` - HTTP operations with mocked servers
-- **51 doc tests** - Code examples in documentation comments
-
-### Running Tests
-
-```bash
-# Run all tests (unit + integration + doc tests)
-cargo test
-
-# Run only unit tests (in src/ modules)
-cargo test --lib
-
-# Run only integration tests (in tests/ directory)
-cargo test --test '*'
-
-# Run specific test file
-cargo test --test queries_tests
-
-# Run tests for a specific module
-cargo test --lib error
-cargo test --lib client
-```
-
-**Test Organization:**
-- **Unit tests**: Internal tests for private functions and implementation details
-- **Integration tests**: Public API tests in `tests/` directory using HTTP mocking
-  - `tests/queries_tests.rs` - Comprehensive query building and URL generation tests
-  - `tests/client_http_tests.rs` - HTTP client operations with wiremock server mocking
-
-### Examples
-All examples include detailed comments, error handling, and work with the RESO Web API reference server / `actris_ref` unless otherwise noted. The library includes a comprehensive suite of examples in the `examples` directory demonstrating all major functionality. Assuming you've set your `.env` variables correctly, you can run any example with:
-
-```bash
-cargo run --example <example_name>
-```
-
-#### Available Examples
-
-**Basic Usage:**
-- `test_connectivity` - Test basic API connectivity and authentication
-- `test_property` - Property resource queries with filtering and field selection
-- `test_member` - Query Member resource for agent/broker information
-- `test_metadata` - Fetch and parse OData metadata documents
-- `test_core_queries` - Tests the "Core Queries" specified in the [RESO Web API reference documentation](https://transport.reso.org/proposals/web-api-core.html#28-core-query-examples)
-
-**Query Features:**
-- `test_filters` - OData filter syntax (comparison, logical operators, string functions)
-- `test_select` - Field selection and projection to optimize response size
-
-**Analysis Examples:**
-- `analyze_property_fields` - Analyze field usage across 200 active listings to identify which fields are most populated; generates `property_field_analysis_report.json` with recommended field sets (minimal, standard, comprehensive)
-- `analyze_active_listings` - Statistical analysis of 200 active residential listings including price analysis, property type distribution, geographic distribution, bedroom/bathroom statistics, size metrics, and photo counts
-
-
-⚠️ **Server-Specific (currently untestested, requires server support):**
-
-The `$count`, `$apply`, and `$expand` features are not supported by the RESO Web API test server / `actris_ref`. The Replication endpoint is also not supported by default on `actris_ref`. Examples using these features will fail with `404` or `401` errors.
-
-- ⚠️ `test_replication` - Replication endpoint for bulk data transfer (up to 2000 records/request)
-- ⚠️ `test_count_only` - Efficient count-only queries using `/$count` endpoint 
-- ⚠️ `test_pagination_nextlink` - Server-side pagination with `@odata.nextLink`
-- ⚠️ `test_apply` - OData aggregation with `$apply` parameter
-- ⚠️ `test_expand` - Navigation property expansion with `$expand` parameter
-
-
-## Quick Start
-
-### Standard Queries
-```rust
-use reso_client::{ResoClient, QueryBuilder};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create client from environment variables
-    let client = ResoClient::from_env()?;
-
-    // Build and execute a query
-    let query = QueryBuilder::new("Property")
-        .filter("City eq 'Austin' and ListPrice gt 500000")
-        .select(&["ListingKey", "City", "ListPrice"])
-        .top(10)
-        .build()?;
-
-    let results = client.execute(&query).await?;
-
-    // OData responses have structure: { "value": [...records...], "@odata.count": 123 }
-    if let Some(records) = results["value"].as_array() {
-        println!("Found {} properties", records.len());
-        for record in records {
-            println!("{}", serde_json::to_string_pretty(record)?);
-        }
-    }
-
-    Ok(())
-}
-```
-
-### Replication Queries (Bulk Data Transfer)
-```rust
-use reso_client::{ResoClient, ReplicationQueryBuilder};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ResoClient::from_env()?;
-
-    // Build replication query (up to 2000 records per request)
-    let query = ReplicationQueryBuilder::new("Property")
-        .filter("StandardStatus eq 'Active'")
-        .top(2000)
-        .build()?;
-
-    let response = client.execute_replication(&query).await?;
-
-    println!("Retrieved {} records", response.record_count);
-
-    // Continue with next link if available
-    if response.has_more() {
-        let next_response = client.execute_next_link(
-            response.next_link().unwrap()
-        ).await?;
-        println!("Retrieved {} more records", next_response.record_count);
-    }
-
-    Ok(())
-}
-```
-
-## Usage Examples
-
-### Basic Query
-```rust
-let query = QueryBuilder::new("Property")
-    .top(10)
-    .build()?;
-
-let results = client.execute(&query).await?;
-```
-
-### Filtering
-
-Use OData 4.0 filter syntax:
-```rust
-// Simple equality
-let query = QueryBuilder::new("Property")
-    .filter("City eq 'Austin'")
-    .build()?;
-
-// Comparison operators
-let query = QueryBuilder::new("Property")
-    .filter("ListPrice gt 500000 and ListPrice lt 1000000")
-    .build()?;
-
-// String functions
-let query = QueryBuilder::new("Property")
-    .filter("startswith(City, 'San')")
-    .build()?;
-
-// Date comparison
-let query = QueryBuilder::new("Property")
-    .filter("ModificationTimestamp gt 2025-01-01T00:00:00Z")
-    .build()?;
-
-// Complex expressions
-let query = QueryBuilder::new("Property")
-    .filter("City eq 'Austin' and (ListPrice gt 500000 or BedroomsTotal ge 4)")
-    .build()?;
-```
-
-### Field Selection
-```rust
-let query = QueryBuilder::new("Property")
-    .select(&["ListingKey", "City", "ListPrice", "BedroomsTotal"])
-    .top(10)
-    .build()?;
-```
-
-### Sorting
-```rust
-let query = QueryBuilder::new("Property")
-    .order_by("ListPrice", "desc")
-    .top(10)
-    .build()?;
-```
-
-### Pagination
-```rust
-// First page
-let query = QueryBuilder::new("Property")
-    .top(20)
-    .build()?;
-
-// Second page
-let query = QueryBuilder::new("Property")
-    .skip(20)
-    .top(20)
-    .build()?;
-```
-
-### Getting Total Count
-```rust
-let query = QueryBuilder::new("Property")
-    .filter("City eq 'Austin'")
-    .with_count()
-    .top(10)
-    .build()?;
-
-let results = client.execute(&query).await?;
-
-// Access the count
-if let Some(count) = results["@odata.count"].as_u64() {
-    println!("Total matching records: {}", count);
-}
-```
-
-### Count-Only Queries
-
-Efficiently get just the count without fetching records:
-```rust
-let query = QueryBuilder::new("Property")
-    .filter("City eq 'Austin'")
-    .count()  // Returns just the count via /$count endpoint
-    .build()?;
-
-let results = client.execute(&query).await?;
-let count = results.as_u64().unwrap_or(0);
-println!("Total: {}", count);
-```
-
-### OData Aggregation (when supported)
-
-**⚠️ Server Compatibility, NOT supported by the RESO Web API reference server / `actris_ref` Note:** The `apply()` method requires server support for OData v4.0 Aggregation Extensions. Not all RESO servers support this feature.
-
-```rust
-// Group by field with aggregation (if server supports $apply)
-let query = QueryBuilder::new("Property")
-    .apply("groupby((StandardStatus), aggregate($count as TotalCount))")
-    .build()?;
-
-let results = client.execute(&query).await?;
-```
-
-**If your server doesn't support `$apply`**, use multiple filtered queries instead:
-**⚠️ This is the method supported by the RESO Web API reference server / `actris_ref`**
-```rust
-// Workaround: Use $filter for counts by category
-let statuses = ["Active", "Pending", "Closed"];
-
-for status in statuses {
-    let query = QueryBuilder::new("Property")
-        .filter(format!("StandardStatus eq '{}'", status))
-        .count()
-        .build()?;
-
-    let results = client.execute(&query).await?;
-    let count = results.as_u64().unwrap_or(0);
-    println!("{}: {}", status, count);
-}
-```
-
-### Fetching Metadata
-
-Retrieve the OData metadata document:
-```rust
-let metadata_xml = client.fetch_metadata().await?;
-println!("{}", metadata_xml);
-```
-
-### Replication Queries
-
-The replication endpoint is designed for bulk data transfer and synchronization of large datasets (>10,000 records). It supports up to 2000 records per request (vs 200 for standard queries) and uses header-based pagination.
-
-**Important notes:**
-- Requires MLS authorization
-- Results are ordered oldest to newest by default
-- No support for `$skip`, `$orderby`, `$apply`, or count options
-- Use `$select` to reduce payload size and improve performance
-
-```rust
-use reso_client::{ResoClient, ReplicationQueryBuilder};
-
-// Build a replication query
-let query = ReplicationQueryBuilder::new("Property")
-    .filter("StandardStatus eq 'Active'")
-    .select(&["ListingKey", "City", "ListPrice"])
-    .top(2000)  // Maximum: 2000
-    .build()?;
-
-// Execute the query
-let response = client.execute_replication(&query).await?;
-
-println!("Retrieved {} records", response.record_count);
-
-// Process records
-for record in &response.records {
-    let key = record["ListingKey"].as_str().unwrap_or("");
-    let city = record["City"].as_str().unwrap_or("");
-    println!("{}: {}", key, city);
-}
-
-// Continue with next link if more records available
-if let Some(next_link) = response.next_link {
-    let next_response = client.execute_next_link(&next_link).await?;
-    println!("Retrieved {} more records", next_response.record_count);
-}
-```
-
-**Fetching all records with pagination:**
-```rust
-let mut query = ReplicationQueryBuilder::new("Property")
-    .top(2000)
-    .build()?;
-
-let mut response = client.execute_replication(&query).await?;
-let mut all_records = response.records;
-
-// Continue fetching while next link is available
-while let Some(next_link) = response.next_link {
-    response = client.execute_next_link(&next_link).await?;
-    all_records.extend(response.records);
-}
-
-println!("Total records fetched: {}", all_records.len());
-```
-
-## OData Response Structure
-
-The RESO Web API returns responses in OData format:
-```json
-{
-  "value": [
-    {
-      "ListingKey": "12345",
-      "City": "Austin",
-      "ListPrice": 750000
-    },
-    {
-      "ListingKey": "67890",
-      "City": "Austin",
-      "ListPrice": 850000
-    }
-  ],
-  "@odata.context": "https://api.example.com/odata/$metadata#Property",
-  "@odata.count": 42
-}
-```
-
-Key fields:
-- **`value`**: Array of records matching your query
-- **`@odata.count`**: Total count (only when `with_count()` is used)
-- **`@odata.nextLink`**: URL for next page (for server-side pagination)
-
-Access records:
-```rust
-let results = client.execute(&query).await?;
-
-if let Some(records) = results["value"].as_array() {
-    for record in records {
-        let listing_key = record["ListingKey"].as_str();
-        let price = record["ListPrice"].as_f64();
-        // ... process record
-    }
-}
-```
-
-## Error Handling
-```rust
-use reso_client::{ResoClient, ResoError};
-
-match client.execute(&query).await {
-    Ok(results) => {
-        // Process results
-    }
-    Err(ResoError::Config(msg)) => {
-        eprintln!("Configuration error: {}", msg);
-    }
-    Err(ResoError::Network(msg)) => {
-        eprintln!("Network error: {}", msg);
-    }
-    Err(ResoError::ODataError(msg)) => {
-        eprintln!("OData server error: {}", msg);
-    }
-    Err(e) => {
-        eprintln!("Error: {}", e);
-    }
-}
-```
-
-## Advanced Configuration
-
-### Custom Timeout
 ```rust
 use std::time::Duration;
+use reso_client::{ClientConfig, ResoClient};
 
-let config = ClientConfig::new("https://api.mls.com/OData", "token")
+let config = ClientConfig::new("https://api.mls.example/OData", "token")
+    .with_dataset_id("actris_ref") // only for servers that use a dataset path segment
     .with_timeout(Duration::from_secs(60));
 let client = ResoClient::with_config(config)?;
 ```
 
-### Manual Configuration
-```rust
-let config = ClientConfig::new(
-    "https://api.mls.com/odata",
-    "your-bearer-token"
-)
-.with_dataset_id("actris_ref")
-.with_timeout(Duration::from_secs(45));
+## Quick start
 
-let client = ResoClient::with_config(config)?;
+```rust
+use reso_client::{QueryBuilder, ResoClient};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = ResoClient::from_env()?;
+
+    let query = QueryBuilder::new("Property")
+        .filter("City eq 'Austin' and ListPrice gt 500000")
+        .select(&["ListingKey", "City", "ListPrice"])
+        .order_by("ListPrice", "desc")
+        .top(10)
+        .build()?;
+
+    // Records come back as raw OData JSON: { "value": [...], "@odata.nextLink": "..." }
+    let results = client.execute(&query).await?;
+    if let Some(records) = results["value"].as_array() {
+        println!("{} records", records.len());
+    }
+
+    // The service's $metadata document, as XML
+    let metadata = client.fetch_metadata().await?;
+    println!("{} bytes of metadata", metadata.len());
+
+    Ok(())
+}
 ```
 
-## OData Filter Reference
+Errors are `ResoError` values (`Config`, `Network`, `Unauthorized`, `RateLimited`, `ODataError` and others), so
+callers can tell a bad token from a server fault or a rate limit.
 
-Common OData 4.0 operators:
+[USAGE.md](USAGE.md) is the full reference: every query option, count-only queries, `$expand`, `$apply`, the current
+(Bridge) replication API, response structure, error handling and troubleshooting.
 
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `eq` | Equals | `City eq 'Austin'` |
-| `ne` | Not equals | `Status ne 'Closed'` |
-| `gt` | Greater than | `ListPrice gt 500000` |
-| `ge` | Greater than or equal | `BedroomsTotal ge 3` |
-| `lt` | Less than | `ListPrice lt 1000000` |
-| `le` | Less than or equal | `BedroomsTotal le 5` |
-| `and` | Logical AND | `City eq 'Austin' and ListPrice gt 500000` |
-| `or` | Logical OR | `City eq 'Austin' or City eq 'Manor'` |
-| `not` | Logical NOT | `not (City eq 'Austin')` |
+## Examples
 
-String functions:
-- `startswith(field, 'value')`
-- `endswith(field, 'value')`
-- `contains(field, 'value')`
+With a `.env` in place, run any example with `cargo run --example <name>`. They were written against Bridge
+Interactive's `actris_ref` reference dataset; the project has no working server credentials at the moment (see
+[#32](https://github.com/jeremeybingham/reso_client/issues/32)).
 
-Date functions:
-- `year(field) eq 2025`
-- `month(field) eq 6`
-- `day(field) eq 15`
+| Example | Shows |
+|---|---|
+| `test_connectivity` | Connection and authentication check |
+| `test_property`, `test_member` | Queries on the Property and Member resources |
+| `test_filters`, `test_select` | Filter syntax and field selection |
+| `test_core_queries` | The [RESO Web API core query examples](https://transport.reso.org/proposals/web-api-core.html#28-core-query-examples) |
+| `test_metadata` | Fetching `$metadata` |
+| `test_actris_ref` | A tour of the reference dataset |
+| `analyze_property_fields` | Which Property fields are populated across 200 active listings |
+| `analyze_active_listings` | Summary statistics for 200 active residential listings |
+| `test_count_only`, `test_apply`, `test_expand`, `test_pagination_nextlink`, `test_replication` | Features that need server support `actris_ref` does not give (`/$count`, `$apply`, `$expand`, header paging, Bridge replication) |
 
-For complete OData 4.0 filter syntax, see: [OData URL Conventions](https://docs.oasis-open.org/odata/odata/v4.0/odata-v4.0-part2-url-conventions.html)
+## Development
+
+```bash
+cargo test                    # unit, integration and doc tests
+cargo fmt && cargo clippy -- -D warnings
+cargo doc --open
+```
+
+Unit tests live next to the code in `src/`; integration tests in `tests/` use wiremock servers. Contribution rules are
+in [CLAUDE.md](CLAUDE.md).
 
 ## License
 
-Licensed under the terms of the MIT license. See the file:
-
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+MIT; see [LICENSE-MIT](LICENSE-MIT).
 
 ## Resources
 
-- [RESO Web API Specification](https://www.reso.org/reso-web-api/)
-- [OData 4.0 Protocol](https://www.odata.org/documentation/)
-- [RESO Data Dictionary](https://www.reso.org/data-dictionary/)
+- [RESO Web API](https://www.reso.org/reso-web-api/)
+- [RESO Data Dictionary](https://www.reso.org/data-dictionary/) and [DD 2.1](https://dd.reso.org/DD2.1/)
+- [OData 4.0 URL conventions](https://docs.oasis-open.org/odata/odata/v4.0/odata-v4.0-part2-url-conventions.html)
 - [Changelog](CHANGELOG.md)
