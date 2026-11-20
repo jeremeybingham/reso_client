@@ -61,7 +61,8 @@ src/client.rs       ResoClient, ClientConfig, HTTP operations
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge-style)
 src/error.rs        ResoError and the Result alias
-tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers)
+tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
+                    live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
 ```
 
@@ -82,3 +83,11 @@ internal; unit tests in the same file (`#[cfg(test)]`), integration tests in `te
 The RESO reference dataset `actris_ref` does not support `$count`, `$apply`, `$expand` or replication (authorization).
 Mark such features as server-dependent in docs. OData 4.0 is the source of truth for query syntax; the RESO Web API
 builds on it (https://www.reso.org/reso-web-api/, https://www.odata.org/documentation/).
+
+RESO's reference server (tools.reso.org, run locally with Docker; findings in issue #35): Data Dictionary 2.0 by default
+(2.1 via `METADATA_PATH`), 948 seed records, reads need no token. Supports `$filter`, `$orderby`, `$select`, `$top`
+(cap 2000), `$skip`, `$count=true`, `$expand`, and an absolute `@odata.nextLink` in the body (`$skip` paging, default page
+100). No `/replication`, no `/Resource/$count` (use `$count=true&$top=0`), no `has` on multi-value fields. Unknown
+resources return an HTML 404; unknown `$select`/`$orderby` fields are ignored. Its mock `POST /oauth/token` accepts any
+credentials. Never commit its `$metadata`, seed data or responses (RESO licence); tests use invented data. Live tests:
+`RESO_LIVE_URL=http://localhost:8080 cargo test --test live_reference_server -- --ignored`.

@@ -624,3 +624,125 @@ async fn test_authorization_header_included() {
 
     assert!(result.is_ok());
 }
+
+// The tests below mirror shapes seen on RESO's reference server (#35), with invented data.
+
+#[tokio::test]
+async fn test_execute_body_next_link_is_absolute_with_skip() {
+    // The standard OData form: an absolute @odata.nextLink in the body, paged by $skip.
+    // The client does not read the body link yet (#19); callers can still follow it by hand.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .and(wiremock::matchers::query_param("$skip", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "value": [{"ListingKey": "3"}]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.nextLink": format!("{}/Property?$orderby=ListingKey&$skip=2", mock_server.uri()),
+            "value": [{"ListingKey": "1"}, {"ListingKey": "2"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = ClientConfig::new(mock_server.uri(), "test-token");
+    let client = ResoClient::with_config(config).unwrap();
+    let query = QueryBuilder::new("Property").build().unwrap();
+
+    let first = client.execute(&query).await.unwrap();
+    let link = first["@odata.nextLink"].as_str().unwrap().to_string();
+    assert!(link.starts_with("http"));
+
+    let second = client.execute_next_link(&link).await.unwrap();
+    assert_eq!(second.record_count, 1);
+    assert!(!second.has_more());
+}
+
+#[tokio::test]
+async fn test_execute_count_only_with_top_zero() {
+    // Some servers have no /$count route; $count=true&$top=0 is the portable count-only query.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .and(wiremock::matchers::query_param("$count", "true"))
+        .and(wiremock::matchers::query_param("$top", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.count": 42,
+            "value": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = ClientConfig::new(mock_server.uri(), "test-token");
+    let client = ResoClient::with_config(config).unwrap();
+    let query = QueryBuilder::new("Property")
+        .with_count()
+        .top(0)
+        .build()
+        .unwrap();
+
+    let response = client.execute(&query).await.unwrap();
+    assert_eq!(response["@odata.count"], 42);
+    assert!(response["value"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_execute_400_nested_odata_error() {
+    // OData error body with a numeric-string code and a details list.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {
+                "code": "40000",
+                "message": "Invalid query",
+                "target": "Query",
+                "details": [{"code": "30212", "target": "$filter", "message": "Unknown field: Foo"}]
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let config = ClientConfig::new(mock_server.uri(), "test-token");
+    let client = ResoClient::with_config(config).unwrap();
+    let query = QueryBuilder::new("Property")
+        .filter("Foo eq 1")
+        .build()
+        .unwrap();
+
+    match client.execute(&query).await {
+        Err(ResoError::ODataError { status_code, .. }) => assert_eq!(status_code, 400),
+        other => panic!("Expected ODataError, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_execute_404_html_body() {
+    // An unknown resource can come back as an HTML error page, not OData JSON.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/Nope"))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .insert_header("Content-Type", "text/html; charset=utf-8")
+                .set_body_string(
+                    "<!DOCTYPE html><html><body><pre>Cannot GET /Nope</pre></body></html>",
+                ),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let config = ClientConfig::new(mock_server.uri(), "test-token");
+    let client = ResoClient::with_config(config).unwrap();
+    let query = QueryBuilder::new("Nope").build().unwrap();
+
+    assert!(client.execute(&query).await.is_err());
+}
