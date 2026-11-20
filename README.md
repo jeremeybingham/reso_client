@@ -189,6 +189,13 @@ cargo fmt && cargo clippy -- -D warnings
 cargo doc --open
 ```
 
+Live tests against a local copy of RESO's reference server are ignored by default (CI stays offline). Start the server
+(see [#35](https://github.com/jeremeybingham/reso_client/issues/35)), then:
+
+```bash
+RESO_LIVE_URL=http://localhost:8080 cargo test --test live_reference_server -- --ignored
+```
+
 Unit tests live next to the code in `src/`; integration tests in `tests/` use wiremock servers. Contribution rules are
 in [AGENTS.md](AGENTS.md).
 
