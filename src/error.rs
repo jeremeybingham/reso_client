@@ -80,6 +80,9 @@ pub struct ODataErrorDetail {
 /// All errors that can occur when using the RESO client library.
 /// Each variant includes contextual information to help diagnose issues.
 ///
+/// The enum is `#[non_exhaustive]`: new variants may be added in minor releases, so a `match`
+/// on it needs a wildcard (`_`) arm.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -99,6 +102,7 @@ pub struct ODataErrorDetail {
 /// # }
 /// ```
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ResoError {
     /// Configuration error
     #[error("Configuration error: {0}")]

@@ -28,21 +28,34 @@ JSON, so it works with any server's schema, including [Data Dictionary 2.1](http
 The plan is tracked in [#18](https://github.com/jeremeybingham/reso_client/issues/18) and the
 [Ingest layer milestone](https://github.com/jeremeybingham/reso_client/milestone/1).
 
-## Current state (v0.2.1)
+## Current state (v0.3.0)
 
-Today the crate is a well-tested OData query client for **one server**, authenticated with a fixed bearer token
-or OAuth2 client credentials.
+The repository holds two crates:
 
-What works:
+- **`reso-client`** (published): an OData query client for one server, authenticated with a fixed bearer token or
+  OAuth2 client credentials, that follows the RESO standard for paging and replication.
+- **`reso-ingest`** (in this repository, not published): a library and the `reso-ingest` command that pull every
+  resource from several servers into tagged NDJSON or Parquet files, incrementally (see [Ingest CLI](#ingest-cli)).
+
+What works in `reso-client`:
 
 - Fluent `QueryBuilder`: `$filter`, `$select`, `$orderby`, `$top`/`$skip`, `$count`, `$expand`, `$apply`, lookup
   by key.
+- Standard server-driven paging (`@odata.nextLink` in the body, `next` and `Link` headers) and RESO-standard
+  replication on `ModificationTimestamp` with a resumable checkpoint (`StandardReplication`); Bridge's
+  `/replication` as a vendor mode.
 - Count-only queries (`/$count`) and `$metadata` as a raw XML string (`fetch_metadata`) or a parsed model (`fetch_metadata_model`: entity sets, keys,
   properties, navigation properties, enum types).
 - OAuth2 client credentials: the token is fetched, cached, renewed at 90% of its lifetime and once after a 401.
+- Retry with backoff and `Retry-After`, client-side rate limits, and request counters (off by default).
 - Typed errors (`ResoError`) mapped from HTTP status codes and OData error bodies.
 - Configuration from environment variables or code; several clients can run side by side.
-- Async on tokio; about 180 unit, integration and doc tests, with HTTP mocked by wiremock.
+- Async on tokio; tested offline with wiremock mock servers.
+
+Checked against a real server: only RESO's reference server, run locally (issue
+[#35](https://github.com/jeremeybingham/reso_client/issues/35)). A full `reso-ingest sync` of it, a repeat run, an
+interrupted run resumed, a changed record and a deleted record all came out right. Vendor servers are unconfirmed
+until [#32](https://github.com/jeremeybingham/reso_client/issues/32).
 
 ## Roadmap
 
@@ -52,11 +65,11 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 **Phase A: correct against real servers**
 
 1. [#19](https://github.com/jeremeybingham/reso_client/issues/19) Standard paging: follow `@odata.nextLink` and add a
-   page iterator.
+   page iterator. Done: `Page`, `execute_page`, `next_page`, `fetch_page`.
 2. [#20](https://github.com/jeremeybingham/reso_client/issues/20) RESO-standard replication (`ModificationTimestamp`
    plus nextLink): done, `StandardReplication`; Bridge's `/replication` stays as a vendor mode.
 3. [#21](https://github.com/jeremeybingham/reso_client/issues/21) OAuth2 client credentials with token caching and
-   refresh.
+   refresh. Done: `Auth::ClientCredentials`.
 4. [#22](https://github.com/jeremeybingham/reso_client/issues/22) Retry, backoff and client-side rate limiting: done,
    `RetryPolicy`, `RateLimit` and `ResoClient::stats` (off by default).
 
@@ -80,11 +93,11 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`. Done:
     the `reso-ingest` binary (see [Ingest CLI](#ingest-cli)).
 11. [#29](https://github.com/jeremeybingham/reso_client/issues/29) Parquet output with a schema from `$metadata`.
+    Done: `ParquetWriter` and `sync --format parquet` behind the `parquet` feature of `reso-ingest`.
 
 **Later or optional**
 
 - [#30](https://github.com/jeremeybingham/reso_client/issues/30) Media file download.
-- [#31](https://github.com/jeremeybingham/reso_client/issues/31) Small fixes (any time).
 
 **Test server.** Mock servers cover most of the work, but checking real-server behaviour needs read-only access to a
 RESO Web API server certified for Data Dictionary 2.1
@@ -92,13 +105,13 @@ RESO Web API server certified for Data Dictionary 2.1
 ([#17](https://github.com/jeremeybingham/reso_client/issues/17)) are blocked, and #19-#21, #26, #27, #29 and #30 can
 be built but not confirmed against a live server.
 
-Phase A is planned as v0.3.0. Expect breaking changes before 1.0; they are recorded in the [changelog](CHANGELOG.md).
+Phases A to C shipped in v0.3.0 (`reso-ingest` is not published yet). Expect breaking changes before 1.0; they are recorded in the [changelog](CHANGELOG.md).
 
 ## Installation
 
 ```toml
 [dependencies]
-reso-client = "0.2.1"
+reso-client = "0.3.0"
 ```
 
 Requires Rust 1.87 or later.

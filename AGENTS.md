@@ -2,14 +2,15 @@
 
 Guidance for AI coding agents and people working in this repository (tool-neutral).
 
-reso-client is a Rust library (crates.io `reso-client`, pre-1.0, v0.2.1) for RESO Web API servers (OData 4.0). Its goal
+reso-client is a Rust library (crates.io `reso-client`, pre-1.0, v0.3.0) for RESO Web API servers (OData 4.0). Its goal
 is to become the **ingest layer** between one or more RESO servers and the applications that use their data: connect to
 many compliant servers, discover and pull every resource the account is licensed for, follow the API's rules (OAuth2,
 server-driven paging, RESO-standard replication, rate limits, retries), keep data current with incremental resumable
 syncs, and hand records over **raw**, tagged with their source, in a few file formats (NDJSON first, then Parquet). The
 typical user is an aggregator pulling from many MLS vendors into its own store. It is **not** responsible for
 de-duplication across MLSs, local field mapping, data-licence or display-rule enforcement, or choosing a database.
-Today the crate is a one-server query client (bearer token or OAuth2 client credentials); the plan is tracker issue
+Today `reso-client` is a one-server query client (bearer token or OAuth2 client credentials, standard paging and
+replication, retries) and the unpublished `reso-ingest` crate pulls many servers into NDJSON or Parquet; the plan is tracker issue
 #18 (milestone "Ingest layer", child issues #19-#31, test-server need #32), and README.md has the current limits and
 roadmap.
 
