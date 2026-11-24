@@ -344,3 +344,41 @@ async fn usage_errors_exit_2_and_help_exits_0() {
     assert_eq!(h.code, 0);
     assert!(h.out.contains("Usage"));
 }
+
+#[cfg(feature = "parquet")]
+#[tokio::test]
+async fn sync_writes_parquet_with_the_format_flag() {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    std::env::set_var("CLI_TEST_TOKEN_PQ", SECRET);
+    let srv = server().await;
+    let dir = TempDir::new("parquet");
+    let config = write_config(&dir, &[("mls", srv.uri(), "CLI_TEST_TOKEN_PQ")]);
+    let out = dir.path("out");
+    let r = cli(&[
+        "sync",
+        "--config",
+        config.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--format",
+        "parquet",
+    ])
+    .await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(r.out.contains("5 records"), "{}", r.out);
+
+    let mut rows = 0;
+    let mut files = 0;
+    for entry in std::fs::read_dir(&out).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "parquet") {
+            let reader = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+            rows += reader.metadata().file_metadata().num_rows();
+            files += 1;
+        }
+    }
+    assert_eq!(rows, 5);
+    assert!(files >= 1);
+    assert_eq!(data_keys(&out), Vec::<String>::new(), "no NDJSON files");
+}

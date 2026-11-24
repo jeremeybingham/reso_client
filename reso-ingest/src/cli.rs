@@ -20,7 +20,9 @@ use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, EventFeed};
 use crate::manifest::{sync_resource, ResourceEntry, RunManifest};
-use crate::output::{new_run_id, NdjsonWriter};
+use crate::output::{new_run_id, NdjsonWriter, RecordWriter};
+#[cfg(feature = "parquet")]
+use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
 
 const TIMESTAMP_FIELD: &str = "ModificationTimestamp";
@@ -72,6 +74,9 @@ enum Command {
         /// Start a new data file after this many MiB
         #[arg(long, default_value_t = DEFAULT_MAX_FILE_MB, value_parser = clap::value_parser!(u64).range(1..))]
         max_file_mb: u64,
+        /// Data file format
+        #[arg(long, value_enum, default_value_t = Format::Ndjson)]
+        format: Format,
     },
     /// Print each server's $metadata model as JSON (resources, keys, properties, enums)
     Discover {
@@ -96,6 +101,17 @@ enum Command {
     },
 }
 
+/// File format of the data files
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+enum Format {
+    /// One tagged JSON line per record
+    #[default]
+    Ndjson,
+    /// Typed columns from `$metadata`; with --deletes or checkpoints this makes one file per page
+    #[cfg(feature = "parquet")]
+    Parquet,
+}
+
 /// The options the commands share, after parsing
 #[derive(Debug, Default)]
 struct Args {
@@ -107,6 +123,7 @@ struct Args {
     deletes: bool,
     start_over: bool,
     max_file_mb: Option<u64>,
+    format: Format,
 }
 
 impl Args {
@@ -148,6 +165,7 @@ pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i
             deletes,
             start_over,
             max_file_mb,
+            format,
         } => {
             let args = Args {
                 config: Some(config),
@@ -158,6 +176,7 @@ pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i
                 deletes,
                 start_over,
                 max_file_mb: Some(max_file_mb),
+                format,
             };
             sync(args, out, err).await
         }
@@ -260,6 +279,7 @@ struct SyncOptions {
     deletes: bool,
     start_over: bool,
     max_file_bytes: u64,
+    format: Format,
 }
 
 async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
@@ -275,6 +295,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         deletes: args.deletes,
         start_over: args.start_over,
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
+        format: args.format,
     });
 
     let (tx, mut rx) = unbounded_channel::<String>();
@@ -369,13 +390,7 @@ async fn sync_server(
             continue;
         };
 
-        let mut writer = match NdjsonWriter::new(
-            &options.out,
-            &name,
-            resource,
-            &options.run_id,
-            options.max_file_bytes,
-        ) {
+        let mut writer = match make_writer(&options, &metadata, &name, resource) {
             Ok(w) => w,
             Err(e) => {
                 entries.push(failed_entry(&name, resource, &e.to_string()));
@@ -391,7 +406,7 @@ async fn sync_server(
             &name,
             resource,
             spec,
-            &mut writer,
+            writer.as_mut(),
             &store,
             options.start_over,
         )
@@ -403,7 +418,7 @@ async fn sync_server(
                 resource,
                 &plan.key,
                 feed.as_ref(),
-                &mut writer,
+                writer.as_mut(),
                 &store,
             )
             .await;
@@ -428,6 +443,41 @@ async fn sync_server(
         entries.push(entry);
     }
     Ok(entries)
+}
+
+fn make_writer(
+    options: &SyncOptions,
+    #[cfg_attr(not(feature = "parquet"), allow(unused_variables))] metadata: &Metadata,
+    server: &str,
+    resource: &str,
+) -> Result<Box<dyn RecordWriter>, crate::error::IngestError> {
+    match options.format {
+        Format::Ndjson => Ok(Box::new(NdjsonWriter::new(
+            &options.out,
+            server,
+            resource,
+            &options.run_id,
+            options.max_file_bytes,
+        )?)),
+        #[cfg(feature = "parquet")]
+        Format::Parquet => {
+            let entity =
+                metadata
+                    .resource(resource)
+                    .ok_or_else(|| crate::error::IngestError::Output {
+                        path: options.out.display().to_string(),
+                        message: format!("no entity type for {resource} in $metadata"),
+                    })?;
+            Ok(Box::new(ParquetWriter::new(
+                &options.out,
+                server,
+                resource,
+                &options.run_id,
+                options.max_file_bytes,
+                entity,
+            )?))
+        }
+    }
 }
 
 struct Plan {

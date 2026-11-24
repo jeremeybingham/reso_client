@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Parquet output (#29), in `reso-ingest` behind the optional `parquet` feature: `ParquetWriter` (a `RecordWriter`) writes
+  the NDJSON rows as typed Parquet, with the schema taken from `$metadata` (`schema_for`, `arrow_type`; unknown types fall
+  back to text), and `reso-ingest sync --format parquet`. New optional dependencies in `reso-ingest` only: `parquet`,
+  `arrow-array`, `arrow-json`, `arrow-schema`.
 - Deletes and reconciliation (#27), in `reso-ingest`: `reconcile_deletes` writes delete events
   (`"event":"delete"` and `key`, same source/resource/run tags as records) for records that left a feed. It uses the
   server's `EntityEvent` feed when `$metadata` declares it (`EventFeed::detect`; field names configurable), looking up each

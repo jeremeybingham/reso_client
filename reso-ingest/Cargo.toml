@@ -17,6 +17,16 @@ thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 clap = { version = "4.6.10", features = ["derive"] }
+# Parquet output (optional feature `parquet`); the client crate does not depend on these
+arrow-array = { version = "60", optional = true }
+arrow-json = { version = "60", optional = true }
+arrow-schema = { version = "60", optional = true }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"], optional = true }
+
+[features]
+default = []
+# Write Parquet files (`ParquetWriter`, `reso-ingest sync --format parquet`)
+parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-json", "dep:arrow-schema"]
 
 [dev-dependencies]
 wiremock = "0.6"
