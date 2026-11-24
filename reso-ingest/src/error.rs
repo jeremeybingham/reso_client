@@ -37,4 +37,13 @@ pub enum IngestError {
         /// The variable that was looked up
         variable: String,
     },
+
+    /// An output file or the manifest could not be written
+    #[error("output {path}: {message}")]
+    Output {
+        /// File or directory involved
+        path: String,
+        /// Underlying I/O or serialization error text
+        message: String,
+    },
 }

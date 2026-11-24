@@ -8,6 +8,10 @@
 //! hold them, and [`ServerConfig::client_config`] reads those variables when a server is about to run.
 //! A file that contains a literal secret is rejected.
 //!
+//! Output goes through [`RecordWriter`]; [`NdjsonWriter`] writes one tagged line per record, rotating
+//! files by size, and [`RunManifest`] records counts, files, checkpoints and errors for the run.
+//! [`pull_resource`] streams one resource into a writer.
+//!
 //! # Examples
 //!
 //! ```
@@ -28,8 +32,12 @@
 
 mod config;
 mod error;
+mod manifest;
+mod output;
 mod runner;
 
 pub use config::{AuthConfig, Config, LimitsConfig, ServerConfig};
 pub use error::IngestError;
+pub use manifest::{pull_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure};
+pub use output::{new_run_id, now_rfc3339, NdjsonWriter, RecordWriter};
 pub use runner::{run_servers, ServerReport};
