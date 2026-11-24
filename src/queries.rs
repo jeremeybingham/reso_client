@@ -50,6 +50,15 @@ pub struct ReplicationQuery {
     top: Option<u32>,
 }
 
+/// Percent-encode each item of a `$select`/`$expand` list and join them with literal commas.
+fn encode_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|f| urlencoding::encode(f).into_owned())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 impl Query {
     /// Create a new query for a resource
     ///
@@ -108,11 +117,11 @@ impl Query {
             // Key access only supports $select and $expand (per OData spec)
             // Other query options like $filter, $top, $skip are not applicable to single entity access
             if let Some(fields) = &self.select_fields {
-                params.push(format!("$select={}", fields.join(",")));
+                params.push(format!("$select={}", encode_list(fields)));
             }
 
             if let Some(expands) = &self.expand {
-                params.push(format!("$expand={}", expands.join(",")));
+                params.push(format!("$expand={}", encode_list(expands)));
             }
 
             if !params.is_empty() {
@@ -150,12 +159,12 @@ impl Query {
 
         // $select
         if let Some(fields) = &self.select_fields {
-            params.push(format!("$select={}", fields.join(",")));
+            params.push(format!("$select={}", encode_list(fields)));
         }
 
         // $expand
         if let Some(expands) = &self.expand {
-            params.push(format!("$expand={}", expands.join(",")));
+            params.push(format!("$expand={}", encode_list(expands)));
         }
 
         // $orderby
@@ -237,7 +246,7 @@ impl ReplicationQuery {
 
         // $select
         if let Some(fields) = &self.select_fields {
-            params.push(format!("$select={}", fields.join(",")));
+            params.push(format!("$select={}", encode_list(fields)));
         }
 
         // $top

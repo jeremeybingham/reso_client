@@ -12,8 +12,8 @@
 //! - 🔐 **OAuth Authentication** - A static bearer token or OAuth2 client credentials with token caching and renewal
 //! - 📊 **Full OData Support** - Filter, sort, paginate, select fields, expand relations
 //! - 🔢 **Count Queries** - Efficient record counting via `/$count` endpoint
-//! - 🗂️ **Dataset ID Support** - Handle RESO servers that use dataset identifiers
-//! - 📖 **Metadata Retrieval** - Fetch and parse OData `$metadata` documents
+//! - 🗂️ **Dataset ID Support** - Bridge Interactive's dataset path segment (vendor-specific, not in the RESO standard)
+//! - 📖 **Metadata Retrieval** - Fetch `$metadata` as raw XML, or parse it into a model of entity sets, keys, properties and enums
 //! - 🔄 **Standard Replication** - `ModificationTimestamp` + key walks with resumable checkpoints ([`StandardReplication`]); Bridge's `/replication` endpoint is a separate vendor mode
 //! - ⚡ **Async/Await** - Built on tokio for high-performance concurrent operations
 //! - 🛡️ **Type-Safe Errors** - Comprehensive error types with detailed context

@@ -491,3 +491,41 @@ fn test_replication_query_resource_getter_different_resource() {
 
     assert_eq!(query.resource(), "Member");
 }
+
+#[test]
+fn test_select_and_expand_are_percent_encoded() {
+    let query = QueryBuilder::new("Property")
+        .select(&["City Name", "Ünïcode", "A/B"])
+        .expand(&["ListOffice($select=Name,Phone)", "Media"])
+        .build()
+        .unwrap();
+    assert_eq!(
+        query.to_odata_string(),
+        "Property?$select=City%20Name,%C3%9Cn%C3%AFcode,A%2FB\
+         &$expand=ListOffice%28%24select%3DName%2CPhone%29,Media"
+    );
+}
+
+#[test]
+fn test_key_access_select_and_expand_are_percent_encoded() {
+    let query = QueryBuilder::by_key("Property", "K1")
+        .select(&["City Name", "A/B"])
+        .expand(&["List Office"])
+        .build()
+        .unwrap();
+    assert_eq!(
+        query.to_odata_string(),
+        "Property('K1')?$select=City%20Name,A%2FB&$expand=List%20Office"
+    );
+}
+
+#[test]
+fn test_replication_select_is_percent_encoded() {
+    let query = ReplicationQueryBuilder::new("Property")
+        .select(&["City Name", "ListPrice"])
+        .build()
+        .unwrap();
+    assert!(query
+        .to_odata_string()
+        .contains("$select=City%20Name,ListPrice"));
+}

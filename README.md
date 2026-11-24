@@ -44,12 +44,6 @@ What works:
 - Configuration from environment variables or code; several clients can run side by side.
 - Async on tokio; about 180 unit, integration and doc tests, with HTTP mocked by wiremock.
 
-Known limits, each covered by a milestone issue:
-
-| Limit | Issue |
-|---|---|
-| `$select`/`$expand` lists are not URL-encoded; `dataset_id` is a Bridge-specific path segment | [#31](https://github.com/jeremeybingham/reso_client/issues/31) |
-
 ## Roadmap
 
 The milestone is split into phases. Phases A and B make the low-level client correct against real servers; phase C
@@ -122,7 +116,7 @@ Requires Rust 1.87 or later.
 | `RESO_TOKEN_URI` | With `RESO_CLIENT_ID` | Token endpoint URL |
 | `RESO_SCOPE` | No | Scope sent with the token request |
 | `RESO_CREDENTIAL_TRANSPORT` | No | How the id and secret are sent: `body` (form fields, default), `header` (HTTP Basic) or `query` |
-| `RESO_DATASET_ID` | No | Dataset segment inserted after the base URL (Bridge Interactive servers use it) |
+| `RESO_DATASET_ID` | No | Bridge Interactive-specific dataset segment inserted after the base URL; leave unset for other servers |
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
 | `RESO_MAX_RETRIES` | No | Retries for network errors and 429/502/503/504 (default 0: never retry) |
 | `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` | No | Client-side ceilings (default none) |
@@ -134,7 +128,7 @@ use std::time::Duration;
 use reso_client::{ClientConfig, ResoClient};
 
 let config = ClientConfig::new("https://api.mls.example/OData", "token")
-    .with_dataset_id("actris_ref") // only for servers that use a dataset path segment
+    .with_dataset_id("actris_ref") // Bridge-specific; only for servers that use a dataset path segment
     .with_timeout(Duration::from_secs(60));
 let client = ResoClient::with_config(config)?;
 

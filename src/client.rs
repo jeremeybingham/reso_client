@@ -59,7 +59,8 @@ pub struct ClientConfig {
     /// How requests are authenticated
     pub auth: Auth,
 
-    /// Optional dataset ID (inserted between base_url and resource)
+    /// Optional dataset ID (inserted between base_url and resource). Bridge Interactive-specific: it is not part of the
+    /// RESO Web API standard, so leave it unset for other servers.
     pub dataset_id: Option<String>,
 
     /// HTTP timeout duration
@@ -187,7 +188,8 @@ impl ClientConfig {
 
     /// Set dataset ID
     ///
-    /// Some RESO servers require a dataset identifier in the URL path.
+    /// **Bridge Interactive-specific.** Bridge servers put a dataset identifier in the URL path; the RESO Web API
+    /// standard does not, so leave this unset for other servers.
     /// When set, URLs will be formatted as: `{base_url}/{dataset_id}/{resource}`
     ///
     /// # Examples
