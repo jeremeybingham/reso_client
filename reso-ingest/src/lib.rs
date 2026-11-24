@@ -10,7 +10,9 @@
 //!
 //! Output goes through [`RecordWriter`]; [`NdjsonWriter`] writes one tagged line per record, rotating
 //! files by size, and [`RunManifest`] records counts, files, checkpoints and errors for the run.
-//! [`pull_resource`] streams one resource into a writer.
+//! [`pull_resource`] streams one resource into a writer; [`sync_resource`] does it incrementally, saving
+//! a JSON checkpoint ([`CheckpointStore`]) after each batch is written so the next run, or a rerun after
+//! a crash, continues from there.
 //!
 //! # Examples
 //!
@@ -30,14 +32,18 @@
 //! # Ok::<(), reso_ingest::IngestError>(())
 //! ```
 
+mod checkpoint;
 mod config;
 mod error;
 mod manifest;
 mod output;
 mod runner;
 
+pub use checkpoint::CheckpointStore;
 pub use config::{AuthConfig, Config, LimitsConfig, ServerConfig};
 pub use error::IngestError;
-pub use manifest::{pull_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure};
+pub use manifest::{
+    pull_resource, sync_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure,
+};
 pub use output::{new_run_id, now_rfc3339, NdjsonWriter, RecordWriter};
 pub use runner::{run_servers, ServerReport};

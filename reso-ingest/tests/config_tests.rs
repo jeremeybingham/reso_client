@@ -169,3 +169,21 @@ fn top_level_problems_are_parse_errors() {
         Err(IngestError::Parse(_))
     ));
 }
+
+#[test]
+fn retries_default_to_five_when_not_set() {
+    let config = Config::parse(
+        r#"
+[[server]]
+name = "a"
+base_url = "https://a.example/odata"
+[server.auth]
+type = "bearer"
+token_env = "SOME_TOKEN"
+"#,
+    )
+    .unwrap();
+    std::env::set_var("SOME_TOKEN", "t");
+    let client = config.servers[0].client_config().unwrap();
+    assert_eq!(client.retry.max_retries, 5);
+}

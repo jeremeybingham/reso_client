@@ -7,6 +7,7 @@ use reso_client::{Checkpoint, ResoClient, StandardReplication};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::checkpoint::CheckpointStore;
 use crate::error::IngestError;
 use crate::output::{now_rfc3339, RecordWriter};
 
@@ -130,13 +131,71 @@ impl RunManifest {
 /// Batches are written as they arrive, so memory use stays at one page. A fetch or write error
 /// stops this resource and is recorded in the returned entry (it is not returned as an `Err`),
 /// so the caller can add the entry to the manifest and go on with the next resource. The
-/// checkpoint in the entry covers every batch successfully written.
+/// checkpoint in the entry covers every batch successfully written. Nothing is saved to disk;
+/// see [`sync_resource`] for resumable, incremental pulls.
 pub async fn pull_resource(
     client: &ResoClient,
     server: &str,
     resource: &str,
     spec: StandardReplication,
     writer: &mut dyn RecordWriter,
+) -> ResourceEntry {
+    pull(client, server, resource, spec, writer, None).await
+}
+
+/// Incremental, resumable pull of one resource
+///
+/// Loads the saved checkpoint from `store` and continues after it (a first run, with no
+/// checkpoint, is the full load). After each batch is written and flushed, the checkpoint is
+/// saved, so it is never ahead of data on disk. With `start_over` the saved checkpoint is
+/// deleted first and everything is reloaded.
+///
+/// The guarantee is **at-least-once**: a crash between a flush and the save, or a failed save,
+/// means the next run fetches that last batch again. Re-fetched records land in the new run's
+/// files with the same key and a newer `fetched_at`; consumers de-duplicate on the record key
+/// (an upsert). Any `from_checkpoint` already on `spec` is replaced by the saved one when there
+/// is one, and kept as the starting point when there is not.
+///
+/// As with [`pull_resource`], errors (including an unreadable checkpoint file or a failed save)
+/// stop this resource and are recorded in the entry.
+pub async fn sync_resource(
+    client: &ResoClient,
+    server: &str,
+    resource: &str,
+    mut spec: StandardReplication,
+    writer: &mut dyn RecordWriter,
+    store: &CheckpointStore,
+    start_over: bool,
+) -> ResourceEntry {
+    let setup = if start_over {
+        store.clear(server, resource).map(|()| None)
+    } else {
+        store.load(server, resource)
+    };
+    match setup {
+        Ok(Some(cp)) => spec = spec.from_checkpoint(cp),
+        Ok(None) => {}
+        Err(e) => {
+            return ResourceEntry {
+                server: server.to_string(),
+                resource: resource.to_string(),
+                records: 0,
+                files: Vec::new(),
+                checkpoint: None,
+                error: Some(e.to_string()),
+            };
+        }
+    }
+    pull(client, server, resource, spec, writer, Some(store)).await
+}
+
+async fn pull(
+    client: &ResoClient,
+    server: &str,
+    resource: &str,
+    spec: StandardReplication,
+    writer: &mut dyn RecordWriter,
+    store: Option<&CheckpointStore>,
 ) -> ResourceEntry {
     let mut run = client.replicate(spec);
     let mut records = 0u64;
@@ -151,6 +210,16 @@ pub async fn pull_resource(
                     break;
                 }
                 records += batch.len() as u64;
+                if let Some(store) = store {
+                    let saved = writer.flush().and_then(|()| match run.checkpoint() {
+                        Some(cp) => store.save(server, resource, cp),
+                        None => Ok(()),
+                    });
+                    if let Err(e) = saved {
+                        error = Some(e.to_string());
+                        break;
+                    }
+                }
                 checkpoint = checkpoint_json(run.checkpoint());
             }
             Ok(None) => break,
