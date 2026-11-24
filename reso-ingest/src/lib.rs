@@ -9,7 +9,7 @@
 //! A file that contains a literal secret is rejected.
 //!
 //! Output goes through [`RecordWriter`]; [`NdjsonWriter`] writes one tagged line per record, rotating
-//! files by size, and [`RunManifest`] records counts, files, checkpoints and errors for the run.
+//! files by size (with the `parquet` feature, `ParquetWriter` writes the same rows as typed Parquet), and [`RunManifest`] records counts, files, checkpoints and errors for the run.
 //! [`pull_resource`] streams one resource into a writer; [`sync_resource`] does it incrementally, saving
 //! a JSON checkpoint ([`CheckpointStore`]) after each batch is written so the next run, or a rerun after
 //! a crash, continues from there.
@@ -41,6 +41,8 @@ mod deletes;
 mod error;
 mod manifest;
 mod output;
+#[cfg(feature = "parquet")]
+mod parquet_out;
 mod runner;
 
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
@@ -51,4 +53,6 @@ pub use manifest::{
     pull_resource, sync_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure,
 };
 pub use output::{new_run_id, now_rfc3339, NdjsonWriter, RecordWriter};
+#[cfg(feature = "parquet")]
+pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};

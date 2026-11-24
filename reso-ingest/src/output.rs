@@ -13,7 +13,7 @@ use crate::manifest::FileEntry;
 
 /// A sink for the records of one resource on one server in one run
 ///
-/// Implemented by [`NdjsonWriter`]; a Parquet writer (#29) will follow.
+/// Implemented by [`NdjsonWriter`] and, with the `parquet` feature, `ParquetWriter`.
 pub trait RecordWriter: Send {
     /// Write a batch, tagging each record with `fetched_at` (RFC 3339, UTC)
     ///
@@ -226,14 +226,14 @@ impl RecordWriter for NdjsonWriter {
     }
 }
 
-fn output_error(path: &Path, e: std::io::Error) -> IngestError {
+pub(crate) fn output_error(path: &Path, e: std::io::Error) -> IngestError {
     IngestError::Output {
         path: path.display().to_string(),
         message: e.to_string(),
     }
 }
 
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {

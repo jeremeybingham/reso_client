@@ -220,6 +220,12 @@ cargo run -p reso-ingest -- status --out data/                                # 
 - Output: tagged NDJSON files and `manifest.<run>.json` in `--out` (default `reso-out`); checkpoints in `--state`
   (default `<out>/state`). Progress lines (`##progress step=N/T label=server/resource`) go to stderr, the summary to
   stdout.
+- Parquet: build with `--features parquet` and pass `--format parquet` for typed columns instead of NDJSON. Columns are
+  the four tags, `fetched_at` (timestamp), `event`, `key` (delete events) and a `record` struct with one field per
+  `$metadata` property (strings, booleans, integers, doubles, `Date32`, UTC millisecond timestamps, lists for
+  collections; decimals become doubles; enum, complex and unknown types become text, objects as JSON text).
+  Properties not in `$metadata` are not kept. A Parquet file is only readable once finished, so each checkpoint save
+  finishes the file: `sync` writes one file per page, `pull_resource` one per `--max-file-mb`.
 - Exit code `0` on success, `1` if any server or resource failed (the summary names the servers), `2` for bad usage or
   configuration. Secrets come from the environment variables named in the config and are never printed.
 - `--help` lists every option; `reso-ingest/servers.example.toml` shows the configuration.
