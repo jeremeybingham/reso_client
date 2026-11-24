@@ -1,0 +1,41 @@
+# Example reso-ingest configuration: two servers.
+# Secrets are never written here: `*_env` keys name the environment variable that holds the value.
+# Copy this file, edit it, and export the variables before running.
+
+# Most servers running at the same time (default 4)
+max_concurrent_servers = 2
+
+# A vendor server with OAuth2 client credentials
+[[server]]
+name = "mls-one"
+base_url = "https://api.mls-one.example/odata"
+page_size = 1000
+timeout_secs = 60
+include = ["Property", "Member", "Office"]   # empty or absent = every resource
+exclude = ["Media"]                          # wins over include
+
+[server.auth]
+type = "client_credentials"
+token_url = "https://auth.mls-one.example/oauth/token"
+client_id_env = "MLS_ONE_CLIENT_ID"
+client_secret_env = "MLS_ONE_CLIENT_SECRET"
+scope = "api"
+transport = "body"                           # body (default), header or query
+
+[server.limits]
+max_retries = 4
+initial_backoff_ms = 500
+max_backoff_ms = 30000
+per_second = 2
+per_hour = 5000
+bytes_per_day = 5000000000
+
+# A server with a static bearer token and a dataset id
+[[server]]
+name = "mls-two"
+base_url = "https://api.mls-two.example/api/v2/OData"
+dataset_id = "ref_data"
+
+[server.auth]
+type = "bearer"
+token_env = "MLS_TWO_TOKEN"

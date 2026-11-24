@@ -1,5 +1,10 @@
 # Cargo.toml
 
+[workspace]
+members = [".", "reso-ingest"]
+# plain `cargo test` / `cargo clippy` cover both crates
+default-members = [".", "reso-ingest"]
+
 [package]
 name = "reso-client"
 version = "0.2.1"
@@ -16,6 +21,7 @@ keywords = ["reso", "odata", "real-estate", "mls", "api"]
 categories = ["api-bindings", "web-programming::http-client"]
 exclude = [
     ".github/",
+    "reso-ingest/",
     ".gitignore",
     "*.json",
     ".env*",

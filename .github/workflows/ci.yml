@@ -46,7 +46,7 @@ jobs:
             ${{ runner.os }}-cargo-build-target-
       
       - name: Run tests
-        run: cargo test --verbose --all-features
+        run: cargo test --verbose --all-features --workspace
 
   coverage:
     name: Code Coverage
@@ -123,7 +123,7 @@ jobs:
             ${{ runner.os }}-cargo-clippy-
       
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   build:
     name: Build

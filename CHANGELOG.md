@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Ingest crate skeleton (#24): the repository is now a cargo workspace; `reso-ingest` (unpublished, not part of the
+  `reso-client` package) parses a multi-server TOML file (`Config`, `servers.example.toml`), resolves secrets from named
+  environment variables, rejects literal secrets, and runs one task per server independently with a concurrency cap
+  (`run_servers`). New dependency in `reso-ingest` only: `toml`.
 - `$metadata` model (#23): `Metadata::parse(xml)` and `ResoClient::fetch_metadata_model()` return entity sets, entity
   types (key, properties with type, nullability, `MaxLength` and lookup name, navigation properties) and enum types
   with members. Unknown elements (annotations, vendor extensions, actions, complex types) are skipped.
