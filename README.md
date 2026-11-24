@@ -76,6 +76,7 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 6. [#24](https://github.com/jeremeybingham/reso_client/issues/24) Multi-server TOML configuration (secrets from
    environment variables). Done: `reso-ingest` crate (`Config`, `run_servers`, `reso-ingest/servers.example.toml`).
 7. [#25](https://github.com/jeremeybingham/reso_client/issues/25) NDJSON output with source tags and a run manifest.
+   Done: `NdjsonWriter`, `RunManifest` and `pull_resource` in `reso-ingest`.
 8. [#26](https://github.com/jeremeybingham/reso_client/issues/26) Incremental sync with checkpoints and resume.
 9. [#27](https://github.com/jeremeybingham/reso_client/issues/27) Deletes and reconciliation.
 10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`.

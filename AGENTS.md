@@ -68,7 +68,8 @@ src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RE
 src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter, ClientStats counters
 src/error.rs        ResoError and the Result alias
 reso-ingest/        second workspace crate (unpublished): config.rs (multi-server TOML, secrets via `*_env`), runner.rs
-                    (independent per-server tasks, concurrency cap), servers.example.toml, tests/
+                    (independent per-server tasks, concurrency cap), output.rs (RecordWriter, NdjsonWriter: tagged lines, size
+                    rotation), manifest.rs (RunManifest, pull_resource), servers.example.toml, tests/
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
