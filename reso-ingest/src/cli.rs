@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use clap::{error::ErrorKind, Parser, Subcommand};
 use reso_client::{Metadata, ResoClient, StandardReplication};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
@@ -26,40 +27,76 @@ const TIMESTAMP_FIELD: &str = "ModificationTimestamp";
 const DEFAULT_OUT: &str = "reso-out";
 const DEFAULT_MAX_FILE_MB: u64 = 256;
 
-/// The text printed by `--help` and on a usage error
-pub const USAGE: &str = "\
-reso-ingest: pull records from RESO Web API servers into NDJSON files
+/// Pull records from RESO Web API servers into NDJSON files
+///
+/// Secrets are read from the environment variables the configuration names and are never
+/// printed. Exit codes: 0 success, 1 a server or resource failed (named in the summary),
+/// 2 bad usage or configuration.
+#[derive(Debug, Parser)]
+#[command(name = "reso-ingest", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-USAGE:
-    reso-ingest sync     --config FILE [options]
-    reso-ingest discover --config FILE [options]
-    reso-ingest status   [--out DIR] [--state DIR]
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Pull every resource of the configured servers, incrementally
+    ///
+    /// Each run continues from the saved checkpoint (the first run is the full load). Writes
+    /// tagged NDJSON files and a manifest into --out, and checkpoints into --state.
+    Sync {
+        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        #[arg(long)]
+        config: PathBuf,
+        /// Only this server; repeat for several (default: all)
+        #[arg(long = "server")]
+        servers: Vec<String>,
+        /// Only this resource; repeat for several (default: all the config allows)
+        #[arg(long = "resource")]
+        resources: Vec<String>,
+        /// Output directory for data files and manifests
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// Checkpoint directory (default: <out>/state)
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// Also detect deleted records and write delete events
+        ///
+        /// Without an EntityEvent feed this pulls every key of each resource on each run.
+        #[arg(long)]
+        deletes: bool,
+        /// Delete the saved checkpoints of the selected resources first
+        #[arg(long)]
+        start_over: bool,
+        /// Start a new data file after this many MiB
+        #[arg(long, default_value_t = DEFAULT_MAX_FILE_MB, value_parser = clap::value_parser!(u64).range(1..))]
+        max_file_mb: u64,
+    },
+    /// Print each server's $metadata model as JSON (resources, keys, properties, enums)
+    Discover {
+        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        #[arg(long)]
+        config: PathBuf,
+        /// Only this server; repeat for several (default: all)
+        #[arg(long = "server")]
+        servers: Vec<String>,
+        /// Only this resource; repeat for several (default: all the config allows)
+        #[arg(long = "resource")]
+        resources: Vec<String>,
+    },
+    /// Show the saved checkpoints and the last run's manifest
+    Status {
+        /// Directory holding the manifests
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// Checkpoint directory (default: <out>/state)
+        #[arg(long)]
+        state: Option<PathBuf>,
+    },
+}
 
-COMMANDS:
-    sync        Pull every resource of every configured server, incrementally: each run continues
-                from the saved checkpoint (the first run is the full load). Writes tagged NDJSON
-                files and a manifest into --out, and checkpoints into --state.
-    discover    Print each server's $metadata model as JSON (resources, keys, properties, enums).
-    status      Show the saved checkpoints and the last run's manifest.
-
-OPTIONS:
-    --config FILE      Server configuration (TOML; see reso-ingest/servers.example.toml)
-    --server NAME      Only this server; repeat for several (default: all)
-    --resource NAME    Only this resource; repeat for several (default: all the config allows)
-    --out DIR          Output directory for data files and manifests (default: reso-out)
-    --state DIR        Checkpoint directory (default: <out>/state)
-    --deletes          (sync) Also detect deleted records and write delete events. Without an
-                       EntityEvent feed this pulls every key of each resource on each run
-    --start-over       (sync) Delete the saved checkpoints of the selected resources first
-    --max-file-mb N    (sync) Start a new data file after N MiB (default: 256)
-    -h, --help         Show this text
-
-EXIT CODES:
-    0 success    1 a server or resource failed (named in the summary)    2 bad usage or configuration
-
-Secrets are read from the environment variables the configuration names; they are never printed.
-";
-
+/// The options the commands share, after parsing
 #[derive(Debug, Default)]
 struct Args {
     config: Option<PathBuf>,
@@ -84,65 +121,69 @@ impl Args {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<Args, String> {
-    let mut parsed = Args::default();
-    let mut it = args.iter();
-    while let Some(flag) = it.next() {
-        let mut value = |name: &str| {
-            it.next()
-                .cloned()
-                .ok_or_else(|| format!("{name} needs a value"))
-        };
-        match flag.as_str() {
-            "--config" => parsed.config = Some(value("--config")?.into()),
-            "--server" => parsed.servers.push(value("--server")?),
-            "--resource" => parsed.resources.push(value("--resource")?),
-            "--out" => parsed.out = Some(value("--out")?.into()),
-            "--state" => parsed.state = Some(value("--state")?.into()),
-            "--max-file-mb" => {
-                let n = value("--max-file-mb")?;
-                match n.parse::<u64>() {
-                    Ok(n) if n >= 1 => parsed.max_file_mb = Some(n),
-                    _ => return Err("--max-file-mb needs a whole number of at least 1".into()),
-                }
-            }
-            "--deletes" => parsed.deletes = true,
-            "--start-over" => parsed.start_over = true,
-            other => return Err(format!("unknown option `{other}`")),
-        }
-    }
-    Ok(parsed)
-}
-
 /// Run the command line and return the exit code
 ///
-/// `args` excludes the program name. Output that is the result of a command (summary, JSON, status)
-/// goes to `out`; progress lines and errors go to `err`.
+/// `args` excludes the program name. Output that is the result of a command (summary, JSON, status,
+/// `--help`) goes to `out`; progress lines and errors go to `err`.
 pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let Some((command, rest)) = args.split_first() else {
-        let _ = write!(err, "{USAGE}");
-        return 2;
-    };
-    if matches!(command.as_str(), "-h" | "--help" | "help")
-        || rest.iter().any(|a| a == "-h" || a == "--help")
-    {
-        let _ = write!(out, "{USAGE}");
-        return 0;
-    }
-    let parsed = match parse_args(rest) {
-        Ok(p) => p,
-        Err(message) => {
-            let _ = writeln!(err, "error: {message}\n\n{USAGE}");
+    let argv = std::iter::once("reso-ingest".to_string()).chain(args.iter().cloned());
+    let cli = match Cli::try_parse_from(argv) {
+        Ok(cli) => cli,
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            let _ = write!(out, "{e}");
+            return 0;
+        }
+        Err(e) => {
+            let _ = write!(err, "{e}");
             return 2;
         }
     };
-    match command.as_str() {
-        "sync" => sync(parsed, out, err).await,
-        "discover" => discover(parsed, out, err).await,
-        "status" => status(parsed, out, err),
-        other => {
-            let _ = writeln!(err, "error: unknown command `{other}`\n\n{USAGE}");
-            2
+    match cli.command {
+        Command::Sync {
+            config,
+            servers,
+            resources,
+            out: out_dir,
+            state,
+            deletes,
+            start_over,
+            max_file_mb,
+        } => {
+            let args = Args {
+                config: Some(config),
+                servers,
+                resources,
+                out: Some(out_dir),
+                state,
+                deletes,
+                start_over,
+                max_file_mb: Some(max_file_mb),
+            };
+            sync(args, out, err).await
+        }
+        Command::Discover {
+            config,
+            servers,
+            resources,
+        } => {
+            let args = Args {
+                config: Some(config),
+                servers,
+                resources,
+                ..Args::default()
+            };
+            discover(args, out, err).await
+        }
+        Command::Status {
+            out: out_dir,
+            state,
+        } => {
+            let args = Args {
+                out: Some(out_dir),
+                state,
+                ..Args::default()
+            };
+            status(args, out, err)
         }
     }
 }

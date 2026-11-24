@@ -342,5 +342,5 @@ async fn usage_errors_exit_2_and_help_exits_0() {
     assert_eq!(cli(&["sync", "--wat"]).await.code, 2);
     let h = cli(&["sync", "--help"]).await;
     assert_eq!(h.code, 0);
-    assert!(h.out.contains("USAGE"));
+    assert!(h.out.contains("Usage"));
 }
