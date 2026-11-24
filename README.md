@@ -47,7 +47,6 @@ Known limits, each covered by a milestone issue:
 
 | Limit | Issue |
 |---|---|
-| Replication follows Bridge Interactive's `/replication` endpoint, not RESO-standard replication (`ModificationTimestamp` order plus `@odata.nextLink`), so it fails on most other vendors | [#20](https://github.com/jeremeybingham/reso_client/issues/20) |
 | No retry, backoff or rate limiting; `Retry-After` is ignored | [#22](https://github.com/jeremeybingham/reso_client/issues/22) |
 | `$metadata` is not parsed, so resources, keys and fields cannot be discovered | [#23](https://github.com/jeremeybingham/reso_client/issues/23) |
 | `$select`/`$expand` lists are not URL-encoded; `dataset_id` is a Bridge-specific path segment | [#31](https://github.com/jeremeybingham/reso_client/issues/31) |
@@ -62,7 +61,7 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 1. [#19](https://github.com/jeremeybingham/reso_client/issues/19) Standard paging: follow `@odata.nextLink` and add a
    page iterator.
 2. [#20](https://github.com/jeremeybingham/reso_client/issues/20) RESO-standard replication (`ModificationTimestamp`
-   plus nextLink).
+   plus nextLink): done, `StandardReplication`; Bridge's `/replication` stays as a vendor mode.
 3. [#21](https://github.com/jeremeybingham/reso_client/issues/21) OAuth2 client credentials with token caching and
    refresh.
 4. [#22](https://github.com/jeremeybingham/reso_client/issues/22) Retry, backoff and client-side rate limiting.

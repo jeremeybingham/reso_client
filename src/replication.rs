@@ -1,6 +1,10 @@
 // src/replication.rs
 
-//! Replication endpoint response types
+//! Bridge Interactive replication endpoint response types (vendor mode)
+//!
+//! This is **Bridge-specific**. For RESO-standard replication (`ModificationTimestamp` order and
+//! `@odata.nextLink`), which works on most other servers, use
+//! [`StandardReplication`](crate::StandardReplication).
 
 use serde_json::Value as JsonValue;
 

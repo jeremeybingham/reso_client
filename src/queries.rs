@@ -31,7 +31,9 @@ pub struct Query {
     expand: Option<Vec<String>>,
 }
 
-/// A structured RESO replication query
+/// A structured replication query for Bridge Interactive's `/replication` endpoint (vendor mode)
+///
+/// For RESO-standard replication on other servers use [`StandardReplication`](crate::StandardReplication).
 ///
 /// Replication queries are used for bulk data transfer and have different
 /// constraints than standard queries:

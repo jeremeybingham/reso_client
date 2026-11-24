@@ -62,10 +62,12 @@ src/client.rs       ResoClient, ClientConfig, HTTP operations
 src/auth.rs         Auth, ClientCredentials, token fetch, cache and renewal (OAuth2 client credentials)
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
-src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge-style)
+src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`, vendor mode)
+src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
 src/error.rs        ResoError and the Result alias
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
-                    paging_tests.rs (wiremock multi-page walks), auth_tests.rs (token endpoint, 401 retry),
+                    paging_tests.rs (wiremock multi-page walks),
+                    standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
                     auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis

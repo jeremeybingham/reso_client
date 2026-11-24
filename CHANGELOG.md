@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- RESO-standard replication (#20): `StandardReplication` (resource, key field, optional timestamp field, page size,
+  filter, select, starting `Checkpoint`), `ResoClient::replicate` and `ReplicationRun::next_batch`. It filters on
+  `ModificationTimestamp`, orders by timestamp then key, follows `@odata.nextLink`, and resumes strictly after the last
+  (timestamp, key) so records that share a timestamp are neither skipped nor repeated. With no next link it re-queries
+  from its checkpoint until an empty page (one extra request), so a server that caps `$top` still completes. A record
+  older than the one before it, or the checkpoint repeated, is the new error `ResoError::OutOfOrder`. Bridge's
+  `/replication` endpoint is unchanged and documented as a vendor mode.
 - OAuth2 client credentials (#21): `Auth` (`Bearer` or `ClientCredentials`), `ClientCredentials` (token URL, id,
   secret, optional scope, `CredentialTransport` body/Basic header/query) and `ClientConfig::with_auth`. The token is
   fetched on first use, cached, renewed after 90% of `expires_in`, and renewed once after a 401 before the request is

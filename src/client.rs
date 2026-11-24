@@ -303,7 +303,7 @@ impl ResoClient {
     /// Some RESO servers require a dataset ID in the URL path between the base URL
     /// and the resource/query path (e.g., `https://api.mls.com/odata/{dataset_id}/Property`).
     /// This method handles both cases transparently.
-    fn build_url(&self, path: &str) -> String {
+    pub(crate) fn build_url(&self, path: &str) -> String {
         match &self.config.dataset_id {
             Some(dataset_id) => format!("{}/{}/{}", self.config.base_url, dataset_id, path),
             None => format!("{}/{}", self.config.base_url, path),
