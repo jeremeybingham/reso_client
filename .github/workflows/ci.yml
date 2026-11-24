@@ -168,6 +168,11 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    # The repo's default token is read-only; on push the action reports its
+    # findings as a check run, which needs checks: write.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
