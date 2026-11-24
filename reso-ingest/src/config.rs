@@ -112,7 +112,10 @@ pub enum AuthConfig {
     },
 }
 
-/// Retry and rate-limit settings (all optional; default is no retry and no limit)
+/// Retries per request when a server does not set `max_retries` (the library itself defaults to 0)
+pub const DEFAULT_MAX_RETRIES: u32 = 5;
+
+/// Retry and rate-limit settings (all optional; default is 5 retries and no rate limit)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
@@ -335,7 +338,7 @@ impl ServerConfig {
         }
 
         let l = &self.limits;
-        let mut retry = RetryPolicy::new(l.max_retries.unwrap_or(0));
+        let mut retry = RetryPolicy::new(l.max_retries.unwrap_or(DEFAULT_MAX_RETRIES));
         let defaults = RetryPolicy::default();
         retry = retry.with_backoff(
             l.initial_backoff_ms

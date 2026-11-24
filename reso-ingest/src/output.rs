@@ -22,6 +22,14 @@ pub trait RecordWriter {
     /// [`IngestError::Output`] when a file cannot be written.
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError>;
 
+    /// Push everything written so far to disk-level storage (the OS), so a checkpoint saved
+    /// afterwards never points past data that could still be lost with the process
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the flush fails.
+    fn flush(&mut self) -> Result<(), IngestError>;
+
     /// Flush and close the output; returns the files written, in order
     ///
     /// # Errors
@@ -151,6 +159,16 @@ impl RecordWriter for NdjsonWriter {
                 f.records += 1;
                 f.bytes += size;
             }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), IngestError> {
+        if let Some(w) = self.current.as_mut() {
+            let path = self
+                .dir
+                .join(self.files.last().map_or("", |f| f.name.as_str()));
+            w.flush().map_err(|e| output_error(&path, e))?;
         }
         Ok(())
     }
