@@ -630,7 +630,6 @@ async fn test_authorization_header_included() {
 #[tokio::test]
 async fn test_execute_body_next_link_is_absolute_with_skip() {
     // The standard OData form: an absolute @odata.nextLink in the body, paged by $skip.
-    // The client does not read the body link yet (#19); callers can still follow it by hand.
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))

@@ -490,44 +490,33 @@ impl ResoClient {
         let url = self.build_url(&query.to_odata_string());
         info!("Executing replication query: {}", url);
 
-        let response = self
-            .send_authenticated_request(&url, "application/json")
-            .await?;
-
-        // Extract next link from response headers before consuming response
-        // The replication endpoint uses the "next" header (preferred) or "link" header
-        // to indicate more records are available. This must be extracted before reading
-        // the response body since consuming the response moves ownership.
-        let next_link = response
-            .headers()
-            .get("next")
-            .or_else(|| response.headers().get("link"))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        debug!("Next link from headers: {:?}", next_link);
-
-        let json = Self::parse_json_response(response).await?;
-
-        // Extract records from OData response envelope
-        // OData wraps result arrays in a "value" field: {"value": [...], "@odata.context": "..."}
-        let records = json
-            .get("value")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        debug!("Retrieved {} records", records.len());
+        let page = self.get_page(&url).await?;
+        debug!(
+            "Retrieved {} records, next link: {:?}",
+            page.records.len(),
+            page.next_link
+        );
 
         Ok(crate::replication::ReplicationResponse::new(
-            records, next_link,
+            page.records,
+            page.next_link,
         ))
     }
 
-    /// Execute a next link from a previous replication response
+    /// Execute a next link from a previous response
     ///
-    /// Takes the full URL from a previous replication response's `next_link`
-    /// field and fetches the next batch of records.
+    /// Takes the URL from a previous response's next link and fetches the next batch of
+    /// records. The next link of the new batch is read the same way as
+    /// [`execute_page`](Self::execute_page) reads it: the body's `@odata.nextLink`, else a
+    /// `next` header, else a `Link` header with `rel="next"`, resolved to an absolute URL.
+    ///
+    /// For standard OData paging, [`execute_page`](Self::execute_page) and
+    /// [`next_page`](Self::next_page) are simpler.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResoError::Parse`] when `next_link` is not on the configured server (another
+    /// scheme, host or port), because the request would carry the bearer token there.
     ///
     /// # Examples
     ///
@@ -559,38 +548,127 @@ impl ResoClient {
 
         info!("Executing next link: {}", next_link);
 
-        let response = self
-            .send_authenticated_request(next_link, "application/json")
-            .await?;
-
-        // Extract next link from response headers before consuming response
-        // The replication endpoint uses the "next" header (preferred) or "link" header
-        // to indicate more records are available. This must be extracted before reading
-        // the response body since consuming the response moves ownership.
-        let next_link = response
-            .headers()
-            .get("next")
-            .or_else(|| response.headers().get("link"))
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        debug!("Next link from headers: {:?}", next_link);
-
-        let json = Self::parse_json_response(response).await?;
-
-        // Extract records from OData response envelope
-        // OData wraps result arrays in a "value" field: {"value": [...], "@odata.context": "..."}
-        let records = json
-            .get("value")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        debug!("Retrieved {} records", records.len());
+        let page = self.fetch_page(next_link).await?;
+        debug!(
+            "Retrieved {} records, next link: {:?}",
+            page.records.len(),
+            page.next_link
+        );
 
         Ok(crate::replication::ReplicationResponse::new(
-            records, next_link,
+            page.records,
+            page.next_link,
         ))
+    }
+
+    /// Execute a query and return its first page
+    ///
+    /// The server decides the page size. When it has more records it offers a next link,
+    /// which [`Page::next_link`](crate::Page::next_link) holds as an absolute URL whichever
+    /// form the server used (body `@odata.nextLink`, `next` header or `Link` header). Follow it
+    /// with [`next_page`](Self::next_page).
+    ///
+    /// `$top` caps the total number of records, not the page size: leave it out to walk a
+    /// whole result set.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, QueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let query = QueryBuilder::new("Property")
+    ///     .filter("StandardStatus eq 'Active'")
+    ///     .select(&["ListingKey", "ListPrice"])
+    ///     .build()?;
+    ///
+    /// let mut page = client.execute_page(&query).await?;
+    /// loop {
+    ///     for record in &page.records {
+    ///         println!("{}", record["ListingKey"]);
+    ///     }
+    ///     match client.next_page(&page).await? {
+    ///         Some(next) => page = next,
+    ///         None => break,
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn execute_page(&self, query: &crate::queries::Query) -> Result<crate::Page> {
+        use tracing::info;
+
+        let url = self.build_url(&query.to_odata_string());
+        info!("Executing query (page): {}", url);
+        self.get_page(&url).await
+    }
+
+    /// Fetch the page after `page`, or `None` when `page` is the last one
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResoError::Parse`] when the next link is not on the configured server
+    /// (another scheme, host or port), or when the server returns the same URL as the next
+    /// link of the page it came from, which would loop forever.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, QueryBuilder};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let first = client.execute_page(&QueryBuilder::new("Member").build()?).await?;
+    /// if let Some(second) = client.next_page(&first).await? {
+    ///     println!("{} more records", second.records.len());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn next_page(&self, page: &crate::Page) -> Result<Option<crate::Page>> {
+        let Some(next_link) = page.next_link.as_deref() else {
+            return Ok(None);
+        };
+        if next_link == page.url {
+            return Err(ResoError::Parse(format!(
+                "Server returned the page's own URL as its next link: {}",
+                next_link
+            )));
+        }
+        self.fetch_page(next_link).await.map(Some)
+    }
+
+    /// Fetch one page from an absolute URL, such as a saved next link
+    ///
+    /// Use it to resume paging from a next link stored earlier. The URL must be on the
+    /// configured server.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResoError::Parse`] when `url` is not on the configured server (another
+    /// scheme, host or port), because the request would carry the bearer token there.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::ResoClient;
+    /// # async fn example(client: &ResoClient, saved_link: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// let page = client.fetch_page(saved_link).await?;
+    /// println!("{} records, more: {}", page.records.len(), page.has_more());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn fetch_page(&self, url: &str) -> Result<crate::Page> {
+        crate::paging::check_same_origin(&self.config.base_url, url)?;
+        self.get_page(url).await
+    }
+
+    /// GET a collection URL and build a [`Page`](crate::Page) from the response
+    async fn get_page(&self, url: &str) -> Result<crate::Page> {
+        let response = self
+            .send_authenticated_request(url, "application/json")
+            .await?;
+        // Headers must be copied before the body is read, since reading consumes the response.
+        let headers = response.headers().clone();
+        let json = Self::parse_json_response(response).await?;
+        Ok(crate::Page::from_response(json, &headers, url))
     }
 }
 

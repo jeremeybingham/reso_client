@@ -167,7 +167,31 @@
 //! # }
 //! ```
 //!
-//! ## Bulk Data with Replication
+//! ## Paging Through a Result Set
+//!
+//! The server decides the page size and returns a next link while more records remain.
+//! [`ResoClient::execute_page`] returns the first [`Page`]; [`ResoClient::next_page`] returns
+//! the next one, or `None` after the last.
+//!
+//! ```no_run
+//! # use reso_client::{ResoClient, QueryBuilder};
+//! # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+//! let query = QueryBuilder::new("Property")
+//!     .filter("StandardStatus eq 'Active'")
+//!     .build()?;
+//!
+//! let mut page = client.execute_page(&query).await?;
+//! let mut all_records = page.records.clone();
+//! while let Some(next) = client.next_page(&page).await? {
+//!     all_records.extend(next.records.iter().cloned());
+//!     page = next;
+//! }
+//! println!("Total records fetched: {}", all_records.len());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Bulk Data with Replication (Bridge `/replication`)
 //!
 //! ```no_run
 //! # use reso_client::{ResoClient, ReplicationQueryBuilder};
@@ -238,12 +262,14 @@
 
 pub mod client;
 pub mod error;
+pub mod paging;
 pub mod queries;
 pub mod replication;
 
 // Re-export main types for convenience
 pub use client::{ClientConfig, ResoClient};
 pub use error::{ResoError, Result};
+pub use paging::Page;
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;
 
