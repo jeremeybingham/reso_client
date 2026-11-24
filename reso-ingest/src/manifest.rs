@@ -31,6 +31,8 @@ pub struct ResourceEntry {
     pub resource: String,
     /// Records written
     pub records: u64,
+    /// Delete events written (see [`reconcile_deletes`](crate::reconcile_deletes))
+    pub deletes: u64,
     /// Files written
     pub files: Vec<FileEntry>,
     /// Position after the last record written, when the pull used replication
@@ -180,6 +182,7 @@ pub async fn sync_resource(
                 server: server.to_string(),
                 resource: resource.to_string(),
                 records: 0,
+                deletes: 0,
                 files: Vec::new(),
                 checkpoint: None,
                 error: Some(e.to_string()),
@@ -241,6 +244,7 @@ async fn pull(
         server: server.to_string(),
         resource: resource.to_string(),
         records,
+        deletes: 0,
         files,
         checkpoint,
         error,

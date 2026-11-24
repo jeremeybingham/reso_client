@@ -183,6 +183,9 @@ impl RecordWriter for FailingWriter {
         }
         self.inner.write_batch(records, at)
     }
+    fn write_deletes(&mut self, keys: &[Value], at: &str) -> Result<(), IngestError> {
+        self.inner.write_deletes(keys, at)
+    }
     fn flush(&mut self) -> Result<(), IngestError> {
         self.inner.flush()
     }

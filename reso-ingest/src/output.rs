@@ -22,6 +22,15 @@ pub trait RecordWriter {
     /// [`IngestError::Output`] when a file cannot be written.
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError>;
 
+    /// Write delete events for records that left the feed, with the same tags as records
+    ///
+    /// Each line has `"event":"delete"` and the record's `key` instead of a `record`.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when a file cannot be written.
+    fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError>;
+
     /// Push everything written so far to disk-level storage (the OS), so a checkpoint saved
     /// afterwards never points past data that could still be lost with the process
     ///
@@ -48,6 +57,17 @@ struct TaggedLine<'a> {
     record: &'a Value,
 }
 
+/// One delete event: the same four tags, then `event` and the key of the record that is gone
+#[derive(Serialize)]
+struct DeleteLine<'a> {
+    source: &'a str,
+    resource: &'a str,
+    fetched_at: &'a str,
+    run_id: &'a str,
+    event: &'static str,
+    key: &'a Value,
+}
+
 /// Writes tagged records as NDJSON, rotating files by size
 ///
 /// Each line is `{"source":…,"resource":…,"fetched_at":…,"run_id":…,"record":{…}}`; `record` is
@@ -55,7 +75,9 @@ struct TaggedLine<'a> {
 /// (characters other than letters, digits, `-` and `_` become `_`). A new file starts when the
 /// next line would take the current one past `max_file_bytes`, so no line is split; a single
 /// line larger than the limit gets a file of its own. Records are written as they arrive, so
-/// memory use does not grow with the size of the pull.
+/// memory use does not grow with the size of the pull. Delete events share the files:
+/// `{"source":…,"resource":…,"fetched_at":…,"run_id":…,"event":"delete","key":…}`; a line with
+/// an `event` is an event, a line with a `record` is a record.
 pub struct NdjsonWriter {
     dir: PathBuf,
     source: String,
@@ -122,43 +144,68 @@ impl NdjsonWriter {
     }
 }
 
+impl NdjsonWriter {
+    /// Append one serialized line, starting a new file first when the size limit would be passed
+    fn write_line(&mut self, mut bytes: Vec<u8>) -> Result<(), IngestError> {
+        bytes.push(b'\n');
+        let size = bytes.len() as u64;
+        let needs_new = match self.files.last() {
+            Some(f) if self.current.is_some() => {
+                f.bytes > 0 && f.bytes + size > self.max_file_bytes
+            }
+            _ => true,
+        };
+        if needs_new {
+            self.close_current()?;
+            self.open_next()?;
+        }
+        let path = self
+            .dir
+            .join(self.files.last().map_or("", |f| f.name.as_str()));
+        if let Some(w) = self.current.as_mut() {
+            w.write_all(&bytes).map_err(|e| output_error(&path, e))?;
+        }
+        if let Some(f) = self.files.last_mut() {
+            f.records += 1;
+            f.bytes += size;
+        }
+        Ok(())
+    }
+
+    fn serialize(&self, line: &impl Serialize) -> Result<Vec<u8>, IngestError> {
+        serde_json::to_vec(line).map_err(|e| IngestError::Output {
+            path: self.dir.display().to_string(),
+            message: e.to_string(),
+        })
+    }
+}
+
 impl RecordWriter for NdjsonWriter {
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
         for record in records {
-            let line = TaggedLine {
+            let bytes = self.serialize(&TaggedLine {
                 source: &self.source,
                 resource: &self.resource,
                 fetched_at,
                 run_id: &self.run_id,
                 record,
-            };
-            let mut bytes = serde_json::to_vec(&line).map_err(|e| IngestError::Output {
-                path: self.dir.display().to_string(),
-                message: e.to_string(),
             })?;
-            bytes.push(b'\n');
-            let size = bytes.len() as u64;
+            self.write_line(bytes)?;
+        }
+        Ok(())
+    }
 
-            let needs_new = match self.files.last() {
-                Some(f) if self.current.is_some() => {
-                    f.bytes > 0 && f.bytes + size > self.max_file_bytes
-                }
-                _ => true,
-            };
-            if needs_new {
-                self.close_current()?;
-                self.open_next()?;
-            }
-            let path = self
-                .dir
-                .join(self.files.last().map_or("", |f| f.name.as_str()));
-            if let Some(w) = self.current.as_mut() {
-                w.write_all(&bytes).map_err(|e| output_error(&path, e))?;
-            }
-            if let Some(f) = self.files.last_mut() {
-                f.records += 1;
-                f.bytes += size;
-            }
+    fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {
+        for key in keys {
+            let bytes = self.serialize(&DeleteLine {
+                source: &self.source,
+                resource: &self.resource,
+                fetched_at,
+                run_id: &self.run_id,
+                event: "delete",
+                key,
+            })?;
+            self.write_line(bytes)?;
         }
         Ok(())
     }

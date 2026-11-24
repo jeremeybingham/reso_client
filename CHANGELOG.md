@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Deletes and reconciliation (#27), in `reso-ingest`: `reconcile_deletes` writes delete events
+  (`"event":"delete"` and `key`, same source/resource/run tags as records) for records that left a feed. It uses the
+  server's `EntityEvent` feed when `$metadata` declares it (`EventFeed::detect`; field names configurable), looking up each
+  named record, and otherwise compares a `$select=<key>` pull with the key set saved by the previous run. The first run
+  only records a baseline; a failed or partial key pull emits nothing; an empty key pull over a non-empty set is
+  refused. `RecordWriter::write_deletes` (new required method), `CheckpointStore` key-set and event-sequence files,
+  `ResourceEntry::deletes`.
 - Ingest crate skeleton (#24): the repository is now a cargo workspace; `reso-ingest` (unpublished, not part of the
   `reso-client` package) parses a multi-server TOML file (`Config`, `servers.example.toml`), resolves secrets from named
   environment variables, rejects literal secrets, and runs one task per server independently with a concurrency cap
