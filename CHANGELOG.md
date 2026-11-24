@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Retry, backoff and client-side rate limiting (#22): `RetryPolicy` (network errors and 429/502/503/504 are retried
+  with exponential backoff and jitter; `Retry-After` in seconds or as an HTTP date replaces the wait, and one longer
+  than `max_retry_after` ends the retrying; other 4xx and 500 are never retried), `RateLimit` (requests per second,
+  per hour and response bytes per day; requests wait instead of failing), `ClientConfig::with_retry`,
+  `with_rate_limit` and the fields `retry` and `rate_limit`, `ResoClient::stats` (`ClientStats`: requests, retries,
+  bytes), and `RESO_MAX_RETRIES`, `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` in `from_env`.
+  Defaults retry nothing and limit nothing, so behaviour is unchanged until configured. Adding public fields to
+  `ClientConfig` breaks code that builds it with a struct literal. The `tokio` dependency gains the `time` feature
+  (and `test-util` as a dev feature); no new crates.
 - RESO-standard replication (#20): `StandardReplication` (resource, key field, optional timestamp field, page size,
   filter, select, starting `Checkpoint`), `ResoClient::replicate` and `ReplicationRun::next_batch`. It filters on
   `ModificationTimestamp`, orders by timestamp then key, follows `@odata.nextLink`, and resumes strictly after the last

@@ -47,7 +47,6 @@ Known limits, each covered by a milestone issue:
 
 | Limit | Issue |
 |---|---|
-| No retry, backoff or rate limiting; `Retry-After` is ignored | [#22](https://github.com/jeremeybingham/reso_client/issues/22) |
 | `$metadata` is not parsed, so resources, keys and fields cannot be discovered | [#23](https://github.com/jeremeybingham/reso_client/issues/23) |
 | `$select`/`$expand` lists are not URL-encoded; `dataset_id` is a Bridge-specific path segment | [#31](https://github.com/jeremeybingham/reso_client/issues/31) |
 
@@ -64,7 +63,8 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
    plus nextLink): done, `StandardReplication`; Bridge's `/replication` stays as a vendor mode.
 3. [#21](https://github.com/jeremeybingham/reso_client/issues/21) OAuth2 client credentials with token caching and
    refresh.
-4. [#22](https://github.com/jeremeybingham/reso_client/issues/22) Retry, backoff and client-side rate limiting.
+4. [#22](https://github.com/jeremeybingham/reso_client/issues/22) Retry, backoff and client-side rate limiting: done,
+   `RetryPolicy`, `RateLimit` and `ResoClient::stats` (off by default).
 
 **Phase B: knowing what a server has**
 
@@ -118,6 +118,8 @@ Requires Rust 1.87 or later.
 | `RESO_CREDENTIAL_TRANSPORT` | No | How the id and secret are sent: `body` (form fields, default), `header` (HTTP Basic) or `query` |
 | `RESO_DATASET_ID` | No | Dataset segment inserted after the base URL (Bridge Interactive servers use it) |
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
+| `RESO_MAX_RETRIES` | No | Retries for network errors and 429/502/503/504 (default 0: never retry) |
+| `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` | No | Client-side ceilings (default none) |
 
 Or configure in code:
 
