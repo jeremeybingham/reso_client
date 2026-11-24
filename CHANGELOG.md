@@ -7,30 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- `$select` and `$expand` items are now percent-encoded (spaces, slashes, non-ASCII, nested options) in key-access,
-  normal and replication queries; the commas between items stay literal (#31).
+## [0.3.0] - 2026-11-24
 
-### Changed
-- `dataset_id` / `with_dataset_id` / `RESO_DATASET_ID` are documented as Bridge Interactive-specific; the crate docs
-  describe `$metadata` retrieval as raw XML plus a parsed model (#31).
+The low-level client now follows the RESO standard (paging, replication, OAuth2, retries, `$metadata` model). The
+repository also gains `reso-ingest`, a second crate with a multi-server sync command; it is **not** published with this
+release and its entries are listed separately below.
 
 ### Added
-- Parquet output (#29), in `reso-ingest` behind the optional `parquet` feature: `ParquetWriter` (a `RecordWriter`) writes
-  the NDJSON rows as typed Parquet, with the schema taken from `$metadata` (`schema_for`, `arrow_type`; unknown types fall
-  back to text), and `reso-ingest sync --format parquet`. New optional dependencies in `reso-ingest` only: `parquet`,
-  `arrow-array`, `arrow-json`, `arrow-schema`.
-- Deletes and reconciliation (#27), in `reso-ingest`: `reconcile_deletes` writes delete events
-  (`"event":"delete"` and `key`, same source/resource/run tags as records) for records that left a feed. It uses the
-  server's `EntityEvent` feed when `$metadata` declares it (`EventFeed::detect`; field names configurable), looking up each
-  named record, and otherwise compares a `$select=<key>` pull with the key set saved by the previous run. The first run
-  only records a baseline; a failed or partial key pull emits nothing; an empty key pull over a non-empty set is
-  refused. `RecordWriter::write_deletes` (new required method), `CheckpointStore` key-set and event-sequence files,
-  `ResourceEntry::deletes`.
-- Ingest crate skeleton (#24): the repository is now a cargo workspace; `reso-ingest` (unpublished, not part of the
-  `reso-client` package) parses a multi-server TOML file (`Config`, `servers.example.toml`), resolves secrets from named
-  environment variables, rejects literal secrets, and runs one task per server independently with a concurrency cap
-  (`run_servers`). New dependency in `reso-ingest` only: `toml`.
 - `$metadata` model (#23): `Metadata::parse(xml)` and `ResoClient::fetch_metadata_model()` return entity sets, entity
   types (key, properties with type, nullability, `MaxLength` and lookup name, navigation properties) and enum types
   with members. Unknown elements (annotations, vendor extensions, actions, complex types) are skipped.
@@ -60,20 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Standard server-driven paging (#19): `Page` (records, absolute `next_link`, `count`, request `url`, raw `body`),
   `ResoClient::execute_page`, `ResoClient::next_page` and `ResoClient::fetch_page` (resume from a saved link), and
   `paging::parse_link_header` for RFC 8288 `Link: <url>; rel="next"` headers. Example `test_standard_paging`.
-- Comprehensive test coverage improvements (44% → ~90% estimated):
-  - **27 unit tests** for error module (`src/error.rs`) covering error body parsing, HTTP status mapping, Display traits, and OData error deserialization
-  - **17 unit tests** for replication module (`src/replication.rs`) covering ReplicationResponse construction, helper methods, and edge cases
-  - **30 unit tests** for client module (`src/client.rs`) covering ClientConfig construction, environment variable handling, and URL building logic
-  - **22 HTTP integration tests** (`tests/client_http_tests.rs`) using wiremock for testing HTTP operations without requiring live API servers
-- Test infrastructure improvements:
-  - Added `wiremock` dependency for HTTP mocking in integration tests
-  - Added `serial_test` dependency to prevent race conditions in environment variable tests
-  - Fixed test isolation issues by marking environment-dependent tests with `#[serial]` attribute
-- Test suite now includes **183 total tests**: 74 library unit tests, 22 HTTP integration tests, 36 query integration tests, and 51 doc tests
-- CLAUDE.md file for Claude LLM integration
-- llms.txt file for general llm integration
+- Test suite: unit, wiremock integration and doc tests for every module (from about 44% line coverage in
+  0.2.0); `serial_test` keeps environment-variable tests apart.
 
 ### Changed
+- `dataset_id` / `with_dataset_id` / `RESO_DATASET_ID` are documented as Bridge Interactive-specific; the crate docs
+  describe `$metadata` retrieval as raw XML plus a parsed model (#31).
 - **Breaking:** `ClientConfig::token: String` is replaced by `ClientConfig::auth: Auth`. `ClientConfig::new(url, token)`
   and `RESO_TOKEN` work as before.
 - **Breaking (behaviour):** `execute_next_link` and `execute_replication` now read the next link from the body's
@@ -82,7 +57,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<url>; rel="next"` text. Relative links are resolved to absolute URLs (against `@odata.context`, else the request URL).
 - **Breaking (behaviour):** `execute_next_link` refuses a link on another scheme, host or port (`ResoError::Parse`),
   so the bearer token is never sent to a server other than the configured one.
-- Updated test documentation to clarify test count and organization
+- **Breaking:** `ResoError` gains the variants `TokenRequest` and `OutOfOrder`; a `match` without a wildcard arm
+  no longer compiles.
+
+### Fixed
+- `$select` and `$expand` items are now percent-encoded (spaces, slashes, non-ASCII, nested options) in key-access,
+  normal and replication queries; the commas between items stay literal (#31).
+
+### reso-ingest (unpublished, in this repository)
+- Ingest crate skeleton (#24): the repository is now a cargo workspace; `reso-ingest` (unpublished, not part of the
+  `reso-client` package) parses a multi-server TOML file (`Config`, `servers.example.toml`), resolves secrets from named
+  environment variables, rejects literal secrets, and runs one task per server independently with a concurrency cap
+  (`run_servers`). New dependency in `reso-ingest` only: `toml`.
+- NDJSON output (#25): `NdjsonWriter` writes one line per record with `source`, `resource`, `fetched_at` and `run_id`
+  tags around the raw record, rotating files by size; `RunManifest` and `pull_resource` record each run.
+- Incremental sync (#26): `sync_resource` and `CheckpointStore` (one JSON file per server and resource, written
+  atomically after each flushed batch; at-least-once).
+- Deletes and reconciliation (#27), in `reso-ingest`: `reconcile_deletes` writes delete events
+  (`"event":"delete"` and `key`, same source/resource/run tags as records) for records that left a feed. It uses the
+  server's `EntityEvent` feed when `$metadata` declares it (`EventFeed::detect`; field names configurable), looking up each
+  named record, and otherwise compares a `$select=<key>` pull with the key set saved by the previous run. The first run
+  only records a baseline; a failed or partial key pull emits nothing; an empty key pull over a non-empty set is
+  refused. `RecordWriter::write_deletes` (new required method), `CheckpointStore` key-set and event-sequence files,
+  `ResourceEntry::deletes`.
+- The `reso-ingest` command (#28): `sync` (`--server`, `--resource`, `--deletes`, `--start-over`, `--max-file-mb`,
+  `--format`), `discover` and `status`. New dependency in `reso-ingest` only: `clap`.
+- Parquet output (#29), in `reso-ingest` behind the optional `parquet` feature: `ParquetWriter` (a `RecordWriter`) writes
+  the NDJSON rows as typed Parquet, with the schema taken from `$metadata` (`schema_for`, `arrow_type`; unknown types fall
+  back to text), and `reso-ingest sync --format parquet`. New optional dependencies in `reso-ingest` only: `parquet`,
+  `arrow-array`, `arrow-json`, `arrow-schema`.
 
 ## [0.2.1] - 2025-11-07
 
@@ -153,5 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Token redaction in debug output to prevent accidental exposure in logs
 
-[0.2.0]: https://github.com/jeremeybingham/reso_client/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/jeremeybingham/reso_client/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jeremeybingham/reso_client/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/jeremeybingham/reso_client/releases/tag/v0.2.1
+[0.2.0]: https://github.com/jeremeybingham/reso_client/jeremeybingham/reso_client/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jeremeybingham/reso_client/releases/tag/v0.1.0

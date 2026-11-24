@@ -7,7 +7,7 @@ default-members = [".", "reso-ingest"]
 
 [package]
 name = "reso-client"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.87.0"
 authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
@@ -24,6 +24,7 @@ exclude = [
     "reso-ingest/",
     ".gitignore",
     "*.json",
+    "dev_summary.md",
     ".env*",
 ]
 

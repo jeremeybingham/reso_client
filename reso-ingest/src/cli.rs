@@ -29,7 +29,7 @@ const TIMESTAMP_FIELD: &str = "ModificationTimestamp";
 const DEFAULT_OUT: &str = "reso-out";
 const DEFAULT_MAX_FILE_MB: u64 = 256;
 
-/// Pull records from RESO Web API servers into NDJSON files
+/// Pull records from RESO Web API servers into NDJSON (or, with the `parquet` feature, Parquet) files
 ///
 /// Secrets are read from the environment variables the configuration names and are never
 /// printed. Exit codes: 0 success, 1 a server or resource failed (named in the summary),
