@@ -94,3 +94,29 @@ async fn live_walk_all_pages_matches_count() {
     assert!(pages > 1);
     assert_eq!(keys.len() as u64, expected);
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_client_credentials_each_transport() {
+    // The reference server's mock `POST /oauth/token` accepts any credentials (#35).
+    use reso_client::{ClientCredentials, CredentialTransport};
+    let url =
+        std::env::var("RESO_LIVE_URL").expect("set RESO_LIVE_URL, e.g. http://localhost:8080");
+    for transport in [
+        CredentialTransport::Body,
+        CredentialTransport::BasicHeader,
+        CredentialTransport::Query,
+    ] {
+        let creds = ClientCredentials::new(format!("{}/oauth/token", url), "any-id", "any-secret")
+            .with_transport(transport);
+        let client = ResoClient::with_config(ClientConfig::with_auth(&url, creds)).unwrap();
+        let query = QueryBuilder::new("Property").top(1).build().unwrap();
+        let response = client.execute(&query).await.unwrap();
+        assert_eq!(
+            response["value"].as_array().unwrap().len(),
+            1,
+            "{:?}",
+            transport
+        );
+    }
+}

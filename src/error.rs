@@ -139,6 +139,13 @@ pub enum ResoError {
     /// Invalid query
     #[error("Invalid query: {0}")]
     InvalidQuery(String),
+
+    /// The OAuth2 token endpoint could not be reached or did not return an access token
+    ///
+    /// The message holds the HTTP status and the standard OAuth2 `error` and
+    /// `error_description` fields when present; it never holds the client secret or a token.
+    #[error("Token request failed: {0}")]
+    TokenRequest(String),
 }
 
 impl ResoError {

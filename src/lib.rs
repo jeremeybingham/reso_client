@@ -9,7 +9,7 @@
 //! # Features
 //!
 //! - 🔍 **Fluent Query Builder** - Build complex OData queries with a clean, fluent API
-//! - 🔐 **OAuth Authentication** - Built-in support for bearer token authentication
+//! - 🔐 **OAuth Authentication** - A static bearer token or OAuth2 client credentials with token caching and renewal
 //! - 📊 **Full OData Support** - Filter, sort, paginate, select fields, expand relations
 //! - 🔢 **Count Queries** - Efficient record counting via `/$count` endpoint
 //! - 🗂️ **Dataset ID Support** - Handle RESO servers that use dataset identifiers
@@ -67,6 +67,9 @@
 //! ```bash
 //! RESO_BASE_URL=https://api.bridgedataoutput.com/api/v2/OData
 //! RESO_TOKEN=your-oauth-token
+//! # Or OAuth2 client credentials (used instead of RESO_TOKEN when RESO_CLIENT_ID is set):
+//! # RESO_CLIENT_ID=...  RESO_CLIENT_SECRET=...  RESO_TOKEN_URI=https://auth.mls.example/token
+//! # RESO_SCOPE=api  RESO_CREDENTIAL_TRANSPORT=body   # Optional; body, header or query
 //! RESO_DATASET_ID=actris_ref  # Optional
 //! RESO_TIMEOUT=30              # Optional, seconds
 //! ```
@@ -260,6 +263,7 @@
 //! - [OData 4.0 Protocol](https://www.odata.org/documentation/)
 //! - [RESO Data Dictionary](https://www.reso.org/data-dictionary/)
 
+pub mod auth;
 pub mod client;
 pub mod error;
 pub mod paging;
@@ -267,6 +271,7 @@ pub mod queries;
 pub mod replication;
 
 // Re-export main types for convenience
+pub use auth::{Auth, ClientCredentials, CredentialTransport};
 pub use client::{ClientConfig, ResoClient};
 pub use error::{ResoError, Result};
 pub use paging::Page;
