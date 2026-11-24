@@ -67,3 +67,30 @@ async fn live_bad_filter_is_odata_error() {
         .unwrap();
     assert!(client.execute(&query).await.is_err());
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_walk_all_pages_matches_count() {
+    // Walk Lookup (thousands of rows, default page 100) to the end with next_page (#19) and
+    // compare with $count; keys must not repeat.
+    let client = live_client();
+    let query = QueryBuilder::new("Lookup").with_count().build().unwrap();
+    let mut page = client.execute_page(&query).await.unwrap();
+    let expected = page.count.expect("@odata.count");
+    let mut keys = std::collections::HashSet::new();
+    let mut pages = 1;
+    loop {
+        for record in &page.records {
+            assert!(keys.insert(record["LookupKey"].to_string()), "repeated key");
+        }
+        match client.next_page(&page).await.unwrap() {
+            Some(next) => {
+                page = next;
+                pages += 1;
+            }
+            None => break,
+        }
+    }
+    assert!(pages > 1);
+    assert_eq!(keys.len() as u64, expected);
+}

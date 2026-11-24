@@ -59,9 +59,11 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 src/lib.rs          public API, re-exports, crate docs
 src/client.rs       ResoClient, ClientConfig, HTTP operations
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
+src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge-style)
 src/error.rs        ResoError and the Result alias
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
+                    paging_tests.rs (wiremock multi-page walks),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
 ```

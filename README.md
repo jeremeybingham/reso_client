@@ -45,7 +45,6 @@ Known limits, each covered by a milestone issue:
 
 | Limit | Issue |
 |---|---|
-| `execute_next_link` reads only response headers, so a standard result set cannot be paged past the second page | [#19](https://github.com/jeremeybingham/reso_client/issues/19) |
 | Replication follows Bridge Interactive's `/replication` endpoint, not RESO-standard replication (`ModificationTimestamp` order plus `@odata.nextLink`), so it fails on most other vendors | [#20](https://github.com/jeremeybingham/reso_client/issues/20) |
 | Static bearer token only; no OAuth2 client credentials or token refresh | [#21](https://github.com/jeremeybingham/reso_client/issues/21) |
 | No retry, backoff or rate limiting; `Retry-After` is ignored | [#22](https://github.com/jeremeybingham/reso_client/issues/22) |
@@ -149,6 +148,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{} records", records.len());
     }
 
+    // Walk a whole result set: the server picks the page size and sends a next link
+    let mut page = client.execute_page(&QueryBuilder::new("Member").build()?).await?;
+    let mut total = page.records.len();
+    while let Some(next) = client.next_page(&page).await? {
+        total += next.records.len();
+        page = next;
+    }
+    println!("{} members", total);
+
     // The service's $metadata document, as XML
     let metadata = client.fetch_metadata().await?;
     println!("{} bytes of metadata", metadata.len());
@@ -176,6 +184,7 @@ Interactive's `actris_ref` reference dataset; the project has no working server 
 | `test_filters`, `test_select` | Filter syntax and field selection |
 | `test_core_queries` | The [RESO Web API core query examples](https://transport.reso.org/proposals/web-api-core.html#28-core-query-examples) |
 | `test_metadata` | Fetching `$metadata` |
+| `test_standard_paging` | Walking a whole result set by `@odata.nextLink` (`execute_page`, `next_page`); runs against the local reference server |
 | `test_actris_ref` | A tour of the reference dataset |
 | `analyze_property_fields` | Which Property fields are populated across 200 active listings |
 | `analyze_active_listings` | Summary statistics for 200 active residential listings |
