@@ -80,7 +80,9 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 8. [#26](https://github.com/jeremeybingham/reso_client/issues/26) Incremental sync with checkpoints and resume.
    Done: `sync_resource` and `CheckpointStore` in `reso-ingest` (JSON file per server and resource, at-least-once;
    `reso-ingest` retries default to 5).
-9. [#27](https://github.com/jeremeybingham/reso_client/issues/27) Deletes and reconciliation.
+9. [#27](https://github.com/jeremeybingham/reso_client/issues/27) Deletes and reconciliation. Done:
+   `reconcile_deletes` in `reso-ingest` writes delete events, from the server's `EntityEvent` feed when `$metadata`
+   declares it (`EventFeed::detect`), otherwise by comparing key sets between runs (first run = baseline, no deletes).
 10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`.
 11. [#29](https://github.com/jeremeybingham/reso_client/issues/29) Parquet output with a schema from `$metadata`.
 

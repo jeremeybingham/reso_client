@@ -13,6 +13,8 @@
 //! [`pull_resource`] streams one resource into a writer; [`sync_resource`] does it incrementally, saving
 //! a JSON checkpoint ([`CheckpointStore`]) after each batch is written so the next run, or a rerun after
 //! a crash, continues from there.
+//! [`reconcile_deletes`] finds records that left a server's feed, from its event resource ([`EventFeed`])
+//! when it has one, otherwise by comparing key sets, and writes them as delete events.
 //!
 //! # Examples
 //!
@@ -34,6 +36,7 @@
 
 mod checkpoint;
 mod config;
+mod deletes;
 mod error;
 mod manifest;
 mod output;
@@ -41,6 +44,7 @@ mod runner;
 
 pub use checkpoint::CheckpointStore;
 pub use config::{AuthConfig, Config, LimitsConfig, ServerConfig};
+pub use deletes::{reconcile_deletes, EventFeed};
 pub use error::IngestError;
 pub use manifest::{
     pull_resource, sync_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure,
