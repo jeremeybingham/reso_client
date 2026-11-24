@@ -1,0 +1,20 @@
+[package]
+name = "reso-ingest"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.87.0"
+description = "Ingest layer over reso-client: multi-server configuration and runs"
+license = "MIT"
+repository = "https://github.com/jeremeybingham/reso_client"
+publish = false
+
+[dependencies]
+reso-client = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
