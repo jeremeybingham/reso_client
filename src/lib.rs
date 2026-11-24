@@ -266,6 +266,7 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod metadata;
 pub mod paging;
 pub mod queries;
 pub mod replication;
@@ -276,6 +277,9 @@ pub mod standard_replication;
 pub use auth::{Auth, ClientCredentials, CredentialTransport};
 pub use client::{ClientConfig, ResoClient};
 pub use error::{ResoError, Result};
+pub use metadata::{
+    EntitySet, EntityType, EnumMember, EnumType, Metadata, NavigationProperty, Property,
+};
 pub use paging::Page;
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;

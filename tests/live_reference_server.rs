@@ -120,3 +120,14 @@ async fn live_client_credentials_each_transport() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_metadata_model() {
+    let client = live_client();
+    let model = client.fetch_metadata_model().await.unwrap();
+    let property = model.resource("Property").expect("Property type");
+    assert_eq!(property.key, vec!["ListingKey"]);
+    assert!(property.property("ListPrice").is_some());
+    assert!(property.navigation.iter().any(|n| n.name == "ListAgent"));
+}

@@ -676,6 +676,25 @@ impl ResoClient {
         self.parse_text_response(response).await
     }
 
+    /// Fetch `$metadata` and parse it into a [`Metadata`](crate::Metadata) model (entity sets, keys, properties,
+    /// navigation properties, enum types).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::ResoClient;
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = client.fetch_metadata_model().await?;
+    /// for name in model.resource_names() {
+    ///     println!("{}", name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn fetch_metadata_model(&self) -> Result<crate::metadata::Metadata> {
+        crate::metadata::Metadata::parse(&self.fetch_metadata().await?)
+    }
+
     /// Execute a replication query
     ///
     /// The replication endpoint is designed for bulk data transfer and supports

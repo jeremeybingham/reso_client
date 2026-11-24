@@ -745,3 +745,19 @@ async fn test_execute_404_html_body() {
 
     assert!(client.execute(&query).await.is_err());
 }
+
+#[tokio::test]
+async fn fetch_metadata_model_parses_served_xml() {
+    let server = MockServer::start().await;
+    let xml = r#"<edmx:Edmx xmlns:edmx="urn:x"><edmx:DataServices><Schema Namespace="n">
+        <EntityType Name="Property"><Key><PropertyRef Name="K"/></Key><Property Name="K" Type="Edm.String" Nullable="false"/></EntityType>
+        </Schema></edmx:DataServices></edmx:Edmx>"#;
+    Mock::given(method("GET"))
+        .and(path("/$metadata"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(xml))
+        .mount(&server)
+        .await;
+    let client = ResoClient::with_config(ClientConfig::new(server.uri(), "t")).unwrap();
+    let model = client.fetch_metadata_model().await.unwrap();
+    assert_eq!(model.resource("Property").unwrap().key, vec!["K"]);
+}

@@ -37,7 +37,8 @@ What works:
 
 - Fluent `QueryBuilder`: `$filter`, `$select`, `$orderby`, `$top`/`$skip`, `$count`, `$expand`, `$apply`, lookup
   by key.
-- Count-only queries (`/$count`) and raw `$metadata` retrieval (returned as an XML string, not parsed).
+- Count-only queries (`/$count`) and `$metadata` as a raw XML string (`fetch_metadata`) or a parsed model (`fetch_metadata_model`: entity sets, keys,
+  properties, navigation properties, enum types).
 - OAuth2 client credentials: the token is fetched, cached, renewed at 90% of its lifetime and once after a 401.
 - Typed errors (`ResoError`) mapped from HTTP status codes and OData error bodies.
 - Configuration from environment variables or code; several clients can run side by side.
@@ -47,7 +48,6 @@ Known limits, each covered by a milestone issue:
 
 | Limit | Issue |
 |---|---|
-| `$metadata` is not parsed, so resources, keys and fields cannot be discovered | [#23](https://github.com/jeremeybingham/reso_client/issues/23) |
 | `$select`/`$expand` lists are not URL-encoded; `dataset_id` is a Bridge-specific path segment | [#31](https://github.com/jeremeybingham/reso_client/issues/31) |
 
 ## Roadmap
@@ -68,8 +68,8 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 
 **Phase B: knowing what a server has**
 
-5. [#23](https://github.com/jeremeybingham/reso_client/issues/23) Parse `$metadata` into a model (entity sets, keys,
-   fields, types, lookups).
+5. [#23](https://github.com/jeremeybingham/reso_client/issues/23) Parse `$metadata` into a model: done,
+   `Metadata` and `ResoClient::fetch_metadata_model`.
 
 **Phase C: the ingest layer**
 
@@ -179,6 +179,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The service's $metadata document, as XML
     let metadata = client.fetch_metadata().await?;
     println!("{} bytes of metadata", metadata.len());
+
+    // The same document parsed: resources, keys, fields, enums
+    let model = client.fetch_metadata_model().await?;
+    for name in model.resource_names() {
+        println!("{}", name);
+    }
 
     Ok(())
 }

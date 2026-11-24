@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `$metadata` model (#23): `Metadata::parse(xml)` and `ResoClient::fetch_metadata_model()` return entity sets, entity
+  types (key, properties with type, nullability, `MaxLength` and lookup name, navigation properties) and enum types
+  with members. Unknown elements (annotations, vendor extensions, actions, complex types) are skipped.
+  `resource_names()` falls back to entity type names for servers with no entity container (the RESO reference
+  server). New dependency: `roxmltree` (no dependencies of its own). `fetch_metadata` still returns the raw string.
 - Retry, backoff and client-side rate limiting (#22): `RetryPolicy` (network errors and 429/502/503/504 are retried
   with exponential backoff and jitter; `Retry-After` in seconds or as an HTTP date replaces the wait, and one longer
   than `max_retry_after` ends the retrying; other 4xx and 500 are never retried), `RateLimit` (requests per second,
