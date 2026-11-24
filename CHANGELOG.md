@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `$select` and `$expand` items are now percent-encoded (spaces, slashes, non-ASCII, nested options) in key-access,
+  normal and replication queries; the commas between items stay literal (#31).
+
+### Changed
+- `dataset_id` / `with_dataset_id` / `RESO_DATASET_ID` are documented as Bridge Interactive-specific; the crate docs
+  describe `$metadata` retrieval as raw XML plus a parsed model (#31).
+
 ### Added
 - Parquet output (#29), in `reso-ingest` behind the optional `parquet` feature: `ParquetWriter` (a `RecordWriter`) writes
   the NDJSON rows as typed Parquet, with the schema taken from `$metadata` (`schema_for`, `arrow_type`; unknown types fall
