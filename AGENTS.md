@@ -9,8 +9,9 @@ server-driven paging, RESO-standard replication, rate limits, retries), keep dat
 syncs, and hand records over **raw**, tagged with their source, in a few file formats (NDJSON first, then Parquet). The
 typical user is an aggregator pulling from many MLS vendors into its own store. It is **not** responsible for
 de-duplication across MLSs, local field mapping, data-licence or display-rule enforcement, or choosing a database.
-Today the crate is a one-server, one-bearer-token query client; the plan is tracker issue #18 (milestone "Ingest layer",
-child issues #19-#31, test-server need #32), and README.md has the current limits and roadmap.
+Today the crate is a one-server query client (bearer token or OAuth2 client credentials); the plan is tracker issue
+#18 (milestone "Ingest layer", child issues #19-#31, test-server need #32), and README.md has the current limits and
+roadmap.
 
 ## Finding things
 
@@ -58,12 +59,14 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 ```
 src/lib.rs          public API, re-exports, crate docs
 src/client.rs       ResoClient, ClientConfig, HTTP operations
+src/auth.rs         Auth, ClientCredentials, token fetch, cache and renewal (OAuth2 client credentials)
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge-style)
 src/error.rs        ResoError and the Result alias
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
-                    paging_tests.rs (wiremock multi-page walks),
+                    paging_tests.rs (wiremock multi-page walks), auth_tests.rs (token endpoint, 401 retry),
+                    auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
 ```

@@ -2,15 +2,19 @@
 
 //! Client configuration and connection management
 
-use crate::error::{ResoError, Result};
-use reqwest::Client;
 use std::time::Duration;
+
+use reqwest::Client;
+use tracing::debug;
+
+use crate::auth::{Auth, ClientCredentials, CredentialTransport, TokenProvider};
+use crate::error::{ResoError, Result};
 
 /// Configuration for RESO client
 ///
 /// Holds all configuration needed to connect to a RESO Web API server,
-/// including the base URL, authentication token, optional dataset ID,
-/// and HTTP timeout settings.
+/// including the base URL, authentication ([`Auth`]: a static bearer token or
+/// OAuth2 client credentials), optional dataset ID, and HTTP timeout settings.
 ///
 /// # Examples
 ///
@@ -36,14 +40,21 @@ use std::time::Duration;
 ///     "your-token"
 /// )
 /// .with_timeout(Duration::from_secs(60));
+///
+/// // With OAuth2 client credentials
+/// # use reso_client::ClientCredentials;
+/// let config = ClientConfig::with_auth(
+///     "https://api.mls.com/odata",
+///     ClientCredentials::new("https://auth.mls.com/token", "client-id", "client-secret"),
+/// );
 /// ```
 #[derive(Clone)]
 pub struct ClientConfig {
     /// Base URL of the RESO Web API server
     pub base_url: String,
 
-    /// OAuth bearer token
-    pub token: String,
+    /// How requests are authenticated
+    pub auth: Auth,
 
     /// Optional dataset ID (inserted between base_url and resource)
     pub dataset_id: Option<String>,
@@ -56,7 +67,7 @@ impl std::fmt::Debug for ClientConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientConfig")
             .field("base_url", &self.base_url)
-            .field("token", &"<redacted>")
+            .field("auth", &self.auth)
             .field("dataset_id", &self.dataset_id)
             .field("timeout", &self.timeout)
             .finish()
@@ -68,7 +79,12 @@ impl ClientConfig {
     ///
     /// Expects:
     /// - `RESO_BASE_URL` - Base URL of the RESO server (e.g., `https://api.mls.com/api/v2/OData`)
-    /// - `RESO_TOKEN` - OAuth bearer token
+    /// - Either OAuth2 client credentials:
+    ///   - `RESO_CLIENT_ID`, `RESO_CLIENT_SECRET`, `RESO_TOKEN_URI` - client id, secret and
+    ///     token endpoint
+    ///   - `RESO_SCOPE` (optional) - scope sent with the token request
+    ///   - `RESO_CREDENTIAL_TRANSPORT` (optional) - `body` (default), `header` or `query`
+    /// - or `RESO_TOKEN` - a static bearer token (used when `RESO_CLIENT_ID` is not set)
     /// - `RESO_DATASET_ID` (optional) - Dataset ID inserted in URL path
     /// - `RESO_TIMEOUT` (optional) - Timeout in seconds (default: 30)
     ///
@@ -84,8 +100,7 @@ impl ClientConfig {
         let base_url = std::env::var("RESO_BASE_URL")
             .map_err(|_| ResoError::Config("RESO_BASE_URL not set".into()))?;
 
-        let token = std::env::var("RESO_TOKEN")
-            .map_err(|_| ResoError::Config("RESO_TOKEN not set".into()))?;
+        let auth = auth_from_env()?;
 
         let dataset_id = std::env::var("RESO_DATASET_ID").ok();
 
@@ -96,13 +111,13 @@ impl ClientConfig {
 
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            token,
+            auth,
             dataset_id,
             timeout: Duration::from_secs(timeout_secs),
         })
     }
 
-    /// Create configuration manually
+    /// Create configuration with a static bearer token
     ///
     /// # Examples
     ///
@@ -114,9 +129,25 @@ impl ClientConfig {
     /// );
     /// ```
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self::with_auth(base_url, Auth::Bearer(token.into()))
+    }
+
+    /// Create configuration with any [`Auth`], such as OAuth2 [`ClientCredentials`]
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::{ClientConfig, ClientCredentials};
+    /// let config = ClientConfig::with_auth(
+    ///     "https://api.mls.com/odata",
+    ///     ClientCredentials::new("https://auth.mls.com/token", "client-id", "client-secret")
+    ///         .with_scope("api"),
+    /// );
+    /// ```
+    pub fn with_auth(base_url: impl Into<String>, auth: impl Into<Auth>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            token: token.into(),
+            auth: auth.into(),
             dataset_id: None,
             timeout: Duration::from_secs(30),
         }
@@ -155,10 +186,52 @@ impl ClientConfig {
     }
 }
 
+/// Read the auth settings: client credentials when `RESO_CLIENT_ID` is set, else `RESO_TOKEN`
+fn auth_from_env() -> Result<Auth> {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let Some(client_id) = var("RESO_CLIENT_ID") else {
+        return var("RESO_TOKEN").map(Auth::Bearer).ok_or_else(|| {
+            ResoError::Config(
+                "RESO_TOKEN not set (or set RESO_CLIENT_ID, RESO_CLIENT_SECRET and RESO_TOKEN_URI)"
+                    .into(),
+            )
+        });
+    };
+    let required = |name: &str| {
+        var(name).ok_or_else(|| {
+            ResoError::Config(format!("{} not set (needed with RESO_CLIENT_ID)", name))
+        })
+    };
+    let mut credentials = ClientCredentials::new(
+        required("RESO_TOKEN_URI")?,
+        client_id,
+        required("RESO_CLIENT_SECRET")?,
+    );
+    if let Some(scope) = var("RESO_SCOPE") {
+        credentials = credentials.with_scope(scope);
+    }
+    if let Some(transport) = var("RESO_CREDENTIAL_TRANSPORT") {
+        let transport = CredentialTransport::parse(&transport).ok_or_else(|| {
+            ResoError::Config(format!(
+                "RESO_CREDENTIAL_TRANSPORT must be body, header or query, not '{}'",
+                transport
+            ))
+        })?;
+        credentials = credentials.with_transport(transport);
+    }
+    Ok(Auth::ClientCredentials(credentials))
+}
+
 /// RESO Web API client
+///
+/// Requests are authenticated with the configured [`Auth`]. With OAuth2 client credentials the
+/// client fetches a token on first use, reuses it until 90% of its lifetime has passed, and on a
+/// 401 fetches a new token and retries the request once. Share one client (for example in an
+/// `Arc`) so concurrent requests share its token.
 pub struct ResoClient {
     config: ClientConfig,
     http_client: Client,
+    tokens: TokenProvider,
 }
 
 impl ResoClient {
@@ -204,6 +277,7 @@ impl ResoClient {
             .map_err(|e| ResoError::Config(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self {
+            tokens: TokenProvider::new(config.auth.clone()),
             config,
             http_client,
         })
@@ -240,21 +314,27 @@ impl ResoClient {
     ///
     /// This helper method encapsulates the common pattern of:
     /// 1. Sending a GET request with Authorization header
-    /// 2. Checking the response status
-    /// 3. Converting error responses to appropriate ResoError variants
+    /// 2. On a 401 with client credentials, renewing the token and retrying once
+    /// 3. Checking the response status
+    /// 4. Converting error responses to appropriate ResoError variants
     async fn send_authenticated_request(
         &self,
         url: &str,
         accept: &str,
     ) -> Result<reqwest::Response> {
-        let response = self
-            .http_client
-            .get(url)
-            .header("Authorization", format!("Bearer {}", self.config.token))
-            .header("Accept", accept)
-            .send()
-            .await
-            .map_err(|e| ResoError::Network(e.to_string()))?;
+        let token = self.tokens.token(&self.http_client).await?;
+        let mut response = self.send_get(url, accept, &token).await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(renewed) = self
+                .tokens
+                .renew_after_401(&self.http_client, &token)
+                .await?
+            {
+                debug!("Retrying once with a new access token");
+                response = self.send_get(url, accept, &renewed).await?;
+            }
+        }
 
         let status = response.status();
 
@@ -266,6 +346,17 @@ impl ResoClient {
         }
 
         Ok(response)
+    }
+
+    /// Send one GET with the given bearer token
+    async fn send_get(&self, url: &str, accept: &str, token: &str) -> Result<reqwest::Response> {
+        self.http_client
+            .get(url)
+            .bearer_auth(token)
+            .header("Accept", accept)
+            .send()
+            .await
+            .map_err(|e| ResoError::Network(e.to_string()))
     }
 
     /// Parse JSON response from a successful request
@@ -683,6 +774,22 @@ mod tests {
         std::env::remove_var("RESO_TOKEN");
         std::env::remove_var("RESO_DATASET_ID");
         std::env::remove_var("RESO_TIMEOUT");
+        for name in [
+            "RESO_CLIENT_ID",
+            "RESO_CLIENT_SECRET",
+            "RESO_TOKEN_URI",
+            "RESO_SCOPE",
+            "RESO_CREDENTIAL_TRANSPORT",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    fn bearer(config: &ClientConfig) -> &str {
+        match &config.auth {
+            Auth::Bearer(token) => token,
+            Auth::ClientCredentials(_) => panic!("expected a bearer token"),
+        }
     }
 
     #[test]
@@ -690,7 +797,7 @@ mod tests {
         let config = ClientConfig::new("https://api.example.com/odata", "test-token");
 
         assert_eq!(config.base_url, "https://api.example.com/odata");
-        assert_eq!(config.token, "test-token");
+        assert_eq!(bearer(&config), "test-token");
         assert_eq!(config.dataset_id, None);
         assert_eq!(config.timeout, Duration::from_secs(30));
     }
@@ -747,7 +854,7 @@ mod tests {
         let config = ClientConfig::from_env().unwrap();
 
         assert_eq!(config.base_url, "https://api.example.com/odata");
-        assert_eq!(config.token, "my-test-token");
+        assert_eq!(bearer(&config), "my-test-token");
         assert_eq!(config.dataset_id, None);
         assert_eq!(config.timeout, Duration::from_secs(30));
 
@@ -874,7 +981,7 @@ mod tests {
         let cloned = config.clone();
 
         assert_eq!(cloned.base_url, config.base_url);
-        assert_eq!(cloned.token, config.token);
+        assert_eq!(bearer(&cloned), bearer(&config));
         assert_eq!(cloned.dataset_id, config.dataset_id);
         assert_eq!(cloned.timeout, config.timeout);
     }
@@ -1049,6 +1156,72 @@ mod tests {
         let config = ClientConfig::from_env().unwrap();
 
         assert_eq!(config.timeout, Duration::from_secs(0));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_from_env_client_credentials() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_CLIENT_ID", "the-id");
+        std::env::set_var("RESO_CLIENT_SECRET", "the-secret");
+        std::env::set_var("RESO_TOKEN_URI", "https://auth.example.com/token");
+        std::env::set_var("RESO_SCOPE", "api");
+        std::env::set_var("RESO_CREDENTIAL_TRANSPORT", "header");
+        // RESO_CLIENT_ID wins over RESO_TOKEN
+        std::env::set_var("RESO_TOKEN", "ignored");
+
+        let config = ClientConfig::from_env().unwrap();
+        match &config.auth {
+            Auth::ClientCredentials(c) => {
+                assert_eq!(c.client_id, "the-id");
+                assert_eq!(c.client_secret, "the-secret");
+                assert_eq!(c.token_url, "https://auth.example.com/token");
+                assert_eq!(c.scope.as_deref(), Some("api"));
+                assert_eq!(c.transport, CredentialTransport::BasicHeader);
+            }
+            Auth::Bearer(_) => panic!("expected client credentials"),
+        }
+        assert!(!format!("{:?}", config).contains("the-secret"));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_from_env_client_credentials_missing_secret() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_CLIENT_ID", "the-id");
+        std::env::set_var("RESO_TOKEN_URI", "https://auth.example.com/token");
+
+        match ClientConfig::from_env() {
+            Err(ResoError::Config(msg)) => assert!(msg.contains("RESO_CLIENT_SECRET")),
+            other => panic!("expected Config error, got {:?}", other.map(|_| ())),
+        }
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_from_env_bad_transport() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata");
+        std::env::set_var("RESO_CLIENT_ID", "the-id");
+        std::env::set_var("RESO_CLIENT_SECRET", "the-secret");
+        std::env::set_var("RESO_TOKEN_URI", "https://auth.example.com/token");
+        std::env::set_var("RESO_CREDENTIAL_TRANSPORT", "cookie");
+
+        match ClientConfig::from_env() {
+            Err(ResoError::Config(msg)) => {
+                assert!(msg.contains("RESO_CREDENTIAL_TRANSPORT"));
+                assert!(!msg.contains("the-secret"));
+            }
+            other => panic!("expected Config error, got {:?}", other.map(|_| ())),
+        }
 
         cleanup_env_vars();
     }

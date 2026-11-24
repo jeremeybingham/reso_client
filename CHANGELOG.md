@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- OAuth2 client credentials (#21): `Auth` (`Bearer` or `ClientCredentials`), `ClientCredentials` (token URL, id,
+  secret, optional scope, `CredentialTransport` body/Basic header/query) and `ClientConfig::with_auth`. The token is
+  fetched on first use, cached, renewed after 90% of `expires_in`, and renewed once after a 401 before the request is
+  retried; concurrent requests wait for one fetch. `from_env` reads `RESO_CLIENT_ID`, `RESO_CLIENT_SECRET`,
+  `RESO_TOKEN_URI`, `RESO_SCOPE` and `RESO_CREDENTIAL_TRANSPORT`. New error `ResoError::TokenRequest`.
 - Standard server-driven paging (#19): `Page` (records, absolute `next_link`, `count`, request `url`, raw `body`),
   `ResoClient::execute_page`, `ResoClient::next_page` and `ResoClient::fetch_page` (resume from a saved link), and
   `paging::parse_link_header` for RFC 8288 `Link: <url>; rel="next"` headers. Example `test_standard_paging`.
@@ -25,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - llms.txt file for general llm integration
 
 ### Changed
+- **Breaking:** `ClientConfig::token: String` is replaced by `ClientConfig::auth: Auth`. `ClientConfig::new(url, token)`
+  and `RESO_TOKEN` work as before.
 - **Breaking (behaviour):** `execute_next_link` and `execute_replication` now read the next link from the body's
   `@odata.nextLink` first, then the `next` header, then a parsed `Link` header with `rel="next"`. Before, only headers
   were read, so a standard result set stopped after the second page, and a `Link` header was returned as its raw

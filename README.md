@@ -30,13 +30,15 @@ The plan is tracked in [#18](https://github.com/jeremeybingham/reso_client/issue
 
 ## Current state (v0.2.1)
 
-Today the crate is a well-tested OData query client for **one server with one fixed bearer token**.
+Today the crate is a well-tested OData query client for **one server**, authenticated with a fixed bearer token
+or OAuth2 client credentials.
 
 What works:
 
 - Fluent `QueryBuilder`: `$filter`, `$select`, `$orderby`, `$top`/`$skip`, `$count`, `$expand`, `$apply`, lookup
   by key.
 - Count-only queries (`/$count`) and raw `$metadata` retrieval (returned as an XML string, not parsed).
+- OAuth2 client credentials: the token is fetched, cached, renewed at 90% of its lifetime and once after a 401.
 - Typed errors (`ResoError`) mapped from HTTP status codes and OData error bodies.
 - Configuration from environment variables or code; several clients can run side by side.
 - Async on tokio; about 180 unit, integration and doc tests, with HTTP mocked by wiremock.
@@ -46,7 +48,6 @@ Known limits, each covered by a milestone issue:
 | Limit | Issue |
 |---|---|
 | Replication follows Bridge Interactive's `/replication` endpoint, not RESO-standard replication (`ModificationTimestamp` order plus `@odata.nextLink`), so it fails on most other vendors | [#20](https://github.com/jeremeybingham/reso_client/issues/20) |
-| Static bearer token only; no OAuth2 client credentials or token refresh | [#21](https://github.com/jeremeybingham/reso_client/issues/21) |
 | No retry, backoff or rate limiting; `Retry-After` is ignored | [#22](https://github.com/jeremeybingham/reso_client/issues/22) |
 | `$metadata` is not parsed, so resources, keys and fields cannot be discovered | [#23](https://github.com/jeremeybingham/reso_client/issues/23) |
 | `$select`/`$expand` lists are not URL-encoded; `dataset_id` is a Bridge-specific path segment | [#31](https://github.com/jeremeybingham/reso_client/issues/31) |
@@ -110,7 +111,12 @@ Requires Rust 1.87 or later.
 | Variable | Required | Description |
 |---|---|---|
 | `RESO_BASE_URL` | Yes | Base URL of the server's OData service |
-| `RESO_TOKEN` | Yes | Bearer token |
+| `RESO_TOKEN` | One of the two | Static bearer token |
+| `RESO_CLIENT_ID` | One of the two | OAuth2 client id; when set, client credentials are used instead of `RESO_TOKEN` |
+| `RESO_CLIENT_SECRET` | With `RESO_CLIENT_ID` | OAuth2 client secret |
+| `RESO_TOKEN_URI` | With `RESO_CLIENT_ID` | Token endpoint URL |
+| `RESO_SCOPE` | No | Scope sent with the token request |
+| `RESO_CREDENTIAL_TRANSPORT` | No | How the id and secret are sent: `body` (form fields, default), `header` (HTTP Basic) or `query` |
 | `RESO_DATASET_ID` | No | Dataset segment inserted after the base URL (Bridge Interactive servers use it) |
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
 
@@ -124,7 +130,19 @@ let config = ClientConfig::new("https://api.mls.example/OData", "token")
     .with_dataset_id("actris_ref") // only for servers that use a dataset path segment
     .with_timeout(Duration::from_secs(60));
 let client = ResoClient::with_config(config)?;
+
+// OAuth2 client credentials instead of a fixed token
+use reso_client::{ClientCredentials, CredentialTransport};
+let credentials = ClientCredentials::new("https://auth.mls.example/token", "client-id", "client-secret")
+    .with_scope("api")
+    .with_transport(CredentialTransport::BasicHeader);
+let client = ResoClient::with_config(ClientConfig::with_auth("https://api.mls.example/OData", credentials))?;
 ```
+
+With client credentials the client fetches a token on first use, reuses it until 90% of `expires_in` has passed (a
+token without `expires_in` is kept until the server answers 401), and on a 401 fetches a new token and retries the
+request once. Concurrent requests on one client share its token and wait for a single fetch. Secrets and tokens are
+redacted from `Debug` output and never logged. Unconfirmed against a real MLS server (#32).
 
 ## Quick start
 
