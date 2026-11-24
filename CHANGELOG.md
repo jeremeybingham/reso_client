@@ -57,8 +57,8 @@ release and its entries are listed separately below.
   `<url>; rel="next"` text. Relative links are resolved to absolute URLs (against `@odata.context`, else the request URL).
 - **Breaking (behaviour):** `execute_next_link` refuses a link on another scheme, host or port (`ResoError::Parse`),
   so the bearer token is never sent to a server other than the configured one.
-- **Breaking:** `ResoError` gains the variants `TokenRequest` and `OutOfOrder`; a `match` without a wildcard arm
-  no longer compiles.
+- **Breaking:** `ResoError` gains the variants `TokenRequest` and `OutOfOrder` and is now `#[non_exhaustive]`: a
+  `match` on it needs a wildcard arm, and later releases can add variants without a breaking change.
 
 ### Fixed
 - `$select` and `$expand` items are now percent-encoded (spaces, slashes, non-ASCII, nested options) in key-access,
