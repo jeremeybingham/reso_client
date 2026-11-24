@@ -335,6 +335,13 @@ mod tests {
     }
 
     #[test]
+    fn unresolvable_link_ends_paging() {
+        // An unclosed IPv6 host cannot be parsed, so the link is dropped rather than followed
+        let body = json!({"value": [], "@odata.nextLink": "https://[::1/Property?$skip=5"});
+        assert_eq!(next_link_from(&body, &HeaderMap::new(), URL), None);
+    }
+
+    #[test]
     fn link_header_forms() {
         assert_eq!(
             parse_link_header("<https://a.example/p?$skip=2>; rel=next").as_deref(),
