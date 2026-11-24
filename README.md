@@ -83,7 +83,8 @@ builds the ingest layer on top of it, most likely as a second crate (`reso-inges
 9. [#27](https://github.com/jeremeybingham/reso_client/issues/27) Deletes and reconciliation. Done:
    `reconcile_deletes` in `reso-ingest` writes delete events, from the server's `EntityEvent` feed when `$metadata`
    declares it (`EventFeed::detect`), otherwise by comparing key sets between runs (first run = baseline, no deletes).
-10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`.
+10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`. Done:
+    the `reso-ingest` binary (see [Ingest CLI](#ingest-cli)).
 11. [#29](https://github.com/jeremeybingham/reso_client/issues/29) Parquet output with a schema from `$metadata`.
 
 **Later or optional**
@@ -200,6 +201,28 @@ callers can tell a bad token from a server fault or a rate limit.
 
 The API reference is the rustdoc: `cargo doc --open`, or [docs.rs](https://docs.rs/reso-client). Agents and
 contributors start from [AGENTS.md](AGENTS.md).
+
+## Ingest CLI
+
+The `reso-ingest` crate (in this workspace, unpublished) has a command line over the library:
+
+```sh
+cargo run -p reso-ingest -- sync --config servers.toml --out data/          # incremental pull of every server
+cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --deletes
+cargo run -p reso-ingest -- discover --config servers.toml --server mls-one   # $metadata model as JSON
+cargo run -p reso-ingest -- status --out data/                                # checkpoints and the last run
+```
+
+- `sync` pulls each resource the server's `$metadata` lists (after the `include`/`exclude` filters), continuing from the
+  saved checkpoint; the first run is the full load. Resources without a single-field key or a `ModificationTimestamp`
+  are skipped (an error if named with `--resource`). `--deletes` also writes delete events (without an `EntityEvent`
+  feed this pulls every key each run). `--start-over` drops the selected checkpoints first.
+- Output: tagged NDJSON files and `manifest.<run>.json` in `--out` (default `reso-out`); checkpoints in `--state`
+  (default `<out>/state`). Progress lines (`##progress step=N/T label=server/resource`) go to stderr, the summary to
+  stdout.
+- Exit code `0` on success, `1` if any server or resource failed (the summary names the servers), `2` for bad usage or
+  configuration. Secrets come from the environment variables named in the config and are never printed.
+- `--help` lists every option; `reso-ingest/servers.example.toml` shows the configuration.
 
 ## Examples
 

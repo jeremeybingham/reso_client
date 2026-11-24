@@ -14,7 +14,7 @@ use crate::manifest::FileEntry;
 /// A sink for the records of one resource on one server in one run
 ///
 /// Implemented by [`NdjsonWriter`]; a Parquet writer (#29) will follow.
-pub trait RecordWriter {
+pub trait RecordWriter: Send {
     /// Write a batch, tagging each record with `fetched_at` (RFC 3339, UTC)
     ///
     /// # Errors

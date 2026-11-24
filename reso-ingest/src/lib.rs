@@ -35,6 +35,7 @@
 //! ```
 
 mod checkpoint;
+pub mod cli;
 mod config;
 mod deletes;
 mod error;
@@ -42,7 +43,7 @@ mod manifest;
 mod output;
 mod runner;
 
-pub use checkpoint::CheckpointStore;
+pub use checkpoint::{CheckpointInfo, CheckpointStore};
 pub use config::{AuthConfig, Config, LimitsConfig, ServerConfig};
 pub use deletes::{reconcile_deletes, EventFeed};
 pub use error::IngestError;

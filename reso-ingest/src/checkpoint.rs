@@ -54,6 +54,21 @@ fn check_owner(
     Ok(())
 }
 
+/// A saved checkpoint with the server and resource it belongs to, as listed by [`CheckpointStore::list`]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckpointInfo {
+    /// Server name
+    pub server: String,
+    /// Resource name
+    pub resource: String,
+    /// Timestamp of the last record written
+    pub timestamp: String,
+    /// Key of the last record written
+    pub key: Option<Value>,
+    /// When the checkpoint was saved (RFC 3339, UTC)
+    pub updated_at: String,
+}
+
 /// A directory of JSON checkpoint files, one per server and resource
 ///
 /// Files are named `{server}.{resource}.json` (characters other than letters, digits, `-` and `_`
@@ -269,6 +284,48 @@ impl CheckpointStore {
             sanitize(server),
             sanitize(resource)
         ))
+    }
+
+    /// Every saved checkpoint in the directory, sorted by server and resource
+    ///
+    /// Delete-reconciliation state files are not listed. An empty list when the directory does
+    /// not exist.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the directory or a checkpoint file cannot be read or parsed.
+    pub fn list(&self) -> Result<Vec<CheckpointInfo>, IngestError> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(io_error(&self.dir, e)),
+        };
+        let mut found = Vec::new();
+        for entry in entries {
+            let path = entry.map_err(|e| io_error(&self.dir, e))?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.ends_with(".json")
+                || name.ends_with(".keys.json")
+                || name.ends_with(".events.json")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(&path).map_err(|e| io_error(&path, e))?;
+            let file: CheckpointFile =
+                serde_json::from_str(&text).map_err(|e| IngestError::Output {
+                    path: path.display().to_string(),
+                    message: e.to_string(),
+                })?;
+            found.push(CheckpointInfo {
+                server: file.server,
+                resource: file.resource,
+                timestamp: file.timestamp,
+                key: file.key,
+                updated_at: file.updated_at,
+            });
+        }
+        found.sort_by(|a, b| (&a.server, &a.resource).cmp(&(&b.server, &b.resource)));
+        Ok(found)
     }
 
     /// Delete the checkpoint ("start over"); no error when there is none

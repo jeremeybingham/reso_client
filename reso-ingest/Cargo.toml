@@ -16,7 +16,12 @@ toml = "0.8"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
+clap = { version = "4.6.10", features = ["derive"] }
 
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1", features = ["test-util"] }
+
+[[bin]]
+name = "reso-ingest"
+path = "src/main.rs"
