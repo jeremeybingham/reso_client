@@ -61,6 +61,7 @@ src/lib.rs          public API, re-exports, crate docs
 src/client.rs       ResoClient, ClientConfig, HTTP operations
 src/auth.rs         Auth, ClientCredentials, token fetch, cache and renewal (OAuth2 client credentials)
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
+src/metadata.rs     Metadata model parsed from $metadata (roxmltree): entity sets, types, keys, properties, enums
 src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`, vendor mode)
 src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
