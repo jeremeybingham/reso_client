@@ -269,6 +269,7 @@ pub mod error;
 pub mod paging;
 pub mod queries;
 pub mod replication;
+pub mod retry;
 pub mod standard_replication;
 
 // Re-export main types for convenience
@@ -278,6 +279,7 @@ pub use error::{ResoError, Result};
 pub use paging::Page;
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;
+pub use retry::{ClientStats, RateLimit, RetryPolicy};
 pub use standard_replication::{Checkpoint, ReplicationRun, StandardReplication};
 
 // Re-export serde_json for convenience

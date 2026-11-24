@@ -9,6 +9,9 @@ use tracing::debug;
 
 use crate::auth::{Auth, ClientCredentials, CredentialTransport, TokenProvider};
 use crate::error::{ResoError, Result};
+use crate::retry::{
+    is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter, RateLimit, RetryPolicy,
+};
 
 /// Configuration for RESO client
 ///
@@ -61,6 +64,12 @@ pub struct ClientConfig {
 
     /// HTTP timeout duration
     pub timeout: Duration,
+
+    /// Retry and backoff for failed requests (default: never retry)
+    pub retry: RetryPolicy,
+
+    /// Client-side request and byte ceilings (default: none)
+    pub rate_limit: RateLimit,
 }
 
 impl std::fmt::Debug for ClientConfig {
@@ -70,6 +79,8 @@ impl std::fmt::Debug for ClientConfig {
             .field("auth", &self.auth)
             .field("dataset_id", &self.dataset_id)
             .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -87,6 +98,9 @@ impl ClientConfig {
     /// - or `RESO_TOKEN` - a static bearer token (used when `RESO_CLIENT_ID` is not set)
     /// - `RESO_DATASET_ID` (optional) - Dataset ID inserted in URL path
     /// - `RESO_TIMEOUT` (optional) - Timeout in seconds (default: 30)
+    /// - `RESO_MAX_RETRIES` (optional) - Retries for 429/502/503/504 and network errors (default: 0)
+    /// - `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` (optional) - client-side
+    ///   [`RateLimit`] (default: none)
     ///
     /// # Examples
     ///
@@ -109,11 +123,27 @@ impl ClientConfig {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(30);
 
+        let number = |name: &str| std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok());
+        let mut rate_limit = RateLimit::default();
+        if let Some(n) = number("RESO_RATE_PER_SECOND") {
+            rate_limit = rate_limit.per_second(n.min(u32::MAX as u64) as u32);
+        }
+        if let Some(n) = number("RESO_RATE_PER_HOUR") {
+            rate_limit = rate_limit.per_hour(n.min(u32::MAX as u64) as u32);
+        }
+        if let Some(n) = number("RESO_BYTES_PER_DAY") {
+            rate_limit = rate_limit.bytes_per_day(n);
+        }
+
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth,
             dataset_id,
             timeout: Duration::from_secs(timeout_secs),
+            retry: RetryPolicy::new(
+                number("RESO_MAX_RETRIES").unwrap_or(0).min(u32::MAX as u64) as u32
+            ),
+            rate_limit,
         })
     }
 
@@ -150,6 +180,8 @@ impl ClientConfig {
             auth: auth.into(),
             dataset_id: None,
             timeout: Duration::from_secs(30),
+            retry: RetryPolicy::default(),
+            rate_limit: RateLimit::default(),
         }
     }
 
@@ -182,6 +214,37 @@ impl ClientConfig {
     /// ```
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Retry failed requests
+    ///
+    /// Network errors and 429/502/503/504 answers are retried with exponential backoff and
+    /// jitter, honouring `Retry-After`; see [`RetryPolicy`]. Other 4xx answers are never retried.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::{ClientConfig, RetryPolicy};
+    /// let config = ClientConfig::new("https://api.mls.com/odata", "token")
+    ///     .with_retry(RetryPolicy::new(5));
+    /// ```
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// Limit how fast this client sends requests and receives bytes; see [`RateLimit`]
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::{ClientConfig, RateLimit};
+    /// let config = ClientConfig::new("https://api.mls.com/odata", "token")
+    ///     .with_rate_limit(RateLimit::default().per_second(2).per_hour(5000));
+    /// ```
+    pub fn with_rate_limit(mut self, rate_limit: RateLimit) -> Self {
+        self.rate_limit = rate_limit;
         self
     }
 }
@@ -232,6 +295,8 @@ pub struct ResoClient {
     config: ClientConfig,
     http_client: Client,
     tokens: TokenProvider,
+    limiter: Limiter,
+    counters: Counters,
 }
 
 impl ResoClient {
@@ -278,6 +343,8 @@ impl ResoClient {
 
         Ok(Self {
             tokens: TokenProvider::new(config.auth.clone()),
+            limiter: Limiter::new(config.rate_limit.clone()),
+            counters: Counters::default(),
             config,
             http_client,
         })
@@ -298,6 +365,21 @@ impl ResoClient {
         &self.config.base_url
     }
 
+    /// Counters of requests sent, retries made and response bytes received so far
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, ClientConfig};
+    /// let client = ResoClient::with_config(ClientConfig::new("https://api.mls.com/odata", "token"))?;
+    /// let stats = client.stats();
+    /// println!("{} requests, {} retries, {} bytes", stats.requests, stats.retries, stats.bytes);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn stats(&self) -> ClientStats {
+        self.counters.snapshot()
+    }
+
     /// Build full URL with optional dataset_id
     ///
     /// Some RESO servers require a dataset ID in the URL path between the base URL
@@ -310,18 +392,75 @@ impl ResoClient {
         }
     }
 
-    /// Send an authenticated GET request and handle error responses
+    /// Send an authenticated GET request, retrying per the [`RetryPolicy`], and handle errors
     ///
-    /// This helper method encapsulates the common pattern of:
-    /// 1. Sending a GET request with Authorization header
-    /// 2. On a 401 with client credentials, renewing the token and retrying once
-    /// 3. Checking the response status
-    /// 4. Converting error responses to appropriate ResoError variants
+    /// 1. Waits for the rate limit, then sends the GET with the Authorization header
+    /// 2. On a 401 with client credentials, renews the token and repeats once
+    /// 3. On a network error or 429/502/503/504, waits (`Retry-After` or backoff) and repeats up
+    ///    to `max_retries` times; after that the last error is returned
+    /// 4. Converts error responses to the matching ResoError variant
     async fn send_authenticated_request(
         &self,
         url: &str,
         accept: &str,
     ) -> Result<reqwest::Response> {
+        let policy = &self.config.retry;
+        let mut retries = 0u32;
+        loop {
+            let outcome = self.attempt(url, accept).await;
+
+            let retryable = match &outcome {
+                Err(ResoError::Network(_)) => true,
+                Err(_) => false,
+                Ok(response) => is_retryable_status(response.status().as_u16()),
+            };
+            if retryable && retries < policy.max_retries {
+                let retry_after = match &outcome {
+                    Ok(response) => response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| parse_retry_after(v, std::time::SystemTime::now())),
+                    Err(_) => None,
+                };
+                if let Some(delay) = policy.delay_for(retries, retry_after) {
+                    debug!(
+                        "Retry {} of {} in {:?} ({})",
+                        retries + 1,
+                        policy.max_retries,
+                        delay,
+                        match &outcome {
+                            Ok(response) => response.status().to_string(),
+                            Err(_) => "network error".to_string(),
+                        }
+                    );
+                    self.counters.retry();
+                    drop(outcome);
+                    tokio::time::sleep(delay).await;
+                    retries += 1;
+                    continue;
+                }
+            }
+
+            let response = outcome?;
+            let status = response.status();
+
+            // Check for error responses and extract the body for detailed error information
+            if !status.is_success() {
+                let body = self.read_bytes(response).await.unwrap_or_default();
+                // from_status() parses OData error format if present and maps to appropriate error variant
+                return Err(ResoError::from_status(
+                    status.as_u16(),
+                    &String::from_utf8_lossy(&body),
+                ));
+            }
+
+            return Ok(response);
+        }
+    }
+
+    /// One attempt: token, rate limit, request, and the one-time renewal after a 401
+    async fn attempt(&self, url: &str, accept: &str) -> Result<reqwest::Response> {
         let token = self.tokens.token(&self.http_client).await?;
         let mut response = self.send_get(url, accept, &token).await?;
 
@@ -335,21 +474,13 @@ impl ResoClient {
                 response = self.send_get(url, accept, &renewed).await?;
             }
         }
-
-        let status = response.status();
-
-        // Check for error responses and extract the body for detailed error information
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            // from_status() parses OData error format if present and maps to appropriate error variant
-            return Err(ResoError::from_status(status.as_u16(), &body));
-        }
-
         Ok(response)
     }
 
-    /// Send one GET with the given bearer token
+    /// Send one GET with the given bearer token, after waiting for the rate limit
     async fn send_get(&self, url: &str, accept: &str, token: &str) -> Result<reqwest::Response> {
+        self.limiter.acquire().await;
+        self.counters.request();
         self.http_client
             .get(url)
             .bearer_auth(token)
@@ -359,20 +490,28 @@ impl ResoClient {
             .map_err(|e| ResoError::Network(e.to_string()))
     }
 
-    /// Parse JSON response from a successful request
-    async fn parse_json_response(response: reqwest::Response) -> Result<serde_json::Value> {
-        response
-            .json::<serde_json::Value>()
+    /// Read a response body, counting its bytes
+    async fn read_bytes(&self, response: reqwest::Response) -> Result<Vec<u8>> {
+        let bytes = response
+            .bytes()
             .await
+            .map_err(|e| ResoError::Parse(format!("Failed to read response: {}", e)))?;
+        self.counters.bytes(bytes.len() as u64);
+        self.limiter.record_bytes(bytes.len() as u64).await;
+        Ok(bytes.to_vec())
+    }
+
+    /// Parse JSON response from a successful request
+    async fn parse_json_response(&self, response: reqwest::Response) -> Result<serde_json::Value> {
+        let bytes = self.read_bytes(response).await?;
+        serde_json::from_slice(&bytes)
             .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e)))
     }
 
     /// Parse text response from a successful request
-    async fn parse_text_response(response: reqwest::Response) -> Result<String> {
-        response
-            .text()
-            .await
-            .map_err(|e| ResoError::Parse(format!("Failed to read response: {}", e)))
+    async fn parse_text_response(&self, response: reqwest::Response) -> Result<String> {
+        let bytes = self.read_bytes(response).await?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Execute a query and return raw JSON
@@ -416,7 +555,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/json")
             .await?;
-        let json = Self::parse_json_response(response).await?;
+        let json = self.parse_json_response(response).await?;
 
         debug!(
             "Query result: {} records",
@@ -465,7 +604,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/json")
             .await?;
-        Self::parse_json_response(response).await
+        self.parse_json_response(response).await
     }
 
     /// Execute a count-only query and return the count as an integer
@@ -496,7 +635,7 @@ impl ResoClient {
         info!("Executing count query: {}", url);
 
         let response = self.send_authenticated_request(&url, "text/plain").await?;
-        let text = Self::parse_text_response(response).await?;
+        let text = self.parse_text_response(response).await?;
 
         let count = text
             .trim()
@@ -534,7 +673,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/xml")
             .await?;
-        Self::parse_text_response(response).await
+        self.parse_text_response(response).await
     }
 
     /// Execute a replication query
@@ -758,7 +897,7 @@ impl ResoClient {
             .await?;
         // Headers must be copied before the body is read, since reading consumes the response.
         let headers = response.headers().clone();
-        let json = Self::parse_json_response(response).await?;
+        let json = self.parse_json_response(response).await?;
         Ok(crate::Page::from_response(json, &headers, url))
     }
 }

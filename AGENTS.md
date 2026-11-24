@@ -64,10 +64,12 @@ src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`, vendor mode)
 src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
+src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter, ClientStats counters
 src/error.rs        ResoError and the Result alias
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
+                    retry_tests.rs (retries, Retry-After, counters; limiter timing is in src/retry.rs with a paused clock),
                     auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
