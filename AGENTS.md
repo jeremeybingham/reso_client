@@ -70,7 +70,8 @@ src/error.rs        ResoError and the Result alias
 reso-ingest/        second workspace crate (unpublished): config.rs (multi-server TOML, secrets via `*_env`), runner.rs
                     (independent per-server tasks, concurrency cap), output.rs (RecordWriter, NdjsonWriter: tagged lines, size
                     rotation), manifest.rs (RunManifest, pull_resource, sync_resource), checkpoint.rs (CheckpointStore, JSON files: checkpoints, key sets, event sequences),
-                    deletes.rs (reconcile_deletes, EventFeed: delete events by key diff or EntityEvent), servers.example.toml, tests/
+                    deletes.rs (reconcile_deletes, EventFeed: delete events by key diff or EntityEvent),
+                    cli.rs + main.rs (`reso-ingest` binary: sync, discover, status; hand-rolled args, run() takes writers so tests run it in-process), servers.example.toml, tests/
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
