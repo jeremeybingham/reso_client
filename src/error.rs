@@ -146,6 +146,13 @@ pub enum ResoError {
     /// `error_description` fields when present; it never holds the client secret or a token.
     #[error("Token request failed: {0}")]
     TokenRequest(String),
+
+    /// A replication page was not in `ModificationTimestamp` order, or repeated the checkpoint
+    ///
+    /// The server ignored `$orderby` or `$filter`, so a checkpoint taken from the last record
+    /// would not be safe to resume from.
+    #[error("Replication order error: {0}")]
+    OutOfOrder(String),
 }
 
 impl ResoError {

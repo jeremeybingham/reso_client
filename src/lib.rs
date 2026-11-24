@@ -14,7 +14,7 @@
 //! - 🔢 **Count Queries** - Efficient record counting via `/$count` endpoint
 //! - 🗂️ **Dataset ID Support** - Handle RESO servers that use dataset identifiers
 //! - 📖 **Metadata Retrieval** - Fetch and parse OData `$metadata` documents
-//! - 🔄 **Replication Endpoint** - Bulk data transfer with up to 2000 records/request
+//! - 🔄 **Standard Replication** - `ModificationTimestamp` + key walks with resumable checkpoints ([`StandardReplication`]); Bridge's `/replication` endpoint is a separate vendor mode
 //! - ⚡ **Async/Await** - Built on tokio for high-performance concurrent operations
 //! - 🛡️ **Type-Safe Errors** - Comprehensive error types with detailed context
 //!
@@ -269,6 +269,7 @@ pub mod error;
 pub mod paging;
 pub mod queries;
 pub mod replication;
+pub mod standard_replication;
 
 // Re-export main types for convenience
 pub use auth::{Auth, ClientCredentials, CredentialTransport};
@@ -277,6 +278,7 @@ pub use error::{ResoError, Result};
 pub use paging::Page;
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;
+pub use standard_replication::{Checkpoint, ReplicationRun, StandardReplication};
 
 // Re-export serde_json for convenience
 pub use serde_json::Value as JsonValue;
