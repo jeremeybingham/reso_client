@@ -30,6 +30,7 @@ use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
+use crate::serve::{Daemon, ServeOptions};
 use crate::shutdown::Shutdown;
 use crate::webhook::{post_summary, run_summary};
 
@@ -111,6 +112,47 @@ enum Command {
         #[arg(long)]
         metrics_file: Option<PathBuf>,
     },
+    /// Run as a daemon: sync each resource on its own interval and serve health and metrics
+    ///
+    /// Schedules the resources that have an `interval` in the configuration (or are in `include`
+    /// under a server `interval`). Each sync is the same as `sync --server S --resource R`. Serves
+    /// /healthz, /readyz, /metrics and /status over plain HTTP on --listen (no authentication: use
+    /// a private address). Stops after the current pages on SIGTERM or Ctrl-C and exits 0.
+    Serve {
+        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        #[arg(long)]
+        config: PathBuf,
+        /// Only this server; repeat for several (default: all)
+        #[arg(long = "server")]
+        servers: Vec<String>,
+        /// Address for the endpoints
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: std::net::SocketAddr,
+        /// Output directory for data files and manifests
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// Checkpoint directory (default: <out>/state)
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// Also detect deleted records on every sync
+        #[arg(long)]
+        deletes: bool,
+        /// Write deletes even when they pass the [server.deletes] limits
+        #[arg(long)]
+        allow_mass_deletes: bool,
+        /// Download the media files of each page right after it is written
+        #[arg(long)]
+        media: bool,
+        /// Where files go with --media (default: <out>/media)
+        #[arg(long)]
+        media_dir: Option<PathBuf>,
+        /// Start a new data file after this many MiB
+        #[arg(long, default_value_t = DEFAULT_MAX_FILE_MB, value_parser = clap::value_parser!(u64).range(1..))]
+        max_file_mb: u64,
+        /// Data file format
+        #[arg(long, value_enum, default_value_t = Format::Ndjson)]
+        format: Format,
+    },
     /// Download the files of the Media records that `sync` wrote
     ///
     /// Reads the NDJSON Media data files listed in the manifests in --out, and downloads new and
@@ -161,7 +203,7 @@ enum Command {
 
 /// File format of the data files
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
-enum Format {
+pub enum Format {
     /// One tagged JSON line per record
     #[default]
     Ndjson,
@@ -355,6 +397,34 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             };
             sync(args, out, err, shutdown).await
         }
+        Command::Serve {
+            config,
+            servers,
+            listen,
+            out: out_dir,
+            state,
+            deletes,
+            allow_mass_deletes,
+            media,
+            media_dir,
+            max_file_mb,
+            format,
+        } => {
+            let args = Args {
+                config: Some(config),
+                servers,
+                out: Some(out_dir),
+                state,
+                deletes,
+                allow_mass_deletes,
+                media,
+                media_dir,
+                max_file_mb: Some(max_file_mb),
+                format,
+                ..Args::default()
+            };
+            serve(args, listen, err, shutdown).await
+        }
         Command::Media {
             config,
             servers,
@@ -458,9 +528,47 @@ fn select_resources(
     (chosen, missing)
 }
 
-fn client_for(server: &ServerConfig) -> Result<ResoClient, String> {
+pub(crate) fn client_for(server: &ServerConfig) -> Result<ResoClient, String> {
     let config = server.client_config().map_err(|e| e.to_string())?;
     ResoClient::with_config(config).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------- serve
+
+async fn serve(
+    args: Args,
+    listen: std::net::SocketAddr,
+    err: &mut dyn Write,
+    shutdown: Shutdown,
+) -> i32 {
+    let (mut config, servers) = match load_servers(&args, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    config.servers = servers;
+    let mut options = ServeOptions::new(args.out());
+    options.listen = listen;
+    options.state = args.state();
+    options.deletes = args.deletes;
+    options.allow_mass_deletes = args.allow_mass_deletes;
+    options.media_dir = args.media.then(|| {
+        args.media_dir
+            .clone()
+            .unwrap_or_else(|| args.out().join("media"))
+    });
+    options.max_file_bytes = args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024;
+    options.format = args.format;
+    match Daemon::start(config, options, shutdown).await {
+        Ok(daemon) => {
+            let _ = writeln!(err, "listening on http://{}", daemon.local_addr());
+            daemon.wait().await;
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            2
+        }
+    }
 }
 
 // ---------------------------------------------------------------- sync
@@ -468,18 +576,18 @@ fn client_for(server: &ServerConfig) -> Result<ResoClient, String> {
 /// How long a feed's lease lasts without renewal (a crashed run blocks its feeds for at most this long)
 const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-struct SyncOptions {
-    out: PathBuf,
-    state: PathBuf,
-    run_id: String,
-    resources: Vec<String>,
-    deletes: bool,
-    allow_mass_deletes: bool,
-    media: Option<PathBuf>,
-    start_over: bool,
-    max_file_bytes: u64,
-    format: Format,
-    shutdown: Shutdown,
+pub(crate) struct SyncOptions {
+    pub(crate) out: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) run_id: String,
+    pub(crate) resources: Vec<String>,
+    pub(crate) deletes: bool,
+    pub(crate) allow_mass_deletes: bool,
+    pub(crate) media: Option<PathBuf>,
+    pub(crate) start_over: bool,
+    pub(crate) max_file_bytes: u64,
+    pub(crate) format: Format,
+    pub(crate) shutdown: Shutdown,
 }
 
 async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Shutdown) -> i32 {
@@ -601,13 +709,27 @@ fn send(tx: &UnboundedSender<String>, line: String) {
     let _ = tx.send(line);
 }
 
+/// What one server's sync gives back: resource entries, the media report and schema changes
+pub(crate) type ServerOutcome = (Vec<ResourceEntry>, Option<MediaReport>, Vec<String>);
+
 async fn sync_server(
     server: ServerConfig,
     options: Arc<SyncOptions>,
     tx: UnboundedSender<String>,
-) -> Result<(Vec<ResourceEntry>, Option<MediaReport>, Vec<String>), String> {
-    let name = server.name.clone();
+) -> Result<ServerOutcome, String> {
     let client = client_for(&server)?;
+    sync_server_with(&client, server, options, tx).await
+}
+
+/// Sync the selected resources of one server with a client the caller owns (the daemon shares one
+/// client per server, so its rate limit and token cover every feed)
+pub(crate) async fn sync_server_with(
+    client: &ResoClient,
+    server: ServerConfig,
+    options: Arc<SyncOptions>,
+    tx: UnboundedSender<String>,
+) -> Result<ServerOutcome, String> {
+    let name = server.name.clone();
     let metadata = client
         .fetch_metadata_model()
         .await
@@ -631,7 +753,7 @@ async fn sync_server(
     let mut page_media = match &options.media {
         Some(dir) => Some(
             PageMedia::new(
-                &client,
+                client,
                 &name,
                 server.media.download_config(),
                 &options.state,
@@ -740,7 +862,7 @@ async fn sync_server(
         let mut entry = if let Some(flag) = &server.deletes.flag_field {
             let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
             let mut entry = sync_resource_media(
-                &client,
+                client,
                 &name,
                 resource,
                 spec,
@@ -756,7 +878,7 @@ async fn sync_server(
             entry
         } else {
             sync_resource_media(
-                &client,
+                client,
                 &name,
                 resource,
                 spec,
@@ -774,7 +896,7 @@ async fn sync_server(
             // A full load should hold what the server counts (servers without $count are skipped)
             let written = entry.records;
             entry.warnings.extend(
-                count_warning(&client, resource, filter.as_deref(), written)
+                count_warning(client, resource, filter.as_deref(), written)
                     .instrument(span.clone())
                     .await,
             );
@@ -785,7 +907,7 @@ async fn sync_server(
             && server.deletes.flag_field.is_none()
         {
             let deleted = reconcile_deletes(
-                &client,
+                client,
                 &name,
                 &DeleteTarget::new(resource, &plan.key)
                     .with_filter(filter.as_deref())

@@ -176,6 +176,7 @@ let client = ResoClient::with_config(config)?;
 cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server
 cargo run -p reso-ingest -- sync --config servers.toml --media        # same, downloading each page's media files as it goes
 cargo run -p reso-ingest -- media --config servers.toml --out data/   # download new and changed Media files
+cargo run -p reso-ingest -- serve --config servers.toml --listen 127.0.0.1:9090   # daemon: per-resource intervals, /healthz /readyz /metrics /status
 cargo run -p reso-ingest -- discover --config servers.toml            # each server's $metadata model as JSON
 cargo run -p reso-ingest -- status --out data/                        # checkpoints and the last run
 ```

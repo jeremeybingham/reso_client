@@ -105,6 +105,13 @@ pub struct ServerConfig {
     /// Settings for single resources, by resource name
     #[serde(default)]
     pub resources: BTreeMap<String, ResourceConfig>,
+    /// `serve` only: how often to sync the resources in `include` that have no `interval` of their
+    /// own (`"2m"`, `"30s"`, `"1h"`)
+    #[serde(default)]
+    pub interval: Option<String>,
+    /// `serve` only: most feeds of this server syncing at once (default 2)
+    #[serde(default)]
+    pub concurrency: Option<usize>,
     /// How to authenticate
     pub auth: AuthConfig,
     /// Retry and rate limits
@@ -159,6 +166,45 @@ pub struct ResourceConfig {
     /// records per page with `$expand`)
     #[serde(default)]
     pub page_size: Option<u32>,
+    /// `serve` only: how often to sync this resource (`"2m"`, `"30s"`, `"1h"`, `"500ms"`)
+    #[serde(default)]
+    pub interval: Option<String>,
+}
+
+/// The longest wait the daemon puts between two syncs of a failing feed, unless the feed's own
+/// interval is longer
+pub const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Parse an interval such as `500ms`, `30s`, `2m`, `1h` or `1d` (a whole number and a unit)
+///
+/// ```
+/// # use reso_ingest::parse_interval;
+/// assert_eq!(parse_interval("2m").unwrap().as_secs(), 120);
+/// assert!(parse_interval("0s").is_err());
+/// ```
+pub fn parse_interval(text: &str) -> Result<std::time::Duration, String> {
+    let t = text.trim();
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (digits, unit) = t.split_at(split);
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| format!("`{text}` is not an interval (examples: 30s, 2m, 1h)"))?;
+    let millis = match unit.trim() {
+        "ms" => n,
+        "s" => n.saturating_mul(1000),
+        "m" => n.saturating_mul(60_000),
+        "h" => n.saturating_mul(3_600_000),
+        "d" => n.saturating_mul(86_400_000),
+        _ => {
+            return Err(format!(
+                "`{text}` is not an interval (examples: 30s, 2m, 1h)"
+            ))
+        }
+    };
+    if millis == 0 {
+        return Err(format!("interval `{text}` must be more than zero"));
+    }
+    Ok(std::time::Duration::from_millis(millis))
 }
 
 /// Authentication settings; secrets are named by environment variable, never written in the file
@@ -466,7 +512,16 @@ impl ServerConfig {
         if self.filter.as_deref().is_some_and(|f| f.trim().is_empty()) {
             return Err("filter must not be empty".into());
         }
+        if let Some(i) = &self.interval {
+            parse_interval(i).map_err(|e| format!("interval: {e}"))?;
+        }
+        if self.concurrency == Some(0) {
+            return Err("concurrency must be at least 1".into());
+        }
         for (name, resource) in &self.resources {
+            if let Some(i) = &resource.interval {
+                parse_interval(i).map_err(|e| format!("resources.{name}.interval: {e}"))?;
+            }
             if resource.page_size == Some(0) {
                 return Err(format!("resources.{name}.page_size must be at least 1"));
             }
@@ -559,6 +614,31 @@ impl ServerConfig {
             .get(resource)
             .and_then(|r| r.page_size)
             .or(self.page_size)
+    }
+
+    /// The feeds `serve` schedules for this server, with their intervals, in name order
+    ///
+    /// A resource with its own `interval` is scheduled; so is each resource in `include` without
+    /// one, at the server's `interval`. A resource the server does not [`include`](Self::includes)
+    /// is never scheduled. The result is empty when nothing has an interval. Intervals were checked when the file was parsed.
+    pub fn feeds(&self) -> Vec<(String, std::time::Duration)> {
+        let default = self
+            .interval
+            .as_deref()
+            .and_then(|i| parse_interval(i).ok());
+        let mut feeds: BTreeMap<String, std::time::Duration> = BTreeMap::new();
+        for name in &self.include {
+            if let Some(d) = default {
+                feeds.insert(name.clone(), d);
+            }
+        }
+        for (name, r) in &self.resources {
+            if let Some(d) = r.interval.as_deref().and_then(|i| parse_interval(i).ok()) {
+                feeds.insert(name.clone(), d);
+            }
+        }
+        feeds.retain(|name, _| self.includes(name));
+        feeds.into_iter().collect()
     }
 
     /// Build the [`ClientConfig`], reading secrets from the process environment

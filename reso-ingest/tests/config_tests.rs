@@ -373,3 +373,72 @@ fn flag_field_deletes_parse_and_an_empty_one_is_rejected() {
     let (_, message) = server_error(&one.replace("DELETES", "deletes = { flag = \"MlgCanView\" }"));
     assert!(message.contains("flag"), "{message}");
 }
+
+#[test]
+fn intervals_parse_and_pick_the_scheduled_feeds() {
+    use std::time::Duration;
+    assert_eq!(
+        reso_ingest::parse_interval("500ms").unwrap(),
+        Duration::from_millis(500)
+    );
+    assert_eq!(
+        reso_ingest::parse_interval("2m").unwrap(),
+        Duration::from_secs(120)
+    );
+    assert_eq!(
+        reso_ingest::parse_interval(" 1h ").unwrap(),
+        Duration::from_secs(3600)
+    );
+    for bad in ["", "m", "0s", "5", "5x", "-1s", "1.5h"] {
+        assert!(reso_ingest::parse_interval(bad).is_err(), "{bad}");
+    }
+
+    let config = Config::parse(
+        r#"
+[[server]]
+name = "a"
+base_url = "https://a.example/odata"
+include = ["Property", "Office"]
+exclude = ["Office"]
+interval = "1h"
+concurrency = 3
+[server.auth]
+type = "bearer"
+token_env = "A_TOKEN"
+[server.resources.Member]
+interval = "30s"
+[server.resources.Property]
+interval = "2m"
+"#,
+    )
+    .unwrap();
+    // Member is not in `include`, so it is not scheduled; Office is excluded
+    assert_eq!(
+        config.servers[0].feeds(),
+        vec![("Property".to_string(), Duration::from_secs(120))]
+    );
+    assert_eq!(config.servers[0].concurrency, Some(3));
+}
+
+#[test]
+fn bad_intervals_and_concurrency_name_the_server() {
+    for (extra, needle) in [
+        ("interval = \"soon\"", "interval"),
+        ("concurrency = 0", "concurrency"),
+        (
+            "[server.resources.Property]\ninterval = \"0s\"",
+            "resources.Property.interval",
+        ),
+    ] {
+        let text = format!(
+            "[[server]]\nname = \"a\"\nbase_url = \"https://a.example/odata\"\n{}\n",
+            if extra.starts_with('[') {
+                format!("[server.auth]\ntype = \"bearer\"\ntoken_env = \"A_TOKEN\"\n{extra}")
+            } else {
+                format!("{extra}\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"A_TOKEN\"")
+            }
+        );
+        let err = Config::parse(&text).unwrap_err().to_string();
+        assert!(err.contains('a') && err.contains(needle), "{err}");
+    }
+}
