@@ -13,7 +13,9 @@ This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in 
 
 Records are handed over **raw**, tagged with their source. The typical user is an aggregator pulling from many MLS
 vendors into its own store. The crates do **not** de-duplicate across MLSs, map local fields, enforce data-licence or
-display rules, or choose a database. The plan is tracker issue #18 (milestone "Ingest layer"); open work is listed
+display rules, or choose a database. They do help the consumer comply with licence terms: `reso-ingest` keeps an
+append-only access log of what was pulled, when and with which credential, and can purge one source's files, media and
+state when its licence ends (#93); records stay raw. The plan is tracker issue #18 (milestone "Ingest layer"); open work is listed
 under "What's next" in `README.md`.
 
 ## Finding things
