@@ -480,6 +480,12 @@ are dropped, except navigation properties named in `expand`, which are kept as J
 when the file holding its rows is finished (at `--max-file-mb` or the end of the resource). A run that dies mid-file leaves
 a `.part` file and resumes from the last finished file, so those pages are fetched again (at-least-once).
 
+## Load test
+
+`cargo run --release -p reso-ingest --example loadtest -- --records 1000000` syncs a million invented records from a
+fake server with injected faults and kills, and checks that none is lost. How it works and the recorded numbers (25 MiB
+peak memory at 1M records) are in [LOADTEST.md](LOADTEST.md).
+
 ## As a library
 
 The same pieces are public:
