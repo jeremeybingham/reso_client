@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Scope (#93): source purge and an access audit trail are in scope for `reso-ingest`. They help the consumer comply
+  with licence terms (deletion when a licence ends, audit questions about what was pulled); display rules stay out of
+  scope and records stay raw. `AGENTS.md` and `README.md` say so; the access log and `purge` follow in their own PRs.
 - `reso-ingest` reads secrets from files as well as environment variables (#92): `token_file`, `client_id_file` and
   `client_secret_file` beside the `*_env` keys, one form per secret. `ClientHandle` reads the secrets again before
   each resource and builds a new client when one changed, so `sync` and `serve` use a rotated secret file without a
