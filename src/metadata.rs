@@ -66,6 +66,8 @@ pub struct EnumMember {
     pub name: String,
     /// Declared integer value, when present.
     pub value: Option<i64>,
+    /// Value of the `RESO.OData.Metadata.StandardName` annotation (the display text), when present.
+    pub standard_name: Option<String>,
 }
 
 /// An enum (lookup) type.
@@ -107,12 +109,18 @@ impl Metadata {
         )
         .map_err(|e| ResoError::Parse(format!("Invalid $metadata XML: {}", e)))?;
 
+        let aliases: Vec<(&str, &str)> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("Schema"))
+            .filter_map(|n| Some((n.attribute("Alias")?, n.attribute("Namespace")?)))
+            .collect();
+
         let mut md = Metadata::default();
         for schema in doc.descendants().filter(|n| n.has_tag_name("Schema")) {
             let namespace = schema.attribute("Namespace").unwrap_or("").to_string();
             for el in schema.children().filter(Node::is_element) {
                 match el.tag_name().name() {
-                    "EntityType" => md.entity_types.push(entity_type(el)),
+                    "EntityType" => md.entity_types.push(entity_type(el, &aliases)),
                     "EnumType" => md.enum_types.push(enum_type(el, &namespace)),
                     "EntityContainer" => {
                         for set in el.children().filter(|n| n.has_tag_name("EntitySet")) {
@@ -121,7 +129,7 @@ impl Metadata {
                             {
                                 md.entity_sets.push(EntitySet {
                                     name: name.to_string(),
-                                    entity_type: t.to_string(),
+                                    entity_type: resolve_alias(t, &aliases),
                                 });
                             }
                         }
@@ -134,7 +142,7 @@ impl Metadata {
     }
 
     /// Resource names that can be queried: the entity set names, or the entity type names when the server declares
-    /// no entity sets (the RESO reference server does this).
+    /// no entity sets.
     pub fn resource_names(&self) -> Vec<&str> {
         if self.entity_sets.is_empty() {
             self.entity_types.iter().map(|t| t.name.as_str()).collect()
@@ -164,7 +172,7 @@ impl Metadata {
     }
 }
 
-fn entity_type(el: Node) -> EntityType {
+fn entity_type(el: Node, aliases: &[(&str, &str)]) -> EntityType {
     let mut t = EntityType {
         name: el.attribute("Name").unwrap_or("").to_string(),
         key: Vec::new(),
@@ -181,26 +189,52 @@ fn entity_type(el: Node) -> EntityType {
             ),
             "Property" => t.properties.push(Property {
                 name: c.attribute("Name").unwrap_or("").to_string(),
-                type_name: c.attribute("Type").unwrap_or("").to_string(),
+                type_name: resolve_alias(c.attribute("Type").unwrap_or(""), aliases),
                 nullable: c.attribute("Nullable") != Some("false"),
                 max_length: c.attribute("MaxLength").and_then(|v| v.parse().ok()),
-                lookup_name: c
-                    .children()
-                    .find(|n| {
-                        n.has_tag_name("Annotation")
-                            && n.attribute("Term") == Some("RESO.OData.Metadata.LookupName")
-                    })
-                    .and_then(|n| n.attribute("String"))
-                    .map(str::to_string),
+                lookup_name: annotation(c, "RESO.OData.Metadata.LookupName"),
             }),
             "NavigationProperty" => t.navigation.push(NavigationProperty {
                 name: c.attribute("Name").unwrap_or("").to_string(),
-                type_name: c.attribute("Type").unwrap_or("").to_string(),
+                type_name: resolve_alias(c.attribute("Type").unwrap_or(""), aliases),
             }),
             _ => {}
         }
     }
     t
+}
+
+/// String value of the annotation with `term` on `el`, written either as `String="..."` or as a `<String>` child.
+fn annotation(el: Node, term: &str) -> Option<String> {
+    let a = el
+        .children()
+        .find(|n| n.has_tag_name("Annotation") && n.attribute("Term") == Some(term))?;
+    match a.attribute("String") {
+        Some(v) => Some(v.to_string()),
+        None => a
+            .children()
+            .find(|n| n.has_tag_name("String"))
+            .map(|n| n.text().unwrap_or("").to_string()),
+    }
+}
+
+/// Replace a schema alias at the start of a type name (also inside `Collection(...)`) with its namespace.
+fn resolve_alias(type_name: &str, aliases: &[(&str, &str)]) -> String {
+    if let Some(inner) = type_name
+        .strip_prefix("Collection(")
+        .and_then(|t| t.strip_suffix(')'))
+    {
+        return format!("Collection({})", resolve_alias(inner, aliases));
+    }
+    for (alias, ns) in aliases {
+        if let Some(rest) = type_name
+            .strip_prefix(alias)
+            .and_then(|r| r.strip_prefix('.'))
+        {
+            return format!("{ns}.{rest}");
+        }
+    }
+    type_name.to_string()
 }
 
 fn enum_type(el: Node, namespace: &str) -> EnumType {
@@ -213,6 +247,7 @@ fn enum_type(el: Node, namespace: &str) -> EnumType {
             .map(|m| EnumMember {
                 name: m.attribute("Name").unwrap_or("").to_string(),
                 value: m.attribute("Value").and_then(|v| v.parse().ok()),
+                standard_name: annotation(m, "RESO.OData.Metadata.StandardName"),
             })
             .collect(),
     }
@@ -222,7 +257,7 @@ fn enum_type(el: Node, namespace: &str) -> EnumType {
 mod tests {
     use super::*;
 
-    /// Invented, in the style of the RESO reference server (no entity container).
+    /// Invented, in the style of the RESO reference server.
     const REFERENCE_STYLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
   <edmx:DataServices>
@@ -305,6 +340,59 @@ mod tests {
         assert_eq!(e.members.len(), 3);
         assert_eq!(e.members[1].value, Some(2));
         assert_eq!(e.members[2].value, None);
+    }
+
+    /// Invented: child-element annotations, schema aliases, enum member display names.
+    const ALIASED: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="org.example" Alias="Ex" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="Listing">
+        <Key><PropertyRef Name="K"/></Key>
+        <Property Name="K" Type="Edm.String"/>
+        <Property Name="Status" Type="Edm.String">
+          <Annotation Term="RESO.OData.Metadata.LookupName"><String>StatusLookup</String></Annotation>
+        </Property>
+        <NavigationProperty Name="Agent" Type="Ex.Member"/>
+        <NavigationProperty Name="Media" Type="Collection(Ex.Media)"/>
+      </EntityType>
+      <EntityContainer Name="C"><EntitySet Name="Listings" EntityType="Ex.Listing"/></EntityContainer>
+    </Schema>
+    <Schema Namespace="org.example.enums">
+      <EnumType Name="Status">
+        <Member Name="ActiveUnderContract" Value="1">
+          <Annotation Term="RESO.OData.Metadata.StandardName" String="Active Under Contract"/>
+        </Member>
+        <Member Name="Closed" Value="2">
+          <Annotation Term="RESO.OData.Metadata.StandardName"><String>Closed</String></Annotation>
+        </Member>
+        <Member Name="Plain" Value="3"/>
+      </EnumType>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>"#;
+
+    #[test]
+    fn reads_child_annotations_resolves_aliases_and_keeps_standard_names() {
+        let md = Metadata::parse(ALIASED).unwrap();
+        let t = md.resource("Listings").unwrap();
+        assert_eq!(
+            t.property("Status").unwrap().lookup_name.as_deref(),
+            Some("StatusLookup")
+        );
+        assert_eq!(t.navigation[0].type_name, "org.example.Member");
+        assert_eq!(t.navigation[1].type_name, "Collection(org.example.Media)");
+        assert_eq!(md.entity_sets[0].entity_type, "org.example.Listing");
+        let e = md.enum_type("Status").unwrap();
+        let names: Vec<_> = e
+            .members
+            .iter()
+            .map(|m| m.standard_name.as_deref())
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("Active Under Contract"), Some("Closed"), None]
+        );
     }
 
     #[test]

@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
   route, such as the RESO reference server. `Query::to_odata_string()` for count-only queries changes accordingly (#53).
 
+### Fixed
+- `Metadata::parse` reads annotation values written as a `<String>` child element, resolves schema aliases in
+  navigation property, property and entity set types, and keeps `RESO.OData.Metadata.StandardName` on enum members
+  (new `EnumMember::standard_name`; code that builds `EnumMember` by struct literal must add the field) (#58).
+
 ### Documentation
 - README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
   command.
