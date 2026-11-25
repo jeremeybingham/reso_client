@@ -442,3 +442,63 @@ fn bad_intervals_and_concurrency_name_the_server() {
         assert!(err.contains('a') && err.contains(needle), "{err}");
     }
 }
+
+fn bearer_with(auth: &str) -> String {
+    format!("[[server]]\nname = \"f\"\nbase_url = \"https://f.example\"\n[server.auth]\ntype = \"bearer\"\n{auth}\n")
+}
+
+#[test]
+fn secrets_resolve_from_files_without_surrounding_whitespace() {
+    let dir = std::env::temp_dir().join(format!("reso-ingest-secret-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (id, secret) = (dir.join("id"), dir.join("secret"));
+    std::fs::write(&id, "file-id\n").unwrap();
+    std::fs::write(&secret, "  file-secret\r\n").unwrap();
+    let text = format!(
+        "[[server]]\nname = \"f\"\nbase_url = \"https://f.example\"\n[server.auth]\ntype = \"client_credentials\"\ntoken_url = \"https://f.example/token\"\nclient_id_file = \"{}\"\nclient_secret_env = \"MLS_ONE_CLIENT_SECRET\"\n",
+        id.display()
+    );
+    let config = Config::parse(&text).unwrap();
+    let c = config.servers[0].client_config_with(env).unwrap();
+    assert!(matches!(c.auth, Auth::ClientCredentials(ref c)
+        if c.client_id == "file-id" && c.client_secret == "the-secret"));
+
+    let config = Config::parse(&bearer_with(&format!(
+        "token_file = \"{}\"",
+        secret.display()
+    )))
+    .unwrap();
+    let c = config.servers[0].client_config_with(env).unwrap();
+    assert!(matches!(c.auth, Auth::Bearer(ref t) if t == "file-secret"));
+
+    // An empty file and a missing file name the file, not its contents
+    std::fs::write(&secret, "\n").unwrap();
+    let err = config.servers[0].client_config_with(env).unwrap_err();
+    assert!(matches!(err, IngestError::SecretFile { .. }), "{err}");
+    assert!(err.to_string().contains("empty"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let err = config.servers[0].client_config_with(env).unwrap_err();
+    assert!(err.to_string().contains("secret file"), "{err}");
+    assert!(err.to_string().contains("not found"), "{err}");
+}
+
+#[test]
+fn each_secret_needs_exactly_one_source() {
+    let (_, message) = server_error(&bearer_with("token_env = \"T\"\ntoken_file = \"/run/t\""));
+    assert!(
+        message.contains("only one of token_env and token_file"),
+        "{message}"
+    );
+    let (_, message) = server_error(&bearer_with(""));
+    assert!(
+        message.contains("token_env or token_file is required"),
+        "{message}"
+    );
+    let (_, message) = server_error(&bearer_with("token_file = \" \""));
+    assert!(
+        message.contains("token_file must not be empty"),
+        "{message}"
+    );
+    let (_, message) = server_error(&bearer_with("token = \"abc\""));
+    assert!(message.contains("token_file"), "{message}");
+}

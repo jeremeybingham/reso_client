@@ -4,9 +4,11 @@
 //! them independently ([`run_servers`]): one server failing does not stop the others, and the number
 //! of servers running at once is capped.
 //!
-//! Secrets are never stored in the file. Authentication settings name the environment variables that
-//! hold them, and [`ServerConfig::client_config`] reads those variables when a server is about to run.
-//! A file that contains a literal secret is rejected. A server can carry a `filter` added to every
+//! Secrets are never stored in the file. Authentication settings name the environment variables or
+//! files that hold them ([`SecretSource`]), and [`ServerConfig::client_config`] reads them when a
+//! server is about to run. A [`ClientHandle`] reads them again before each resource and after an
+//! authentication failure, so a rotated secret is used without a restart. A file that contains a
+//! literal secret is rejected. A server can carry a `filter` added to every
 //! query, and [`ResourceConfig`] adds a filter, an `$expand` list and a page size for one resource.
 //!
 //! Output goes through [`RecordWriter`]; [`NdjsonWriter`] writes one tagged line per record, rotating
@@ -72,6 +74,7 @@ mod runner;
 mod runs;
 #[cfg(feature = "s3")]
 mod s3;
+mod secrets;
 mod serve;
 mod shutdown;
 mod sink;
@@ -82,7 +85,7 @@ pub use checkpoint::{CheckpointInfo, CheckpointStore};
 pub use checks::{count_warning, CheckingWriter, SchemaSnapshot};
 pub use config::{
     parse_interval, AuthConfig, Config, DeletesConfig, LimitsConfig, MediaConfig, ResourceConfig,
-    ServerConfig,
+    SecretSource, ServerConfig,
 };
 pub use deletes::{reconcile_deletes, DeleteLimits, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;
@@ -103,6 +106,7 @@ pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};
 #[cfg(feature = "s3")]
 pub use s3::{S3FileSink, S3Options, S3StateStore};
+pub use secrets::ClientHandle;
 pub use serve::{Daemon, ServeOptions};
 pub use shutdown::Shutdown;
 pub use sink::{FileSink, LocalDirSink};

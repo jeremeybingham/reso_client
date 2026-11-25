@@ -91,7 +91,16 @@ finished, held deletes, schema changes, check findings). A test checks that both
 
 One TOML file lists the servers; [servers.example.toml](servers.example.toml) shows every setting. Secrets are never
 written in it: `token_env`, `client_id_env` and `client_secret_env` name the environment variables that hold them, and
-a file with a literal secret is rejected.
+a file with a literal secret is rejected. Each can instead be read from a file with `token_file`, `client_id_file` or
+`client_secret_file` (for example a Kubernetes Secret mounted as files); surrounding whitespace, such as a final
+newline, is removed. Each secret takes one of the two forms.
+
+**Rotation.** Secrets are read again before each resource is synced, and a new client is built when one changed, so a
+rotated secret file is used without a restart (an environment variable cannot change in a running process). When the
+server or its token endpoint refuses the credentials (401, or a failed token request), the secrets are read once more:
+if they changed, the resource is tried again once with the new ones, from its checkpoint; if not, it fails as before.
+A new client starts with an empty rate-limit window. Secret values never appear in logs, errors or output. Secret
+managers (Vault, AWS Secrets Manager) are not built in; a file written by their agents works.
 
 ```toml
 max_concurrent_servers = 2          # default 4
@@ -281,7 +290,7 @@ interval = "2m"
 - **Output.** Data files are written as in `sync`. A manifest is written only for a sync that wrote records or deletes,
   failed, or had findings; a poll that found nothing leaves no manifest and no `.run.*` marker.
 - **Stopping.** On SIGTERM or Ctrl-C every feed stops after its current page, with output and checkpoint consistent (see
-  Shutdown), and `serve` exits `0`. Exit `2` for bad configuration, no scheduled resource, a missing secret variable or an
+  Shutdown), and `serve` exits `0`. Exit `2` for bad configuration, no scheduled resource, a missing secret variable or file, or an
   address that cannot be bound.
 
 The endpoints speak plain HTTP with no authentication and no TLS: bind to a private address (default `127.0.0.1:8080`,
@@ -316,7 +325,7 @@ docker run --rm -v "$PWD/servers.toml:/config/servers.toml:ro" -v "$PWD/data:/da
 ```
 
 Everything comes from arguments, environment variables (the `*_env` secrets, `RUST_LOG`, `RESO_LOG_FORMAT`) and
-mounted files: the configuration read-only, and one writable volume for output and checkpoints (`/data`, the working
+mounted files (the `*_file` secrets, if used): the configuration read-only, and one writable volume for output and checkpoints (`/data`, the working
 directory). The root filesystem can be read-only. CI builds the image on tags and on pull requests that change it, and
 runs the binary inside it; it pushes nothing (publishing an image is a release decision).
 

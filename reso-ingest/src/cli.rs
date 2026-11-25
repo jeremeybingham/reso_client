@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{error::ErrorKind, Parser, Subcommand};
-use reso_client::{Metadata, ResoClient, StandardReplication};
+use reso_client::{ClientStats, Metadata, ResoClient, StandardReplication};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tracing::Instrument;
@@ -32,6 +32,7 @@ use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
 use crate::runs;
+use crate::secrets::{is_auth_failure, ClientHandle};
 use crate::serve::{Daemon, ServeOptions};
 use crate::shutdown::Shutdown;
 use crate::state::{FileStateStore, StateStore};
@@ -844,23 +845,39 @@ async fn sync_server(
     options: Arc<SyncOptions>,
     tx: UnboundedSender<String>,
 ) -> Result<ServerOutcome, String> {
-    let client = client_for(&server)?;
-    sync_server_with(&client, server, options, tx).await
+    let handle = ClientHandle::new(&server).map_err(|e| e.to_string())?;
+    sync_server_with(&handle, server, options, tx).await
 }
 
 /// Sync the selected resources of one server with a client the caller owns (the daemon shares one
 /// client per server, so its rate limit and token cover every feed)
+///
+/// The handle reads the server's secrets again before each resource; after an authentication
+/// failure, a resource is tried once more when the secrets changed (#92).
 pub(crate) async fn sync_server_with(
-    client: &ResoClient,
+    handle: &ClientHandle,
     server: ServerConfig,
     options: Arc<SyncOptions>,
     tx: UnboundedSender<String>,
 ) -> Result<ServerOutcome, String> {
     let name = server.name.clone();
-    let metadata = client
-        .fetch_metadata_model()
-        .await
-        .map_err(|e| format!("cannot read $metadata: {e}"))?;
+    let mut client = handle.client();
+    let metadata = match client.fetch_metadata_model().await {
+        Ok(m) => Ok(m),
+        Err(e) => match is_auth_failure(&e.to_string())
+            .then(|| handle.renew(&client))
+            .flatten()
+        {
+            Some(renewed) => {
+                client = renewed;
+                client.fetch_metadata_model().await
+            }
+            None => Err(e),
+        },
+    }
+    .map_err(|e| format!("cannot read $metadata: {e}"))?;
+    // Media downloads borrow the client the server's sync started with
+    let media_client = Arc::clone(&client);
     let (resources, missing) = select_resources(&server, &metadata, &options.resources);
     let store = CheckpointStore::with_store(Arc::clone(&options.state));
     let schema_changes = schema_changes(&server, &metadata, &store).await?;
@@ -881,7 +898,7 @@ pub(crate) async fn sync_server_with(
     let mut page_media = match &options.media {
         Some(dir) => Some(
             PageMedia::new(
-                client,
+                &media_client,
                 &name,
                 server.media.download_config(),
                 Arc::clone(&options.state),
@@ -967,7 +984,8 @@ pub(crate) async fn sync_server_with(
             }
         };
         let started = std::time::Instant::now();
-        let stats_before = client.stats();
+        client = handle.client();
+        let mut stats_before = client.stats();
         let filter = server.filter_for(resource);
         let mut spec = StandardReplication::new(resource, &plan.key);
         if let Some(n) = server.page_size_for(resource) {
@@ -988,44 +1006,33 @@ pub(crate) async fn sync_server_with(
         let full_load =
             options.start_over || matches!(store.load(&name, resource).await, Ok(None) | Err(_));
         let mut checked = CheckingWriter::new(writer.as_mut(), &plan.key);
+        let mut pull = Pull {
+            handle,
+            client: &mut client,
+            stats_before: &mut stats_before,
+            server: &name,
+            resource,
+            spec,
+            store: &store,
+            start_over: options.start_over,
+            media: page_media.as_mut(),
+            shutdown: &options.shutdown,
+            span: &span,
+        };
         let mut entry = if let Some(flag) = &server.deletes.flag_field {
             let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
-            let mut entry = sync_resource_media(
-                client,
-                &name,
-                resource,
-                spec,
-                &mut flagged,
-                &store,
-                options.start_over,
-                page_media.as_mut(),
-                &options.shutdown,
-            )
-            .instrument(span.clone())
-            .await;
+            let mut entry = pull.run(&mut flagged).await;
             entry.deletes = flagged.deletes();
             entry
         } else {
-            sync_resource_media(
-                client,
-                &name,
-                resource,
-                spec,
-                &mut checked,
-                &store,
-                options.start_over,
-                page_media.as_mut(),
-                &options.shutdown,
-            )
-            .instrument(span.clone())
-            .await
+            pull.run(&mut checked).await
         };
         entry.warnings = checked.warnings();
         if full_load && entry.error.is_none() && !entry.interrupted {
             // A full load should hold what the server counts (servers without $count are skipped)
             let written = entry.records;
             entry.warnings.extend(
-                count_warning(client, resource, filter.as_deref(), written)
+                count_warning(&client, resource, filter.as_deref(), written)
                     .instrument(span.clone())
                     .await,
             );
@@ -1036,7 +1043,7 @@ pub(crate) async fn sync_server_with(
             && server.deletes.flag_field.is_none()
         {
             let deleted = reconcile_deletes(
-                client,
+                &client,
                 &name,
                 &DeleteTarget::new(resource, &plan.key)
                     .with_filter(filter.as_deref())
@@ -1093,6 +1100,59 @@ pub(crate) async fn sync_server_with(
         lease.release().await;
     }
     Ok((entries, page_media.map(PageMedia::finish), schema_changes))
+}
+
+/// One resource's records pull, tried once more with a new client when it failed to authenticate
+/// and the server's secrets have changed since (#92)
+struct Pull<'a, 'm> {
+    handle: &'a ClientHandle,
+    client: &'a mut Arc<ResoClient>,
+    stats_before: &'a mut ClientStats,
+    server: &'a str,
+    resource: &'a str,
+    spec: StandardReplication,
+    store: &'a CheckpointStore,
+    start_over: bool,
+    media: Option<&'a mut PageMedia<'m>>,
+    shutdown: &'a Shutdown,
+    span: &'a tracing::Span,
+}
+
+impl Pull<'_, '_> {
+    async fn run(&mut self, writer: &mut dyn RecordWriter) -> ResourceEntry {
+        let mut entry = self.once(writer, self.start_over).await;
+        let auth_failed = entry.error.as_deref().is_some_and(is_auth_failure);
+        if let Some(renewed) = auth_failed
+            .then(|| self.handle.renew(self.client))
+            .flatten()
+        {
+            self.span
+                .in_scope(|| tracing::info!("retrying with the changed secrets"));
+            *self.client = renewed;
+            *self.stats_before = self.client.stats();
+            let earlier = entry.records;
+            // From the checkpoint the first try saved; the writer carries on with its files
+            entry = self.once(writer, false).await;
+            entry.records += earlier;
+        }
+        entry
+    }
+
+    async fn once(&mut self, writer: &mut dyn RecordWriter, start_over: bool) -> ResourceEntry {
+        sync_resource_media(
+            self.client,
+            self.server,
+            self.resource,
+            self.spec.clone(),
+            writer,
+            self.store,
+            start_over,
+            self.media.as_deref_mut(),
+            self.shutdown,
+        )
+        .instrument(self.span.clone())
+        .await
+    }
 }
 
 /// Compare the server's `$metadata` with the snapshot of the previous run and save the new one

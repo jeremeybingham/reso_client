@@ -170,7 +170,7 @@ let client = ResoClient::with_config(config)?;
 
 ## Ingest command
 
-`reso-ingest` reads a TOML file listing servers (secrets come from environment variables it names) and pulls each one:
+`reso-ingest` reads a TOML file listing servers (secrets come from environment variables or files it names, re-read so a rotated file needs no restart) and pulls each one:
 
 ```sh
 cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server

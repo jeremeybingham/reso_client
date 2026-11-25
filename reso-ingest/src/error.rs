@@ -38,6 +38,17 @@ pub enum IngestError {
         variable: String,
     },
 
+    /// A file named by a `*_file` setting could not be read or is empty
+    #[error("server `{server}`: secret file {path}: {message}")]
+    SecretFile {
+        /// The server's name
+        server: String,
+        /// The file
+        path: String,
+        /// What went wrong (never the file's contents)
+        message: String,
+    },
+
     /// An output file or the manifest could not be written
     #[error("output {path}: {message}")]
     Output {
