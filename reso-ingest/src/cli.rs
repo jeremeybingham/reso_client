@@ -21,6 +21,7 @@ use crate::checkpoint::CheckpointStore;
 use crate::checks::{count_warning, CheckingWriter, SchemaSnapshot};
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
+use crate::error::IngestError;
 use crate::lease::{Lease, LeaseOutcome};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
 use crate::manifest::{sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
@@ -112,6 +113,8 @@ enum Command {
         /// The same numbers are in the manifest.
         #[arg(long)]
         metrics_file: Option<PathBuf>,
+        #[command(flatten)]
+        storage: StorageArgs,
     },
     /// Run as a daemon: sync each resource on its own interval and serve health and metrics
     ///
@@ -153,6 +156,8 @@ enum Command {
         /// Data file format
         #[arg(long, value_enum, default_value_t = Format::Ndjson)]
         format: Format,
+        #[command(flatten)]
+        storage: StorageArgs,
     },
     /// Download the files of the Media records that `sync` wrote
     ///
@@ -178,6 +183,8 @@ enum Command {
         /// Most downloads per server in this run; the rest wait for the next run
         #[arg(long)]
         limit: Option<u64>,
+        #[command(flatten)]
+        storage: StorageArgs,
     },
     /// Print each server's $metadata model as JSON (resources, keys, properties, enums)
     Discover {
@@ -199,7 +206,48 @@ enum Command {
         /// Checkpoint directory (default: <out>/state)
         #[arg(long)]
         state: Option<PathBuf>,
+        #[command(flatten)]
+        storage: StorageArgs,
     },
+}
+
+/// Where state and output live when not on the local disk (feature `s3`)
+///
+/// With `--s3-bucket`, checkpoints, leases and media indexes go to `<prefix>/state/` in the bucket
+/// and finished data files to `<prefix>/data/`, so several workers share them. Manifests, the
+/// metrics file and media files still go to `--out` and `--media-dir`. Credentials come from the
+/// standard `AWS_*` environment variables, never from options.
+#[derive(Debug, Clone, Default, clap::Args)]
+struct StorageArgs {
+    /// S3-compatible bucket for state and data files (env RESO_S3_BUCKET)
+    #[cfg(feature = "s3")]
+    #[arg(long, env = "RESO_S3_BUCKET", conflicts_with = "state")]
+    s3_bucket: Option<String>,
+    /// Key prefix inside the bucket (env RESO_S3_PREFIX)
+    #[cfg(feature = "s3")]
+    #[arg(
+        long,
+        env = "RESO_S3_PREFIX",
+        default_value = "",
+        requires = "s3_bucket"
+    )]
+    s3_prefix: String,
+    /// Endpoint URL of a non-AWS store: R2, MinIO, GCS interoperability (env RESO_S3_ENDPOINT)
+    #[cfg(feature = "s3")]
+    #[arg(long, env = "RESO_S3_ENDPOINT", requires = "s3_bucket")]
+    s3_endpoint: Option<String>,
+    /// Region (env RESO_S3_REGION; default AWS_REGION)
+    #[cfg(feature = "s3")]
+    #[arg(long, env = "RESO_S3_REGION", requires = "s3_bucket")]
+    s3_region: Option<String>,
+    /// Allow a plain http:// endpoint (a local MinIO)
+    #[cfg(feature = "s3")]
+    #[arg(long, requires = "s3_bucket")]
+    s3_allow_http: bool,
+    /// One DELETE per object instead of multi-delete (GCS interoperability)
+    #[cfg(feature = "s3")]
+    #[arg(long, requires = "s3_bucket")]
+    s3_single_delete: bool,
 }
 
 /// File format of the data files
@@ -230,6 +278,8 @@ struct Args {
     media_dir: Option<PathBuf>,
     limit: Option<u64>,
     metrics_file: Option<PathBuf>,
+    #[cfg_attr(not(feature = "s3"), allow(dead_code))]
+    storage: StorageArgs,
 }
 
 impl Args {
@@ -243,9 +293,43 @@ impl Args {
             .unwrap_or_else(|| self.out().join("state"))
     }
 
-    /// The state directory as a store (the command line only knows files)
-    fn state_store(&self) -> Arc<dyn StateStore> {
-        Arc::new(FileStateStore::new(self.state()))
+    /// The bucket options when `--s3-bucket` is set, with `suffix` under the prefix
+    #[cfg(feature = "s3")]
+    fn s3_options(&self, suffix: &str) -> Option<crate::S3Options> {
+        let s = &self.storage;
+        let bucket = s.s3_bucket.clone()?;
+        let prefix = s.s3_prefix.trim_matches('/');
+        let prefix = if prefix.is_empty() {
+            suffix.to_string()
+        } else {
+            format!("{prefix}/{suffix}")
+        };
+        Some(crate::S3Options {
+            bucket,
+            prefix,
+            endpoint: s.s3_endpoint.clone(),
+            region: s.s3_region.clone(),
+            allow_http: s.s3_allow_http,
+            single_delete: s.s3_single_delete,
+        })
+    }
+
+    /// The state store: the bucket with `--s3-bucket`, else the state directory
+    fn state_store(&self) -> Result<Arc<dyn StateStore>, IngestError> {
+        #[cfg(feature = "s3")]
+        if let Some(options) = self.s3_options("state") {
+            return Ok(Arc::new(crate::S3StateStore::new(&options)?));
+        }
+        Ok(Arc::new(FileStateStore::new(self.state())))
+    }
+
+    /// Where finished data files go: the bucket with `--s3-bucket`, else they stay in `--out`
+    fn file_sink(&self) -> Result<Option<Arc<dyn crate::sink::FileSink>>, IngestError> {
+        #[cfg(feature = "s3")]
+        if let Some(options) = self.s3_options("data") {
+            return Ok(Some(Arc::new(crate::S3FileSink::new(&options)?)));
+        }
+        Ok(None)
     }
 }
 
@@ -384,6 +468,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             max_file_mb,
             format,
             metrics_file,
+            storage,
         } => {
             let args = Args {
                 config: Some(config),
@@ -399,6 +484,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 max_file_mb: Some(max_file_mb),
                 format,
                 metrics_file,
+                storage,
                 ..Args::default()
             };
             sync(args, out, err, shutdown).await
@@ -415,6 +501,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             media_dir,
             max_file_mb,
             format,
+            storage,
         } => {
             let args = Args {
                 config: Some(config),
@@ -427,6 +514,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 media_dir,
                 max_file_mb: Some(max_file_mb),
                 format,
+                storage,
                 ..Args::default()
             };
             serve(args, listen, err, shutdown).await
@@ -438,6 +526,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             state,
             media_dir,
             limit,
+            storage,
         } => {
             let args = Args {
                 config: Some(config),
@@ -446,6 +535,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 state,
                 media_dir,
                 limit,
+                storage,
                 ..Args::default()
             };
             media(args, out, err).await
@@ -466,10 +556,12 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
         Command::Status {
             out: out_dir,
             state,
+            storage,
         } => {
             let args = Args {
                 out: Some(out_dir),
                 state,
+                storage,
                 ..Args::default()
             };
             status(args, out, err).await
@@ -539,6 +631,12 @@ pub(crate) fn client_for(server: &ServerConfig) -> Result<ResoClient, String> {
     ResoClient::with_config(config).map_err(|e| e.to_string())
 }
 
+/// Print a storage setup error (a bucket or credentials that cannot be used) and return exit code 2
+fn usage_error(err: &mut dyn Write, e: &IngestError) -> i32 {
+    let _ = writeln!(err, "error: {e}");
+    2
+}
+
 // ---------------------------------------------------------------- serve
 
 async fn serve(
@@ -554,7 +652,14 @@ async fn serve(
     config.servers = servers;
     let mut options = ServeOptions::new(args.out());
     options.listen = listen;
-    options.state = args.state_store();
+    options.state = match args.state_store() {
+        Ok(v) => v,
+        Err(e) => return usage_error(err, &e),
+    };
+    options.sink = match args.file_sink() {
+        Ok(v) => v,
+        Err(e) => return usage_error(err, &e),
+    };
     options.deletes = args.deletes;
     options.allow_mass_deletes = args.allow_mass_deletes;
     options.media_dir = args.media.then(|| {
@@ -610,9 +715,13 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
             return 1;
         }
     };
+    let (state, sink) = match (args.state_store(), args.file_sink()) {
+        (Ok(state), Ok(sink)) => (state, sink),
+        (Err(e), _) | (_, Err(e)) => return usage_error(err, &e),
+    };
     let options = Arc::new(SyncOptions {
         out: args.out(),
-        state: args.state_store(),
+        state,
         run_id,
         resources: args.resources.clone(),
         deletes: args.deletes,
@@ -625,7 +734,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         start_over: args.start_over,
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
-        sink: None,
+        sink,
         shutdown,
     });
 
@@ -1144,9 +1253,13 @@ async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         Ok(v) => v,
         Err(code) => return code,
     };
+    let state = match args.state_store() {
+        Ok(v) => v,
+        Err(e) => return usage_error(err, &e),
+    };
     let options = Arc::new(MediaOptions {
         out: args.out(),
-        state: args.state_store(),
+        state,
         media_dir: args
             .media_dir
             .clone()
@@ -1343,7 +1456,12 @@ fn describe(metadata: &Metadata, resources: &[String]) -> Value {
 // ---------------------------------------------------------------- status
 
 async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let store = CheckpointStore::with_store(args.state_store());
+    let state = match args.state_store() {
+        Ok(v) => v,
+        Err(e) => return usage_error(err, &e),
+    };
+    let location = state.location("");
+    let store = CheckpointStore::with_store(state);
     let checkpoints = match store.list().await {
         Ok(c) => c,
         Err(e) => {
@@ -1351,7 +1469,7 @@ async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             return 1;
         }
     };
-    let _ = writeln!(out, "checkpoints in {}:", args.state().display());
+    let _ = writeln!(out, "checkpoints in {location}:");
     if checkpoints.is_empty() {
         let _ = writeln!(out, "  none");
     }

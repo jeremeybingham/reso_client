@@ -101,7 +101,7 @@ pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWr
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};
 #[cfg(feature = "s3")]
-pub use s3::{S3Options, S3StateStore};
+pub use s3::{S3FileSink, S3Options, S3StateStore};
 pub use serve::{Daemon, ServeOptions};
 pub use shutdown::Shutdown;
 pub use sink::{FileSink, LocalDirSink};

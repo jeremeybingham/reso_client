@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` S3 output sink and CLI selection (#107, second part, feature `s3`): `S3FileSink` uploads finished data
+  files (one `PUT` with `If-None-Match: *` up to 32 MiB, multipart above, never replaces a name). `sync`, `serve`, `media`
+  and `status` take `--s3-bucket`, `--s3-prefix`, `--s3-endpoint`, `--s3-region`, `--s3-allow-http`, `--s3-single-delete`
+  (env `RESO_S3_*` for the first four); state goes to `<prefix>/state/`, data files to `<prefix>/data/`. `ServeOptions`
+  gains `sink`. clap's `env` feature and tokio's `fs` and `io-util` features are enabled. Checked against a real
+  S3-compatible server (RustFS; MinIO no longer ships binaries or images): conditional writes, a lock race, multipart,
+  and a two-run `sync`. Manifests, metrics file and media files are still local.
 - `reso-ingest` S3-compatible state store (#107, first part, feature `s3`): `S3StateStore` and `S3Options` keep state
   under a bucket prefix on AWS S3, R2, MinIO or GCS (interoperability API), with `create` as `If-None-Match` and
   `replace` as `If-Match` on the ETag, so leases work across workers. Uses the `object_store` crate (approved);

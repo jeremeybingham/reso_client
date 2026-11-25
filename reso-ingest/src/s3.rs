@@ -5,7 +5,7 @@
 //! MinIO and GCS through its S3 interoperability API, using the `object_store` crate (rustls, no
 //! OpenSSL). Conditional writes are real HTTP preconditions: `create` is a put with
 //! `If-None-Match: *`, `replace` is a put with `If-Match` on the ETag, so a lease is held by
-//! exactly one worker. The output sink is added in a later change (#107).
+//! exactly one worker. [`S3FileSink`] uploads finished output files to the same kind of bucket.
 
 use std::fmt;
 use std::sync::Arc;
@@ -15,9 +15,13 @@ use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::path::Path as ObjectPath;
 use object_store::{
     Error as ObjectError, ObjectStore, ObjectStoreExt, PutMode, PutPayload, UpdateVersion,
+    WriteMultipart,
 };
+use std::path::Path;
+use tokio::io::AsyncReadExt;
 
 use crate::error::IngestError;
+use crate::sink::FileSink;
 use crate::state::{StateStore, StoreFuture, Versioned};
 
 /// Where an S3-compatible bucket is and how to reach it
@@ -315,6 +319,165 @@ impl StateStore for S3StateStore {
     }
 }
 
+/// Files up to this size go up in one conditional `PUT`; larger ones use a multipart upload
+const SINGLE_PUT_MAX: u64 = 32 * 1024 * 1024;
+/// Part size of a multipart upload (S3 needs at least 5 MiB per part)
+const PART_SIZE: usize = 16 * 1024 * 1024;
+
+/// A [`FileSink`] that uploads finished data files to an S3-compatible bucket
+///
+/// `put_file` returns when the store confirms the object. A small file is one `PUT` with
+/// `If-None-Match: *`, so an existing name is never replaced, even by a racing worker. A large file
+/// is a multipart upload after a head check (the object appears only when the upload completes; a
+/// race between two workers on one run id is not caught for these, but run ids are unique per
+/// run). The trait is synchronous, so the async client runs through `block_in_place`: use it from
+/// a multi-threaded Tokio runtime (the binary's).
+///
+/// Unconfirmed against a real bucket until tested with MinIO or S3 (#107).
+#[derive(Clone)]
+pub struct S3FileSink {
+    store: Arc<dyn ObjectStore>,
+    prefix: Option<ObjectPath>,
+    label: String,
+}
+
+impl fmt::Debug for S3FileSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3FileSink")
+            .field("location", &self.label)
+            .finish()
+    }
+}
+
+impl S3FileSink {
+    /// A sink for the bucket and prefix in `options`
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when no client can be built (see [`S3Options`]).
+    pub fn new(options: &S3Options) -> Result<Self, IngestError> {
+        Self::with_store(options.build()?, &options.prefix, options.location(""))
+    }
+
+    /// A sink over any `object_store` implementation (tests use the in-memory one)
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when `prefix` is not a valid object path.
+    pub fn with_store(
+        store: Arc<dyn ObjectStore>,
+        prefix: &str,
+        label: String,
+    ) -> Result<Self, IngestError> {
+        // Same key layout as the state store
+        let keys = S3StateStore::with_store(Arc::clone(&store), prefix, label.clone())?;
+        Ok(Self {
+            store,
+            prefix: keys.prefix,
+            label,
+        })
+    }
+
+    fn error(&self, name: &str, e: impl fmt::Display) -> IngestError {
+        IngestError::Output {
+            path: format!("{}/{name}", self.label.trim_end_matches('/')),
+            message: e.to_string(),
+        }
+    }
+
+    fn path(&self, name: &str) -> Result<ObjectPath, IngestError> {
+        let key_path = ObjectPath::parse(name).map_err(|e| self.error(name, e))?;
+        Ok(match &self.prefix {
+            Some(prefix) => prefix.parts().chain(key_path.parts()).collect(),
+            None => key_path,
+        })
+    }
+
+    async fn upload(&self, name: &str, local: &Path) -> Result<(), IngestError> {
+        let path = self.path(name)?;
+        let io = |e: std::io::Error| self.error(name, format!("{}: {e}", local.display()));
+        let mut file = tokio::fs::File::open(local).await.map_err(io)?;
+        let size = file.metadata().await.map_err(io)?.len();
+        if size <= SINGLE_PUT_MAX {
+            let mut bytes = Vec::with_capacity(size as usize);
+            file.read_to_end(&mut bytes).await.map_err(io)?;
+            return match self
+                .store
+                .put_opts(&path, PutPayload::from(bytes), PutMode::Create.into())
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(ObjectError::AlreadyExists { .. } | ObjectError::Precondition { .. }) => {
+                    Err(self.exists_error(name))
+                }
+                Err(e) => Err(self.error(name, e)),
+            };
+        }
+        if self.exists_async(name).await? {
+            return Err(self.exists_error(name));
+        }
+        let upload = self
+            .store
+            .put_multipart(&path)
+            .await
+            .map_err(|e| self.error(name, e))?;
+        let mut writer = WriteMultipart::new_with_chunk_size(upload, PART_SIZE);
+        let mut buf = vec![0u8; PART_SIZE];
+        loop {
+            let n = match file.read(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = writer.abort().await;
+                    return Err(io(e));
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            writer.write(&buf[..n]);
+            if let Err(e) = writer.wait_for_capacity(4).await {
+                let _ = writer.abort().await;
+                return Err(self.error(name, e));
+            }
+        }
+        writer
+            .finish()
+            .await
+            .map(|_| ())
+            .map_err(|e| self.error(name, e))
+    }
+
+    fn exists_error(&self, name: &str) -> IngestError {
+        self.error(
+            name,
+            "object already exists; another run may share this run id",
+        )
+    }
+
+    async fn exists_async(&self, name: &str) -> Result<bool, IngestError> {
+        match self.store.head(&self.path(name)?).await {
+            Ok(_) => Ok(true),
+            Err(ObjectError::NotFound { .. }) => Ok(false),
+            Err(e) => Err(self.error(name, e)),
+        }
+    }
+}
+
+/// Run an async call from synchronous code inside a multi-threaded Tokio runtime
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
+}
+
+impl FileSink for S3FileSink {
+    fn put_file(&self, name: &str, local: &Path) -> Result<(), IngestError> {
+        block_on(self.upload(name, local))
+    }
+
+    fn exists(&self, name: &str) -> Result<bool, IngestError> {
+        block_on(self.exists_async(name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +542,54 @@ mod tests {
             }
         }
         assert_eq!(won, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sink_uploads_once_and_never_replaces() {
+        let inner = Arc::new(InMemory::new());
+        let sink = S3FileSink::with_store(inner.clone(), "out/", "s3://b/out".to_string()).unwrap();
+        let dir = std::env::temp_dir().join(format!("reso-s3-sink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.ndjson");
+        std::fs::write(&file, b"{\"a\":1}\n").unwrap();
+        assert!(!sink.exists("run1/a.ndjson").unwrap());
+        sink.put_file("run1/a.ndjson", &file).unwrap();
+        assert!(sink.exists("run1/a.ndjson").unwrap());
+        let err = sink.put_file("run1/a.ndjson", &file).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        let got = inner
+            .get(&ObjectPath::from("out/run1/a.ndjson"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&got[..], b"{\"a\":1}\n");
+        assert!(sink.put_file("x", &dir.join("missing")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sink_uploads_large_files_in_parts() {
+        let inner = Arc::new(InMemory::new());
+        let sink = S3FileSink::with_store(inner.clone(), "", "s3://b".to_string()).unwrap();
+        let dir = std::env::temp_dir().join(format!("reso-s3-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.ndjson");
+        let len = SINGLE_PUT_MAX as usize + 5_000_001;
+        let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&file, &data).unwrap();
+        sink.put_file("big.ndjson", &file).unwrap();
+        let got = inner
+            .get(&ObjectPath::from("big.ndjson"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert!(got[..] == data[..]);
+        assert!(sink.put_file("big.ndjson", &file).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
