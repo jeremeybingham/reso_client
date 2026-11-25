@@ -225,6 +225,9 @@ pub struct MediaConfig {
     /// `never`, `same_host` (default) or `always`
     #[serde(default)]
     pub send_token: Option<String>,
+    /// Field of a record that holds its nested media records, for `sync --media` (default `Media`)
+    #[serde(default)]
+    pub nested_field: Option<String>,
 }
 
 impl MediaConfig {

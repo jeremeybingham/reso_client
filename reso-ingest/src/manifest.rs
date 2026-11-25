@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::checkpoint::CheckpointStore;
 use crate::error::IngestError;
+use crate::media::PageMedia;
 use crate::output::{now_rfc3339, RecordWriter};
 
 /// One output file in the manifest
@@ -142,7 +143,7 @@ pub async fn pull_resource(
     spec: StandardReplication,
     writer: &mut dyn RecordWriter,
 ) -> ResourceEntry {
-    pull(client, server, resource, spec, writer, None).await
+    pull(client, server, resource, spec, writer, None, None).await
 }
 
 /// Incremental, resumable pull of one resource
@@ -164,10 +165,32 @@ pub async fn sync_resource(
     client: &ResoClient,
     server: &str,
     resource: &str,
+    spec: StandardReplication,
+    writer: &mut dyn RecordWriter,
+    store: &CheckpointStore,
+    start_over: bool,
+) -> ResourceEntry {
+    sync_resource_media(
+        client, server, resource, spec, writer, store, start_over, None,
+    )
+    .await
+}
+
+/// [`sync_resource`] that also downloads the media files of each page right after the page is
+/// written and checkpointed (see [`PageMedia`]), so signed URLs are used while fresh
+///
+/// A media error (an unreadable or unwritable index) stops this resource and is recorded in the
+/// entry; single file failures are only in the [`PageMedia`] report.
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_resource_media(
+    client: &ResoClient,
+    server: &str,
+    resource: &str,
     mut spec: StandardReplication,
     writer: &mut dyn RecordWriter,
     store: &CheckpointStore,
     start_over: bool,
+    media: Option<&mut PageMedia<'_>>,
 ) -> ResourceEntry {
     let setup = if start_over {
         store.clear(server, resource).map(|()| None)
@@ -189,7 +212,7 @@ pub async fn sync_resource(
             };
         }
     }
-    pull(client, server, resource, spec, writer, Some(store)).await
+    pull(client, server, resource, spec, writer, Some(store), media).await
 }
 
 async fn pull(
@@ -199,6 +222,7 @@ async fn pull(
     spec: StandardReplication,
     writer: &mut dyn RecordWriter,
     store: Option<&CheckpointStore>,
+    mut media: Option<&mut PageMedia<'_>>,
 ) -> ResourceEntry {
     let mut run = client.replicate(spec);
     let mut records = 0u64;
@@ -236,6 +260,12 @@ async fn pull(
                     }
                 }
                 checkpoint = checkpoint_json(run.checkpoint());
+                if let Some(media) = media.as_deref_mut() {
+                    if let Err(e) = media.page(resource, &batch).await {
+                        error = Some(e.to_string());
+                        break;
+                    }
+                }
             }
             Ok(None) => break,
             Err(e) => {

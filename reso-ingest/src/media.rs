@@ -128,6 +128,125 @@ impl MediaIndex {
     }
 }
 
+impl MediaIndex {
+    /// Take in the media records nested in `parent` under `field` (an array, as `$expand=Media`
+    /// returns it); the keys of the entries touched are pushed onto `keys`
+    ///
+    /// Returns how many nested records had no `MediaKey`.
+    pub fn add_nested(&mut self, parent: &Value, field: &str, keys: &mut Vec<String>) -> u64 {
+        let mut without_key = 0;
+        for media in parent[field].as_array().into_iter().flatten() {
+            match key_string(&media[KEY_FIELD]) {
+                Some(key) if self.add_record(media) => keys.push(key),
+                _ => without_key += 1,
+            }
+        }
+        without_key
+    }
+}
+
+/// The nested-array field that holds media records when none is configured
+pub const DEFAULT_NESTED_FIELD: &str = "Media";
+
+/// Downloads the media files of each page `sync --media` writes, while the page's URLs are fresh
+///
+/// For the top-level [`MEDIA_RESOURCE`] each record is a media record; for any other resource the
+/// media records nested in each record (`$expand=Media`) are taken. Only files that are new or
+/// changed (or failed earlier) *and* whose record is in this page are downloaded, so a signed
+/// URL is never older than one page. A file that fails stays pending and is fetched again when
+/// a later sync sees its record again.
+pub struct PageMedia<'a> {
+    nested_field: String,
+    dir: PathBuf,
+    index_path: PathBuf,
+    index: MediaIndex,
+    downloader: reso_client::Downloader<'a>,
+    report: MediaReport,
+}
+
+impl<'a> PageMedia<'a> {
+    /// Open the index of `server` and make a downloader
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the index is unreadable or the HTTP client cannot be built.
+    pub fn new(
+        client: &'a ResoClient,
+        server: &str,
+        download: DownloadConfig,
+        state: &Path,
+        media_dir: &Path,
+        nested_field: Option<&str>,
+    ) -> Result<Self, IngestError> {
+        let index_path = MediaIndex::path(state, server);
+        let dir = media_dir.join(encode_name(server));
+        let index = MediaIndex::load(&index_path)?;
+        let downloader = client
+            .downloader(download)
+            .map_err(|e| output_error(&dir, e))?;
+        Ok(Self {
+            nested_field: nested_field.unwrap_or(DEFAULT_NESTED_FIELD).to_string(),
+            dir,
+            index_path,
+            index,
+            downloader,
+            report: MediaReport {
+                server: server.to_string(),
+                ..MediaReport::default()
+            },
+        })
+    }
+
+    /// Take in one written page of `resource` and download its pending files
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the index cannot be saved.
+    pub async fn page(&mut self, resource: &str, batch: &[Value]) -> Result<(), IngestError> {
+        let mut keys = Vec::new();
+        for record in batch {
+            if resource == MEDIA_RESOURCE {
+                match key_string(&record[KEY_FIELD]) {
+                    Some(key) if self.index.add_record(record) => keys.push(key),
+                    _ => self.report.records_without_key += 1,
+                }
+                self.report.records += 1;
+            } else {
+                self.report.records_without_key +=
+                    self.index.add_nested(record, &self.nested_field, &mut keys);
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        for key in keys {
+            let Some(entry) = self.index.entries.get_mut(&key) else {
+                continue;
+            };
+            if !entry.pending {
+                continue;
+            }
+            if entry.url.is_none() {
+                self.report.without_url += 1;
+                continue;
+            }
+            download_one(&self.downloader, &self.dir, &key, entry, &mut self.report).await;
+        }
+        self.index.save(&self.index_path)
+    }
+
+    /// Final report: files still pending (their records were not seen again) and bytes
+    pub fn finish(mut self) -> MediaReport {
+        self.report.bytes = self.downloader.stats().bytes;
+        self.report.pending = self
+            .index
+            .entries
+            .values()
+            .filter(|e| e.pending && e.url.is_some())
+            .count() as u64;
+        self.report
+    }
+}
+
 /// Where `sync_media` reads and writes
 #[derive(Debug, Clone)]
 pub struct MediaOptions {
@@ -608,6 +727,17 @@ mod tests {
         assert!(!index.entries["n"].pending);
         index.add_record(&json!({"MediaKey": "n", "MediaURL": "u2"}));
         assert!(index.entries["n"].pending);
+    }
+
+    #[test]
+    fn nested_media_use_their_own_keys_and_count_keyless_ones() {
+        let mut index = MediaIndex::default();
+        let parent = json!({"ListingKey": "L", "Media": [
+            {"MediaKey": "m1", "MediaURL": "u1"}, {"MediaURL": "u2"}, {"MediaKey": "m2"}]});
+        let mut keys = Vec::new();
+        assert_eq!(index.add_nested(&parent, "Media", &mut keys), 1);
+        assert_eq!(keys, ["m1", "m2"]);
+        assert_eq!(index.add_nested(&parent, "Photos", &mut keys), 0);
     }
 
     #[test]
