@@ -18,7 +18,7 @@ use object_store::{
     WriteMultipart,
 };
 use std::path::Path;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::IngestError;
 use crate::sink::FileSink;
@@ -337,6 +337,82 @@ impl StateStore for S3StateStore {
             format!("{}/{key}", self.label.trim_end_matches('/'))
         }
     }
+
+    fn get_to_file<'a>(&'a self, key: &'a str, dest: &'a Path) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            let path = self.path(key)?;
+            let result = match self.store.get(&path).await {
+                Ok(r) => r,
+                Err(ObjectError::NotFound { .. }) => return Ok(false),
+                Err(e) => return Err(self.error(key, chain(&e))),
+            };
+            let io = |e: std::io::Error| self.error(key, format!("{}: {e}", dest.display()));
+            let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+            let mut stream = result.into_stream();
+            while let Some(chunk) = stream
+                .try_next()
+                .await
+                .map_err(|e| self.error(key, chain(&e)))?
+            {
+                file.write_all(&chunk).await.map_err(io)?;
+            }
+            file.flush().await.map_err(io)?;
+            Ok(true)
+        })
+    }
+
+    fn put_from_file<'a>(&'a self, key: &'a str, src: &'a Path) -> StoreFuture<'a, ()> {
+        Box::pin(async move {
+            let path = self.path(key)?;
+            let io = |e: std::io::Error| self.error(key, format!("{}: {e}", src.display()));
+            let mut file = tokio::fs::File::open(src).await.map_err(io)?;
+            let size = file.metadata().await.map_err(io)?.len();
+            if size <= SINGLE_PUT_MAX {
+                let mut bytes = Vec::with_capacity(size as usize);
+                file.read_to_end(&mut bytes).await.map_err(io)?;
+                return self
+                    .store
+                    .put(&path, PutPayload::from(bytes))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| self.error(key, chain(&e)));
+            }
+            put_multipart_from(self.store.as_ref(), &path, &mut file, src)
+                .await
+                .map_err(|e| self.error(key, e))
+        })
+    }
+}
+
+/// Upload the rest of `file` (read from `local`) to `path` in parts; the object appears, replacing
+/// any old one, only when the upload completes. An error aborts the upload.
+async fn put_multipart_from(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    file: &mut tokio::fs::File,
+    local: &Path,
+) -> Result<(), String> {
+    let upload = store.put_multipart(path).await.map_err(|e| chain(&e))?;
+    let mut writer = WriteMultipart::new_with_chunk_size(upload, PART_SIZE);
+    let mut buf = vec![0u8; PART_SIZE];
+    loop {
+        let n = match file.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = writer.abort().await;
+                return Err(format!("{}: {e}", local.display()));
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        writer.write(&buf[..n]);
+        if let Err(e) = writer.wait_for_capacity(4).await {
+            let _ = writer.abort().await;
+            return Err(chain(&e));
+        }
+    }
+    writer.finish().await.map(|_| ()).map_err(|e| chain(&e))
 }
 
 /// Files up to this size go up in one conditional `PUT`; larger ones use a multipart upload
@@ -436,35 +512,9 @@ impl S3FileSink {
         if self.exists_async(name).await? {
             return Err(self.exists_error(name));
         }
-        let upload = self
-            .store
-            .put_multipart(&path)
+        put_multipart_from(self.store.as_ref(), &path, &mut file, local)
             .await
-            .map_err(|e| self.error(name, chain(&e)))?;
-        let mut writer = WriteMultipart::new_with_chunk_size(upload, PART_SIZE);
-        let mut buf = vec![0u8; PART_SIZE];
-        loop {
-            let n = match file.read(&mut buf).await {
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = writer.abort().await;
-                    return Err(io(e));
-                }
-            };
-            if n == 0 {
-                break;
-            }
-            writer.write(&buf[..n]);
-            if let Err(e) = writer.wait_for_capacity(4).await {
-                let _ = writer.abort().await;
-                return Err(self.error(name, chain(&e)));
-            }
-        }
-        writer
-            .finish()
-            .await
-            .map(|_| ())
-            .map_err(|e| self.error(name, chain(&e)))
+            .map_err(|e| self.error(name, e))
     }
 
     fn exists_error(&self, name: &str) -> IngestError {
@@ -652,5 +702,23 @@ mod tests {
         assert_eq!(o.location(""), "s3://b/pre");
         assert_eq!(o.location("k.json"), "s3://b/pre/k.json");
         assert_eq!(S3Options::new("b", "").location("k"), "s3://b/k");
+    }
+
+    #[tokio::test]
+    async fn files_stream_to_and_from_the_store_in_one_put_or_in_parts() {
+        let dir = std::env::temp_dir().join(format!("reso-s3-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = store("p");
+        let (src, dest) = (dir.join("src"), dir.join("dest"));
+        assert!(!s.get_to_file("k.keys.ndjson", &dest).await.unwrap());
+        // Over SINGLE_PUT_MAX, so a multipart upload of three parts
+        for size in [10, SINGLE_PUT_MAX as usize + 5] {
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&src, &bytes).unwrap();
+            s.put_from_file("k.keys.ndjson", &src).await.unwrap();
+            assert!(s.get_to_file("k.keys.ndjson", &dest).await.unwrap());
+            assert!(std::fs::read(&dest).unwrap() == bytes, "size {size}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1121,12 +1121,15 @@ pub(crate) async fn sync_server_with(
             && !entry.interrupted
             && server.deletes.flag_field.is_none()
         {
+            // Key-diff temporary files; the image has no /tmp, --out is writable
+            let scratch = options.out.join(".scratch");
             let deleted = reconcile_deletes(
                 &client,
                 &name,
                 &DeleteTarget::new(resource, &plan.key)
                     .with_filter(filter.as_deref())
-                    .with_limits(server.deletes.limits(options.allow_mass_deletes)),
+                    .with_limits(server.deletes.limits(options.allow_mass_deletes))
+                    .with_scratch_dir(&scratch),
                 feed.as_ref(),
                 writer.as_mut(),
                 &store,

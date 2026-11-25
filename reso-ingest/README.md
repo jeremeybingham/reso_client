@@ -233,10 +233,14 @@ In `--out` (default `reso-out`):
   be appended to); `serve` delivers them only for runs that keep a manifest (a poll that found nothing new stays in the
   local log only).
 - `.run.<run>`: an empty marker that reserves the run id. Ids are the start time (`20261124T173005Z`); a run started in
-  the same second as another in the same `--out` gets `-02`, `-03`, … added. A writer never overwrites an existing file:
+  the same second as another in the same `--out` gets `-02`, `-03`, … added. `.scratch/` holds the temporary files of
+  a `--deletes` key comparison while it runs. A writer never overwrites an existing file:
   it stops with an error instead.
 - `state/` (or `--state`): one JSON checkpoint per server and resource (and one `$metadata` snapshot per server), saved after each batch is written, so a rerun
   after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times.
+- `state/<server>.<resource>.keys.ndjson` (with `--deletes` and no event feed): the key set last seen, a header line
+  (server, resource, time) then one key per line as JSON, sorted, without repeats. A key set in the older one-JSON
+  format (`.keys.json`) is converted on the next `--deletes` run.
 - `state/<server>.<resource>.lock`: the feed's lease while a `sync` runs (process id, host, expiry; the expiry is renewed
   every 100 seconds and removed when the sync ends). A second `sync` on the same state directory skips that feed with a
   warning in the manifest and log (`skipped: another process is syncing this feed`), without failing the run. After a
@@ -244,7 +248,7 @@ In `--out` (default `reso-out`):
   the state directory on a local disk; `media` does not take leases yet.
 
 All of `state/` goes through one key-value interface, `StateStore` (get, put, create-if-absent, replace-if-unchanged,
-delete, list). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
+delete, list, and copies to and from local files for large values such as key sets). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
 synced and renamed. A library user can pass another backend (object storage, a database) to `CheckpointStore::with_store`,
 `Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85. With the `s3` feature, `S3StateStore` keeps state as objects under a bucket prefix (AWS S3,
 R2, MinIO, GCS interoperability; version = ETag, `create` and `replace` use `If-None-Match` and `If-Match`; credentials
@@ -414,7 +418,10 @@ page request (`docker stop -t`, Kubernetes `terminationGracePeriodSeconds`). `me
   `expand` and `page_size` from `[server.resources.<Name>]` go on every page.
 - Deletes (`--deletes`): when `$metadata` declares an `EntityEvent` resource, its feed is read from the last sequence
   number and each named record is looked up; otherwise every key is pulled and compared with the previous run's (the
-  first run is the baseline and reports no deletes). With `deletes.flag_field` set, flagged records produce the events
+  first run is the baseline and reports no deletes). The key comparison keeps memory flat: keys are sorted in chunks
+  of 100 000 that spill to temporary files in `<out>/.scratch/` (removed after each pass; about 3 times the key set,
+  some 40 MB per million keys), and the saved set is diffed by merging the two sorted streams. A million keys
+  peak at 24 MiB, as do ten million (`LOADTEST.md`). With `deletes.flag_field` set, flagged records produce the events
   instead (see above).
 
 ## Media files

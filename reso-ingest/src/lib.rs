@@ -63,6 +63,7 @@ pub mod cli;
 mod config;
 mod deletes;
 mod error;
+mod keyset;
 mod lease;
 mod logging;
 mod manifest;
