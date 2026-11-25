@@ -476,6 +476,10 @@ impl FileSink for S3FileSink {
     fn exists(&self, name: &str) -> Result<bool, IngestError> {
         block_on(self.exists_async(name))
     }
+
+    fn location(&self, name: &str) -> String {
+        format!("{}/{name}", self.label.trim_end_matches('/'))
+    }
 }
 
 #[cfg(test)]

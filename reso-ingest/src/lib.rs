@@ -69,6 +69,7 @@ mod output;
 #[cfg(feature = "parquet")]
 mod parquet_out;
 mod runner;
+mod runs;
 #[cfg(feature = "s3")]
 mod s3;
 mod serve;

@@ -31,6 +31,7 @@ use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
+use crate::runs;
 use crate::serve::{Daemon, ServeOptions};
 use crate::shutdown::Shutdown;
 use crate::state::{FileStateStore, StateStore};
@@ -708,16 +709,16 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         Ok(v) => v,
         Err(code) => return code,
     };
-    let run_id = match reserve_run_id(args.out()) {
+    let (state, sink) = match (args.state_store(), args.file_sink()) {
+        (Ok(state), Ok(sink)) => (state, sink),
+        (Err(e), _) | (_, Err(e)) => return usage_error(err, &e),
+    };
+    let run_id = match runs::reserve(&args.out(), state.as_ref(), sink.as_deref()).await {
         Ok(id) => id,
         Err(e) => {
             let _ = writeln!(err, "error: {e}");
             return 1;
         }
-    };
-    let (state, sink) = match (args.state_store(), args.file_sink()) {
-        (Ok(state), Ok(sink)) => (state, sink),
-        (Err(e), _) | (_, Err(e)) => return usage_error(err, &e),
     };
     let options = Arc::new(SyncOptions {
         out: args.out(),
@@ -771,7 +772,11 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
             Err(message) => manifest.add_server_failure(report.name, message),
         }
     }
-    let manifest_path = manifest.write(&options.out);
+    let sink = options.sink.as_deref();
+    let manifest_path = match manifest.write(&options.out) {
+        Ok(p) => runs::deliver_manifest(&p, options.state.as_ref(), sink).await,
+        Err(e) => Err(e),
+    };
     let mut metrics_failed = false;
     if let Some(path) = &args.metrics_file {
         if let Err(e) = write_metrics_file(&manifest, path) {
@@ -783,8 +788,8 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
     if let Some(var) = &config.webhook_url_env {
         match std::env::var(var) {
             Ok(url) if !url.trim().is_empty() => {
-                let path = manifest_path.as_ref().ok().map(|p| p.display().to_string());
-                let summary = run_summary(&manifest, path.as_deref());
+                let path = manifest_path.as_deref().ok();
+                let summary = run_summary(&manifest, path);
                 if let Err(e) = post_summary(url.trim(), &summary).await {
                     let _ = writeln!(err, "error: {e}");
                     webhook_failed = true;
@@ -802,9 +807,12 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         for r in &media_manifest.servers {
             let _ = writeln!(out, "  {}", media_line(r));
         }
-        match media_manifest.write(&options.out) {
+        match media_manifest
+            .write(&options.out)
+            .and_then(|p| runs::deliver(&p, sink))
+        {
             Ok(p) => {
-                let _ = writeln!(out, "media manifest: {}", p.display());
+                let _ = writeln!(out, "media manifest: {p}");
             }
             Err(e) => {
                 let _ = writeln!(err, "error: {e}");
@@ -817,6 +825,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         let _ = writeln!(err, "error: {e}");
         return 1;
     }
+    runs::release(options.state.as_ref(), sink, &options.run_id).await;
     if manifest.interrupted {
         return EXIT_INTERRUPTED;
     }
@@ -1190,7 +1199,7 @@ fn failed_entry(server: &str, resource: &str, error: &str) -> ResourceEntry {
     }
 }
 
-fn print_summary(manifest: &RunManifest, path: Option<&Path>, out: &mut dyn Write) {
+fn print_summary(manifest: &RunManifest, path: Option<&str>, out: &mut dyn Write) {
     let records: u64 = manifest.resources.iter().map(|r| r.records).sum();
     let deletes: u64 = manifest.resources.iter().map(|r| r.deletes).sum();
     let _ = writeln!(
@@ -1242,13 +1251,25 @@ fn print_summary(manifest: &RunManifest, path: Option<&Path>, out: &mut dyn Writ
         let _ = writeln!(out, "FAILED servers: {}", names.join(", "));
     }
     if let Some(path) = path {
-        let _ = writeln!(out, "manifest: {}", path.display());
+        let _ = writeln!(out, "manifest: {path}");
     }
 }
 
 // ---------------------------------------------------------------- media
 
 async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    match args.file_sink() {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            let _ = writeln!(
+                err,
+                "error: `media` reads the data files in --out, but with --s3-bucket they are in the \
+                 bucket; use `sync --media` to download Media files while syncing"
+            );
+            return 2;
+        }
+        Err(e) => return usage_error(err, &e),
+    }
     let (config, servers) = match load_servers(&args, err) {
         Ok(v) => v,
         Err(code) => return code,
@@ -1461,6 +1482,24 @@ async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         Err(e) => return usage_error(err, &e),
     };
     let location = state.location("");
+    // With a bucket the manifests are there; the state keeps a copy of the newest one
+    let last_run = match state.get(runs::LAST_RUN_KEY).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return 1;
+        }
+    };
+    let last_run = match last_run {
+        Some(v) => match serde_json::from_slice::<Value>(&v.bytes) {
+            Ok(value) => Ok(Some((state.location(runs::LAST_RUN_KEY), value))),
+            Err(e) => Err(format!(
+                "{} is not valid JSON: {e}",
+                state.location(runs::LAST_RUN_KEY)
+            )),
+        },
+        None => last_manifest(&args.out()),
+    };
     let store = CheckpointStore::with_store(state);
     let checkpoints = match store.list().await {
         Ok(c) => c,
@@ -1485,7 +1524,7 @@ async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         );
     }
 
-    match last_manifest(&args.out()) {
+    match last_run {
         Ok(Some((path, value))) => {
             let _ = writeln!(out, "last run: {}", value["run_id"].as_str().unwrap_or("?"));
             let _ = writeln!(
@@ -1517,7 +1556,7 @@ async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                     f["error"].as_str().unwrap_or("?")
                 );
             }
-            let _ = writeln!(out, "  {failures} failures; manifest {}", path.display());
+            let _ = writeln!(out, "  {failures} failures; manifest {path}");
         }
         Ok(None) => {
             let _ = writeln!(
@@ -1535,7 +1574,7 @@ async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
 }
 
 /// The newest `manifest.*.json` in `dir` (run ids sort by time), parsed
-fn last_manifest(dir: &Path) -> Result<Option<(PathBuf, Value)>, String> {
+fn last_manifest(dir: &Path) -> Result<Option<(String, Value)>, String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1557,5 +1596,5 @@ fn last_manifest(dir: &Path) -> Result<Option<(PathBuf, Value)>, String> {
         .map_err(|e| format!("cannot read {}: {}", path.display(), e.kind()))?;
     let value = serde_json::from_str(&text)
         .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
-    Ok(Some((path, value)))
+    Ok(Some((path.display().to_string(), value)))
 }

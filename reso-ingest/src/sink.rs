@@ -34,6 +34,11 @@ pub trait FileSink: Debug + Send + Sync {
     ///
     /// [`IngestError::Output`] when the destination cannot be asked.
     fn exists(&self, name: &str) -> Result<bool, IngestError>;
+
+    /// Where `name` is stored, for messages (a path, a URL); never contains a secret
+    fn location(&self, name: &str) -> String {
+        name.to_string()
+    }
 }
 
 /// A directory: today's behaviour when the writer's staging directory is somewhere else
@@ -72,5 +77,9 @@ impl FileSink for LocalDirSink {
 
     fn exists(&self, name: &str) -> Result<bool, IngestError> {
         Ok(self.dir.join(name).exists())
+    }
+
+    fn location(&self, name: &str) -> String {
+        self.dir.join(name).display().to_string()
     }
 }

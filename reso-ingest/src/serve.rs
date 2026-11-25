@@ -40,7 +40,8 @@ use crate::config::{Config, ServerConfig, MAX_BACKOFF};
 use crate::error::IngestError;
 use crate::manifest::{ResourceEntry, RunManifest};
 use crate::metrics::{escape, render_prometheus};
-use crate::output::{now_rfc3339, reserve_run_id};
+use crate::output::now_rfc3339;
+use crate::runs;
 use crate::shutdown::Shutdown;
 use crate::state::{FileStateStore, StateStore};
 
@@ -396,7 +397,8 @@ async fn sync_once(
     options: &ServeOptions,
     shutdown: &Shutdown,
 ) -> Outcome {
-    let run_id = match reserve_run_id(&options.out) {
+    let sink = options.sink.as_deref();
+    let run_id = match runs::reserve(&options.out, options.state.as_ref(), sink).await {
         Ok(id) => id,
         Err(e) => return Outcome::Failed(e.to_string(), None),
     };
@@ -456,10 +458,19 @@ async fn sync_once(
             .resources
             .iter()
             .any(|r| r.records > 0 || r.deletes > 0 || !r.warnings.is_empty());
+    let mut delivered = true;
     if eventful {
-        if let Err(e) = manifest.write(&options.out) {
+        let written = match manifest.write(&options.out) {
+            Ok(p) => runs::deliver_manifest(&p, options.state.as_ref(), sink).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = written {
             tracing::warn!(error = %e, "cannot write the manifest");
+            delivered = false;
         }
+    }
+    if delivered {
+        runs::release(options.state.as_ref(), sink, &run_id).await;
     }
     let marker = options.out.join(format!(".run.{}", sanitize_id(&run_id)));
     let _ = std::fs::remove_file(marker);

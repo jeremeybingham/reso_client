@@ -84,7 +84,8 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore
   src/sink.rs       FileSink (put_file, exists), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
-  src/s3.rs         S3Options, S3StateStore, S3FileSink: state and data files in an S3-compatible bucket via `object_store` (feature `s3`; `--s3-*` options; manifests/media still local, #107)
+  src/s3.rs         S3Options, S3StateStore, S3FileSink: state and data files in an S3-compatible bucket via `object_store` (feature `s3`; `--s3-*` options, #107)
+  src/runs.rs       run id reservation in the state store, manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
   src/checkpoint.rs CheckpointStore: checkpoints, key sets, event sequences, schema snapshots as JSON in a StateStore
   src/serve.rs      Daemon, ServeOptions: `reso-ingest serve`, one task per feed (interval, jitter, backoff), axum endpoints
                     (/healthz, /readyz, /metrics, /status); each sync is `cli::sync_server_with` for one resource
@@ -102,7 +103,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/webhook.rs    run_summary, post_summary: the run-summary webhook (URL from `webhook_url_env`)
   src/error.rs      IngestError
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
-  servers.example.toml, tests/ (s3_tests.rs for the S3 state store against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
+  servers.example.toml, tests/ (s3_tests.rs for the S3 state store and a `sync`/`status` run against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
                     log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; lease_tests.rs for held feeds; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),

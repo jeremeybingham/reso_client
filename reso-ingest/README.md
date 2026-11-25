@@ -228,8 +228,15 @@ multipart above; never replaces a name; use it from a multi-threaded runtime).
 `RESO_S3_BUCKET`), `--s3-prefix`, `--s3-endpoint` (R2, MinIO, GCS), `--s3-region`, `--s3-allow-http` (a local test
 server) and `--s3-single-delete` (GCS). State then goes to `<prefix>/state/` and finished data files to `<prefix>/data/`,
 so a killed run resumes from the bucket and workers share feeds through leases. `--s3-bucket` conflicts with `--state`.
-Credentials are the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`. Manifests, the metrics file and media files
-still go to `--out` and `--media-dir` (routing them through the backends is the rest of #107).
+Credentials are the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`. Run manifests (`manifest.<run>.json`) and
+`sync --media` manifests (`media.<run>.json`) go to `<prefix>/data/` next to the data files they list, and a copy of the
+newest run manifest is kept at `<prefix>/state/runs/last.json`, which `status` reads, so a worker with an empty `--out`
+sees the last run. Run ids are reserved in the bucket (`state/runs/<run>.reserved`, created with `If-None-Match`, removed
+once the manifest is delivered), so two workers started in the same second get different ids. `--out` is only a staging
+directory then (files are removed once the bucket has them; the `.run.<run>` markers stay). Not routed: the metrics file
+(`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`) and downloaded media files
+(`--media-dir`). The `media` command refuses `--s3-bucket`, since the data files it reads are in the bucket: use
+`sync --media` instead.
 `cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_ENDPOINT` and
 `RESO_S3_TEST_BUCKET` are set (checked against RustFS 2026-11-25; MinIO no longer publishes binaries or images).
 
