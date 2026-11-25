@@ -74,6 +74,7 @@ name = "mlsgrid"
 base_url = "https://api.mlsgrid.com/v2"
 include = ["Property", "Member", "Office", "OpenHouse"]
 filter = "OriginatingSystemName eq 'example'"   # required on every MLS Grid request
+deletes = { flag_field = "MlgCanView" }         # false on a removed record: written raw, plus a delete event
 
 [server.resources.Property]
 expand = ["Media", "Rooms", "UnitTypes"]
@@ -84,7 +85,15 @@ per_second = 2
 per_hour = 7200
 ```
 
-Expanded records stay inside their parent record, untouched. `reso-ingest media` does not read them yet
+A server that signals deletes with a flag field instead of an event resource (MLS Grid keeps a removed record in the
+feed for 7 days with `MlgCanView` false) is described with `deletes = { flag_field = "MlgCanView" }` on the server.
+During sync the record is still written raw, and a delete event for its key follows it; this happens on every sync,
+with or without `--deletes`, and `--deletes` does no key comparison for that server. For the first load, MLS Grid
+advises `MlgCanView eq true`: add it to the server's or resource's `filter`. Expanded records stay inside their parent
+record, untouched; they carry no flag and get no events, so a consumer replaces the whole child set each time it stores
+a new copy of the parent.
+
+`reso-ingest media` does not read expanded records yet
 ([#67](https://github.com/jeremeybingham/reso_client/issues/67)).
 
 ## What it writes
@@ -109,7 +118,8 @@ In `--out` (default `reso-out`):
   `ModificationTimestamp` are skipped (an error if named with `--resource`).
 - Deletes (`--deletes`): when `$metadata` declares an `EntityEvent` resource, its feed is read from the last sequence
   number and each named record is looked up; otherwise every key is pulled and compared with the previous run's (the
-  first run is the baseline and reports no deletes).
+  first run is the baseline and reports no deletes). With `deletes.flag_field` set, flagged records produce the events
+  instead (see above).
 
 ## Media files
 

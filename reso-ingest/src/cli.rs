@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
-use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed};
+use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 use crate::manifest::{sync_resource, ResourceEntry, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport};
 use crate::output::{new_run_id, NdjsonWriter, RecordWriter};
@@ -467,17 +467,33 @@ async fn sync_server(
         if !expand.is_empty() {
             spec = spec.expand(&expand);
         }
-        let mut entry = sync_resource(
-            &client,
-            &name,
-            resource,
-            spec,
-            writer.as_mut(),
-            &store,
-            options.start_over,
-        )
-        .await;
-        if options.deletes && entry.error.is_none() {
+        let mut entry = if let Some(flag) = &server.deletes.flag_field {
+            let mut flagged = FlagDeleteWriter::new(writer.as_mut(), flag, &plan.key);
+            let mut entry = sync_resource(
+                &client,
+                &name,
+                resource,
+                spec,
+                &mut flagged,
+                &store,
+                options.start_over,
+            )
+            .await;
+            entry.deletes = flagged.deletes();
+            entry
+        } else {
+            sync_resource(
+                &client,
+                &name,
+                resource,
+                spec,
+                writer.as_mut(),
+                &store,
+                options.start_over,
+            )
+            .await
+        };
+        if options.deletes && entry.error.is_none() && server.deletes.flag_field.is_none() {
             let deleted = reconcile_deletes(
                 &client,
                 &name,

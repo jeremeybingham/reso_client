@@ -609,3 +609,99 @@ async fn server_filter_and_resource_expand_reach_every_query() {
         "{syncs} syncs, {key_pulls} key pulls"
     );
 }
+
+#[tokio::test]
+async fn flag_field_deletes_are_events_without_a_key_comparison() {
+    std::env::set_var("CLI_TEST_TOKEN_FLAG", SECRET);
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(|req: &wiremock::Request| {
+            if req.url.path().ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(RICH_METADATA);
+            }
+            if req.url.query_pairs().any(|(k, _)| k == "$filter") {
+                return ResponseTemplate::new(200).set_body_json(json!({"value": []}));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"ListingKey": "K1", "ModificationTimestamp": "2026-01-01T00:00:01Z", "MlgCanView": true},
+                {"ListingKey": "K2", "ModificationTimestamp": "2026-01-01T00:00:02Z", "MlgCanView": false},
+                {"ListingKey": "K3", "ModificationTimestamp": "2026-01-01T00:00:03Z"}
+            ]}))
+        })
+        .mount(&srv)
+        .await;
+    let dir = TempDir::new("flag");
+    let config = write_text_config(
+        &dir,
+        &bearer_server(
+            "mls",
+            &srv.uri(),
+            "CLI_TEST_TOKEN_FLAG",
+            "deletes = { flag_field = \"MlgCanView\" }",
+        ),
+    );
+    let out = dir.path("out");
+    let args = [
+        "sync",
+        "--config",
+        &config,
+        "--out",
+        out.to_str().unwrap(),
+        "--resource",
+        "Property",
+        "--deletes",
+    ];
+
+    let r = cli(&args).await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(
+        r.err.contains("[mls/Property] 3 records, 1 deletes"),
+        "{}",
+        r.err
+    );
+    let lines: Vec<Value> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "ndjson"))
+        .flat_map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap()
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .map(|l| serde_json::from_str(&l).unwrap())
+        .collect();
+    // All three records stay raw; K2 also has a delete event, and nobody else does
+    assert_eq!(
+        lines.iter().filter(|l| l.get("record").is_some()).count(),
+        3
+    );
+    let events: Vec<&Value> = lines.iter().filter(|l| l.get("event").is_some()).collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"], "delete");
+    assert_eq!(events[0]["key"], "K2");
+    let flagged = lines
+        .iter()
+        .find(|l| l["record"]["ListingKey"] == "K2")
+        .unwrap();
+    assert_eq!(flagged["record"]["MlgCanView"], false);
+
+    // No key pull (`$select`) and no event-resource query, even with --deletes
+    let requests = srv.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|q| !q.url.query_pairs().any(|(k, _)| k == "$select")),
+        "key pull sent"
+    );
+
+    // The checkpoint is unaffected: a rerun fetches nothing new and writes no second event
+    let r = cli(&args).await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(
+        r.err.contains("[mls/Property] 0 records, 0 deletes"),
+        "{}",
+        r.err
+    );
+}

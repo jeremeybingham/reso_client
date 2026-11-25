@@ -95,6 +95,9 @@ pub struct ServerConfig {
     /// lookups that find deletes. Some servers require one (MLS Grid: `OriginatingSystemName`).
     #[serde(default)]
     pub filter: Option<String>,
+    /// How this server signals deletes, when not by `EntityEvent` or a key comparison
+    #[serde(default)]
+    pub deletes: DeletesConfig,
     /// Settings for single resources, by resource name
     #[serde(default)]
     pub resources: BTreeMap<String, ResourceConfig>,
@@ -106,6 +109,17 @@ pub struct ServerConfig {
     /// Media file downloads: their own limits, and where the token goes
     #[serde(default)]
     pub media: MediaConfig,
+}
+
+/// Vendor delete signalling (`deletes = { flag_field = "MlgCanView" }`)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletesConfig {
+    /// A field that is `false` on a removed record (MLS Grid: `MlgCanView`). The record is still
+    /// written raw, plus a delete event for its key; `--deletes` does no key comparison for this
+    /// server.
+    #[serde(default)]
+    pub flag_field: Option<String>,
 }
 
 /// Settings for one resource of a server (`[server.resources.<Name>]`)
@@ -363,6 +377,14 @@ fn is_env_name(s: &str) -> bool {
 
 impl ServerConfig {
     fn validate(&self) -> Result<(), String> {
+        if self
+            .deletes
+            .flag_field
+            .as_deref()
+            .is_some_and(|f| f.trim().is_empty())
+        {
+            return Err("deletes.flag_field must not be empty".into());
+        }
         if self.name.trim().is_empty() {
             return Err("name must not be empty".into());
         }

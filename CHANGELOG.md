@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `StandardReplication::expand(&[&str])` sends `$expand` on every replication page, for servers that serve related
   records only inline (MLS Grid's `Media`) (#65).
 
+- `reso-ingest`: deletes signalled by a flag field (#66). `deletes = { flag_field = "MlgCanView" }` on a server
+  (`DeletesConfig`); `FlagDeleteWriter` writes a delete event for each record whose flag is `false`, after the record
+  itself, which stays raw. `sync` does this with or without `--deletes` and skips the key comparison for such servers.
+
 ### Changed
 - `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
   `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
