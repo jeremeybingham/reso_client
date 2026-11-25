@@ -228,7 +228,8 @@ what is left needs a real server or someone else:
 - **Release 0.4.0** of `reso-client` (rate limits per day and bytes per hour, `StandardReplication::expand`,
   `execute_count` by `$count=true`, metadata fixes; see the [changelog](CHANGELOG.md)) and publishing `reso-ingest`,
   after #76.
-- Moving off `chrono` ([#51](https://github.com/jeremeybingham/reso_client/issues/51)) waits on an arrow/parquet release.
+- Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
+  advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso_client/issues/51)).
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
 
 **Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
