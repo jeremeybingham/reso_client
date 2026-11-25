@@ -103,7 +103,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/webhook.rs    run_summary, post_summary: the run-summary webhook (URL from `webhook_url_env`)
   src/error.rs      IngestError
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
-  servers.example.toml, tests/ (s3_tests.rs for the S3 state store and a `sync`/`status` run against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
+  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
                     log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; lease_tests.rs for held feeds; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),

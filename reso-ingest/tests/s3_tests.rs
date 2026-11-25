@@ -332,3 +332,346 @@ async fn sync_keeps_manifests_and_last_run_in_the_bucket() {
     assert!(e.contains("sync --media"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Data files in the bucket under `p/data/`, in name order (run id, then file number)
+fn bucket_lines(objects: &Objects) -> Vec<serde_json::Value> {
+    let map = objects.lock().unwrap();
+    map.iter()
+        .filter(|(k, _)| k.starts_with("p/data/") && k.ends_with(".ndjson"))
+        .flat_map(|(_, (bytes, _))| {
+            String::from_utf8(bytes.clone())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect::<Vec<serde_json::Value>>()
+        })
+        .collect()
+}
+
+/// Eight `Property` records of about 300 KiB each, two per page, so a 1 MiB file is full after
+/// two pages. Resumes from a `$filter` on the newest timestamp it mentions. While `hang` is set,
+/// the `hang_at`th data request never gets an answer. Returns the server and the data requests
+/// (their `$filter`, empty for none).
+async fn big_records_server(
+    hang: Arc<std::sync::atomic::AtomicBool>,
+    hang_at: usize,
+) -> (wiremock::MockServer, Arc<Mutex<Vec<String>>>) {
+    use std::sync::atomic::Ordering;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let base = server.uri();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&requests);
+    let padding = "x".repeat(300 * 1024);
+    Mock::given(method("GET"))
+        .respond_with(move |req: &wiremock::Request| {
+            if req.url.path().ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(METADATA);
+            }
+            let query: Vec<(String, String)> = req
+                .url
+                .query_pairs()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let filter = query
+                .iter()
+                .find(|(k, _)| k == "$filter")
+                .map(|(_, v)| v.clone());
+            let n = {
+                let mut seen = seen.lock().unwrap();
+                seen.push(filter.clone().unwrap_or_default());
+                seen.len()
+            };
+            if hang.load(Ordering::SeqCst) && n == hang_at {
+                return ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(600));
+            }
+            let rows: Vec<(String, String)> = (1..=8)
+                .map(|i| (format!("K{i}"), format!("2026-01-01T00:00:0{i}Z")))
+                .collect();
+            let from = if let Some((_, v)) = query.iter().find(|(k, _)| k == "from") {
+                v.parse().unwrap()
+            } else if let Some(f) = &filter {
+                let newest = rows.iter().filter(|(_, t)| f.contains(t.as_str())).max();
+                newest.map_or(0, |n| rows.iter().filter(|(_, t)| *t <= n.1).count())
+            } else {
+                0
+            };
+            let end = (from + 2).min(rows.len());
+            let value: Vec<serde_json::Value> = rows[from..end]
+                .iter()
+                .map(|(k, t)| {
+                    serde_json::json!({"ListingKey": k, "ModificationTimestamp": t, "Pad": padding})
+                })
+                .collect();
+            let mut body = serde_json::json!({ "value": value });
+            if end < rows.len() {
+                body["@odata.nextLink"] = serde_json::json!(format!("{base}/Property?from={end}"));
+            }
+            ResponseTemplate::new(200).set_body_json(body)
+        })
+        .mount(&server)
+        .await;
+    (server, requests)
+}
+
+async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while !ready() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_sync_resumes_from_the_bucket_on_a_fresh_worker() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    set_credentials();
+    std::env::set_var("S3_CLI_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3().await;
+    let hang = Arc::new(AtomicBool::new(true));
+    // Pages 1-2 fill the first file, page 3 sits in the open file, page 4 never comes
+    let (reso, requests) = big_records_server(Arc::clone(&hang), 4).await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-kill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_CLI_TEST_TOKEN\"\n",
+            reso.uri()
+        ),
+    )
+    .unwrap();
+    let args = |out: &std::path::Path| -> Vec<String> {
+        [
+            "sync",
+            "--config",
+            config.to_str().unwrap(),
+            "--max-file-mb",
+            "1",
+            "--out",
+            out.to_str().unwrap(),
+            "--s3-bucket",
+            "bkt",
+            "--s3-prefix",
+            "p",
+            "--s3-endpoint",
+            &endpoint,
+            "--s3-region",
+            "us-east-1",
+            "--s3-allow-http",
+            "--s3-single-delete",
+        ]
+        .map(String::from)
+        .to_vec()
+    };
+
+    // Worker one is killed while it waits for page 4
+    // Dropping the command's future stops it where it stands. The server task it spawned stays
+    // parked on the request for page 4 and writes nothing more; in a killed process it would be
+    // gone, and its lease would be left behind until it runs out.
+    let first = args(&dir.join("one"));
+    tokio::select! {
+        r = cli(&first) => panic!("the run ended: {r:?}"),
+        () = until("page 4 requested", || requests.lock().unwrap().len() >= 4) => {}
+    }
+    // The lease of the killed process, run out
+    let stale = serde_json::json!({"server": "mls", "resource": "Property", "pid": 999_999,
+        "host": "gone", "token": "dead", "expires_at": 1});
+    objects.lock().unwrap().insert(
+        "p/state/mls.Property.lock".to_string(),
+        (serde_json::to_vec(&stale).unwrap(), 1),
+    );
+    let delivered: Vec<String> = bucket_lines(&objects)
+        .iter()
+        .map(|l| l["record"]["ListingKey"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(delivered, ["K1", "K2", "K3", "K4"], "the first file only");
+
+    // Worker two starts on an empty disk and continues from the checkpoint in the bucket
+    hang.store(false, Ordering::SeqCst);
+    let (code, o, e) = cli(&args(&dir.join("two"))).await;
+    assert_eq!(code, 0, "{o}{e}");
+    let resumed = &requests.lock().unwrap()[4];
+    assert!(
+        resumed.contains("2026-01-01T00:00:04Z"),
+        "worker two did not start from the checkpoint: {resumed}"
+    );
+    let mut keys: Vec<String> = bucket_lines(&objects)
+        .iter()
+        .map(|l| l["record"]["ListingKey"].as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8"],
+        "no record lost or repeated"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_serve_workers_share_a_bucket_through_leases() {
+    use reso_ingest::{Config, Daemon, S3FileSink, ServeOptions, Shutdown};
+    use std::collections::HashMap;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    set_credentials();
+    std::env::set_var("S3_SERVE_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3().await;
+
+    // Each data request takes a while, so the two workers' syncs overlap. The server records how
+    // many requests per resource are in flight at once.
+    #[derive(Default)]
+    struct Load {
+        now: HashMap<String, usize>,
+        most: HashMap<String, usize>,
+        total: HashMap<String, usize>,
+    }
+    let load = Arc::new(Mutex::new(Load::default()));
+    let reso = MockServer::start().await;
+    let l = Arc::clone(&load);
+    Mock::given(method("GET"))
+        .respond_with(move |req: &wiremock::Request| {
+            let path = req.url.path();
+            if path.ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(SERVE_METADATA);
+            }
+            let (resource, key) = if path.ends_with("/Member") {
+                ("Member", "MemberKey")
+            } else {
+                ("Property", "ListingKey")
+            };
+            {
+                let mut l = l.lock().unwrap();
+                let now = *l
+                    .now
+                    .entry(resource.into())
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1);
+                let most = l.most.entry(resource.into()).or_default();
+                *most = (*most).max(now);
+                *l.total.entry(resource.into()).or_default() += 1;
+            }
+            // The in-flight count drops when the delay is over; close enough for a check of
+            // overlap, which needs two requests inside one 300 ms window
+            let l2 = Arc::clone(&l);
+            let r = resource.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                *l2.lock().unwrap().now.get_mut(&r).unwrap() -= 1;
+            });
+            let value = if req.url.query_pairs().any(|(k, _)| k == "$filter") {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([{key: "K1", "ModificationTimestamp": "2026-01-01T00:00:01Z"}])
+            };
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(serde_json::json!({ "value": value }))
+        })
+        .mount(&reso)
+        .await;
+
+    let config = || {
+        Config::parse(&format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_SERVE_TEST_TOKEN\"\n\
+             [server.resources.Property]\ninterval = \"100ms\"\n\
+             [server.resources.Member]\ninterval = \"100ms\"\n",
+            reso.uri()
+        ))
+        .unwrap()
+    };
+    let dir = std::env::temp_dir().join(format!("reso-s3-serve-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let worker = |name: &str| {
+        let mut o = ServeOptions::new(dir.join(name));
+        o.listen = "127.0.0.1:0".parse().unwrap();
+        o.state = Arc::new(S3StateStore::new(&options(&endpoint, "p/state")).unwrap());
+        o.sink = Some(Arc::new(
+            S3FileSink::new(&options(&endpoint, "p/data")).unwrap(),
+        ));
+        o
+    };
+    let shutdown = Shutdown::new();
+    let one = Daemon::start(config(), worker("one"), shutdown.clone())
+        .await
+        .unwrap();
+    let two = Daemon::start(config(), worker("two"), shutdown.clone())
+        .await
+        .unwrap();
+
+    until("each feed polled six times", || {
+        let l = load.lock().unwrap();
+        l.total.get("Property") >= Some(&6) && l.total.get("Member") >= Some(&6)
+    })
+    .await;
+    shutdown.trigger();
+    for d in [one, two] {
+        tokio::time::timeout(std::time::Duration::from_secs(10), d.wait())
+            .await
+            .expect("the daemon stops after the shutdown request");
+    }
+
+    let most = load.lock().unwrap().most.clone();
+    assert_eq!(
+        most.get("Property"),
+        Some(&1),
+        "a feed ran in both workers at once"
+    );
+    assert_eq!(
+        most.get("Member"),
+        Some(&1),
+        "a feed ran in both workers at once"
+    );
+    // Each record was written once: the worker that came second continued from the checkpoint
+    let mut written: Vec<String> = bucket_lines(&objects)
+        .iter()
+        .map(|l| l["resource"].as_str().unwrap().to_string())
+        .collect();
+    written.sort();
+    assert_eq!(written, ["Member", "Property"]);
+    let keys: Vec<String> = objects.lock().unwrap().keys().cloned().collect();
+    assert!(
+        keys.iter().any(|k| k.starts_with("p/data/manifest.")),
+        "{keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k.starts_with("p/state/mls.Property")),
+        "{keys:?}"
+    );
+    assert!(
+        !keys.iter().any(|k| k.ends_with(".lock")),
+        "leases left: {keys:?}"
+    );
+    for name in ["one", "two"] {
+        let local = local_names(&dir.join(name));
+        assert!(
+            !local
+                .iter()
+                .any(|n| n.starts_with("manifest.") || n.ends_with(".ndjson")),
+            "{name}: {local:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const SERVE_METADATA: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
+<Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="org.reso.metadata">
+<EntityType Name="Property"><Key><PropertyRef Name="ListingKey"/></Key>
+<Property Name="ListingKey" Type="Edm.String" Nullable="false"/>
+<Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>
+<EntityType Name="Member"><Key><PropertyRef Name="MemberKey"/></Key>
+<Property Name="MemberKey" Type="Edm.String" Nullable="false"/>
+<Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>
+<EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/>
+<EntitySet Name="Member" EntityType="org.reso.metadata.Member"/></EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#;

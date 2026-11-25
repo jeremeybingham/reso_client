@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `reso-ingest` with a bucket resumes a killed run from its last delivered file (#107, fifth part): the NDJSON writer
+  with a sink used to rotate in the middle of a page and open the next file at once, so a file was nearly always open,
+  the checkpoint was held until the end of the resource, and a killed initial load started again from the beginning.
+  With a sink it now closes a file at the first page end past `--max-file-mb` (as Parquet does; a file can pass the limit
+  by up to one page), and the checkpoint moves at each delivery. Delete events still rotate at the limit. Tests: a sync
+  dropped while waiting for a page, resumed by a fresh worker with an empty `--out` (no record lost or repeated), and two
+  `serve` daemons on one bucket (a feed never runs in both at once, each record written once).
+- S3 errors name their causes: a missing CA bundle read `Generic HTTP client error: builder error`, now followed by
+  `unexpected error: No CA certificates were loaded from the system`.
+
 ### Added
 - `reso-ingest` container image with the `s3` feature (#107, fourth part): the `Dockerfile` builds `parquet,s3`, so the
   image holds `aws-lc` (C, from `object_store`'s rustls) beside `ring`, both static on musl. The S3 client verifies

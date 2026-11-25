@@ -24,6 +24,23 @@ use crate::error::IngestError;
 use crate::sink::FileSink;
 use crate::state::{StateStore, StoreFuture, Versioned};
 
+/// An error with its causes, `outer: cause: …` (reqwest says only `builder error` at the top
+/// when, for example, there is no CA bundle; the reason is further down). A cause whose text the
+/// outer message already contains is not repeated.
+fn chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 /// Where an S3-compatible bucket is and how to reach it
 ///
 /// Credentials are not part of the options: they come from the standard environment
@@ -79,7 +96,7 @@ impl S3Options {
         }
         let store = builder.build().map_err(|e| IngestError::Output {
             path: self.location(""),
-            message: e.to_string(),
+            message: chain(&e),
         })?;
         Ok(Arc::new(store))
     }
@@ -169,7 +186,7 @@ impl S3StateStore {
     }
 
     fn path(&self, key: &str) -> Result<ObjectPath, IngestError> {
-        let key_path = ObjectPath::parse(key).map_err(|e| self.error(key, e))?;
+        let key_path = ObjectPath::parse(key).map_err(|e| self.error(key, chain(&e)))?;
         Ok(match &self.prefix {
             Some(prefix) => prefix.parts().chain(key_path.parts()).collect(),
             None => key_path,
@@ -198,7 +215,7 @@ impl StateStore for S3StateStore {
             let result = match self.store.get(&path).await {
                 Ok(r) => r,
                 Err(ObjectError::NotFound { .. }) => return Ok(None),
-                Err(e) => return Err(self.error(key, e)),
+                Err(e) => return Err(self.error(key, chain(&e))),
             };
             let version = result.meta.e_tag.clone().ok_or_else(|| {
                 self.error(
@@ -206,7 +223,10 @@ impl StateStore for S3StateStore {
                     "the store returned no ETag, so versions are unavailable",
                 )
             })?;
-            let bytes = result.bytes().await.map_err(|e| self.error(key, e))?;
+            let bytes = result
+                .bytes()
+                .await
+                .map_err(|e| self.error(key, chain(&e)))?;
             Ok(Some(Versioned {
                 bytes: bytes.to_vec(),
                 version,
@@ -221,7 +241,7 @@ impl StateStore for S3StateStore {
                 .put(&path, PutPayload::from(bytes.to_vec()))
                 .await
                 .map(|_| ())
-                .map_err(|e| self.error(key, e))
+                .map_err(|e| self.error(key, chain(&e)))
         })
     }
 
@@ -238,7 +258,7 @@ impl StateStore for S3StateStore {
                 Err(ObjectError::AlreadyExists { .. } | ObjectError::Precondition { .. }) => {
                     Ok(false)
                 }
-                Err(e) => Err(self.error(key, e)),
+                Err(e) => Err(self.error(key, chain(&e))),
             }
         })
     }
@@ -261,7 +281,7 @@ impl StateStore for S3StateStore {
                 // A changed ETag is a failed precondition; a value deleted meanwhile is NotFound
                 // on some stores and a precondition failure on others
                 Err(ObjectError::Precondition { .. } | ObjectError::NotFound { .. }) => Ok(false),
-                Err(e) => Err(self.error(key, e)),
+                Err(e) => Err(self.error(key, chain(&e))),
             }
         })
     }
@@ -272,7 +292,7 @@ impl StateStore for S3StateStore {
             let head = match self.store.head(&path).await {
                 Ok(h) => h,
                 Err(ObjectError::NotFound { .. }) => return Ok(false),
-                Err(e) => return Err(self.error(key, e)),
+                Err(e) => return Err(self.error(key, chain(&e))),
             };
             if let Some(want) = version {
                 if head.e_tag.as_deref() != Some(want) {
@@ -282,7 +302,7 @@ impl StateStore for S3StateStore {
             match self.store.delete(&path).await {
                 Ok(()) => Ok(true),
                 Err(ObjectError::NotFound { .. }) => Ok(false),
-                Err(e) => Err(self.error(key, e)),
+                Err(e) => Err(self.error(key, chain(&e))),
             }
         })
     }
@@ -294,7 +314,7 @@ impl StateStore for S3StateStore {
                 .list(self.prefix.as_ref())
                 .try_collect()
                 .await
-                .map_err(|e| self.error("", e))?;
+                .map_err(|e| self.error("", chain(&e)))?;
             let skip = self.prefix.as_ref().map_or(0, |p| p.parts().count());
             Ok(metas
                 .into_iter()
@@ -386,7 +406,7 @@ impl S3FileSink {
     }
 
     fn path(&self, name: &str) -> Result<ObjectPath, IngestError> {
-        let key_path = ObjectPath::parse(name).map_err(|e| self.error(name, e))?;
+        let key_path = ObjectPath::parse(name).map_err(|e| self.error(name, chain(&e)))?;
         Ok(match &self.prefix {
             Some(prefix) => prefix.parts().chain(key_path.parts()).collect(),
             None => key_path,
@@ -410,7 +430,7 @@ impl S3FileSink {
                 Err(ObjectError::AlreadyExists { .. } | ObjectError::Precondition { .. }) => {
                     Err(self.exists_error(name))
                 }
-                Err(e) => Err(self.error(name, e)),
+                Err(e) => Err(self.error(name, chain(&e))),
             };
         }
         if self.exists_async(name).await? {
@@ -420,7 +440,7 @@ impl S3FileSink {
             .store
             .put_multipart(&path)
             .await
-            .map_err(|e| self.error(name, e))?;
+            .map_err(|e| self.error(name, chain(&e)))?;
         let mut writer = WriteMultipart::new_with_chunk_size(upload, PART_SIZE);
         let mut buf = vec![0u8; PART_SIZE];
         loop {
@@ -437,14 +457,14 @@ impl S3FileSink {
             writer.write(&buf[..n]);
             if let Err(e) = writer.wait_for_capacity(4).await {
                 let _ = writer.abort().await;
-                return Err(self.error(name, e));
+                return Err(self.error(name, chain(&e)));
             }
         }
         writer
             .finish()
             .await
             .map(|_| ())
-            .map_err(|e| self.error(name, e))
+            .map_err(|e| self.error(name, chain(&e)))
     }
 
     fn exists_error(&self, name: &str) -> IngestError {
@@ -458,7 +478,7 @@ impl S3FileSink {
         match self.store.head(&self.path(name)?).await {
             Ok(_) => Ok(true),
             Err(ObjectError::NotFound { .. }) => Ok(false),
-            Err(e) => Err(self.error(name, e)),
+            Err(e) => Err(self.error(name, chain(&e))),
         }
     }
 }
@@ -490,6 +510,36 @@ mod tests {
     fn store(prefix: &str) -> S3StateStore {
         S3StateStore::with_store(Arc::new(InMemory::new()), prefix, "s3://test".to_string())
             .unwrap()
+    }
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn errors_name_their_causes_once() {
+        let e = Layer(
+            "Generic S3 error: builder error",
+            Some(Box::new(Layer(
+                "builder error",
+                Some(Box::new(Layer("no CA certificates found", None))),
+            ))),
+        );
+        assert_eq!(
+            chain(&e),
+            "Generic S3 error: builder error: no CA certificates found"
+        );
     }
 
     #[tokio::test]

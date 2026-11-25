@@ -97,8 +97,12 @@ struct DeleteLine<'a> {
 /// an `event` is an event, a line with a `record` is a record.
 ///
 /// With [`with_sink`](Self::with_sink), `dir` is a staging area: a file is written as `….ndjson.part`,
-/// delivered to the sink when it is full or at [`flush`](RecordWriter::flush) or `finish`, then
-/// removed. [`commit`](RecordWriter::commit) returns `true` only when no file is open.
+/// delivered to the sink at [`flush`](RecordWriter::flush) or `finish`, then removed. Records are
+/// not split across files in the middle of a batch: [`commit`](RecordWriter::commit), called after
+/// each page, delivers the file once it has reached `max_file_bytes` (so a file can pass the limit
+/// by up to one page, as Parquet files do) and returns `true` only when no file is open. The
+/// checkpoint then moves each time a file is delivered, and a killed run loses at most the open
+/// file. Delete events still rotate at the limit, as without a sink.
 pub struct NdjsonWriter {
     dir: PathBuf,
     source: String,
@@ -202,13 +206,14 @@ impl NdjsonWriter {
 }
 
 impl NdjsonWriter {
-    /// Append one serialized line, starting a new file first when the size limit would be passed
-    fn write_line(&mut self, mut bytes: Vec<u8>) -> Result<(), IngestError> {
+    /// Append one serialized line, starting a new file first when none is open or, with `split`,
+    /// when the size limit would be passed
+    fn write_line(&mut self, mut bytes: Vec<u8>, split: bool) -> Result<(), IngestError> {
         bytes.push(b'\n');
         let size = bytes.len() as u64;
         let needs_new = match self.files.last() {
             Some(f) if self.current.is_some() => {
-                f.bytes > 0 && f.bytes + size > self.max_file_bytes
+                split && f.bytes > 0 && f.bytes + size > self.max_file_bytes
             }
             _ => true,
         };
@@ -245,7 +250,8 @@ impl RecordWriter for NdjsonWriter {
                 run_id: &self.run_id,
                 record,
             })?;
-            self.write_line(bytes)?;
+            // With a sink the file is delivered at a page end (see `commit`)
+            self.write_line(bytes, self.sink.is_none())?;
         }
         Ok(())
     }
@@ -260,7 +266,7 @@ impl RecordWriter for NdjsonWriter {
                 event: "delete",
                 key,
             })?;
-            self.write_line(bytes)?;
+            self.write_line(bytes, true)?;
         }
         Ok(())
     }
@@ -278,6 +284,13 @@ impl RecordWriter for NdjsonWriter {
 
     fn commit(&mut self) -> Result<bool, IngestError> {
         if self.sink.is_some() {
+            let full = self
+                .files
+                .last()
+                .is_some_and(|f| f.bytes >= self.max_file_bytes);
+            if self.current.is_some() && full {
+                self.close_current()?;
+            }
             return Ok(self.current.is_none());
         }
         self.flush().map(|()| true)
