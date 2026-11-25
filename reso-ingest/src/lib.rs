@@ -51,8 +51,8 @@ mod parquet_out;
 mod runner;
 
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
-pub use config::{AuthConfig, Config, LimitsConfig, MediaConfig, ServerConfig};
-pub use deletes::{reconcile_deletes, EventFeed};
+pub use config::{AuthConfig, Config, LimitsConfig, MediaConfig, ResourceConfig, ServerConfig};
+pub use deletes::{reconcile_deletes, DeleteTarget, EventFeed};
 pub use error::IngestError;
 pub use manifest::{
     pull_resource, sync_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure,

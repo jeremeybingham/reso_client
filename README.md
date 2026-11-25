@@ -209,19 +209,17 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 ## What's next
 
 **Can be done now, from vendors' public documentation** (built against mock servers like the rest; confirmed only by
-#32). Read in November 2026, MLS Grid and Trestle differ from the standard in ways `reso-ingest` cannot yet handle:
+#32). Read in November 2026, MLS Grid and Trestle differ from the standard in ways `reso-ingest` cannot yet handle (a
+filter on every request and inline `$expand` are now supported, [#65](https://github.com/jeremeybingham/reso_client/issues/65)):
 
-- **Required filter and expand per server or resource.** MLS Grid requires `OriginatingSystemName eq '…'` in every
-  request and serves `Media` only through `$expand` on `Property`, `Member` and `Office` (with `$expand`, at most 1000
-  records per page).
-- **Deletes signalled by a field.** MLS Grid marks removed records with `MlgCanView` false and drops them from the feed
+- **Deletes signalled by a field** ([#66](https://github.com/jeremeybingham/reso_client/issues/66)). MLS Grid marks removed records with `MlgCanView` false and drops them from the feed
   after 7 days; it has no `EntityEvent`. Expanded child records carry no flag and replace the earlier set.
-- **Media from expanded records.** `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
+- **Media from expanded records** ([#67](https://github.com/jeremeybingham/reso_client/issues/67)), downloaded during sync. `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
   are signed, single-use and expire after an hour, so files must be fetched soon after the sync that saw them.
-- **More rate limits.** MLS Grid also caps requests per day (40,000) and download volume per hour (4 GB); `RateLimit`
+- **More rate limits** ([#68](https://github.com/jeremeybingham/reso_client/issues/68)). MLS Grid also caps requests per day (40,000) and download volume per hour (4 GB); `RateLimit`
   has per second, per hour and bytes per day only.
 
-**Small fixes:** run ids have one-second resolution, so two syncs in the same second would share file names.
+**Small fixes:** run ids ([#69](https://github.com/jeremeybingham/reso_client/issues/69)) have one-second resolution, so two syncs in the same second would share file names.
 
 **Waiting on others:**
 

@@ -62,6 +62,31 @@ send_token = "same_host"            # never, same_host (default) or always
 
 Each server runs as its own task: one server failing does not stop the others.
 
+Some servers need a filter on every request or serve related records only inline. `filter` on a server is added (by
+`and`) to every query sent to it: sync pulls, and the key pulls and lookups of `--deletes` (not the `EntityEvent`
+query). `[server.resources.<Name>]` adds a filter, an `expand` list and a `page_size` for one resource; `expand` goes on
+sync pulls only. For example, from MLS Grid's public documentation (not yet tried against it,
+[#32](https://github.com/jeremeybingham/reso_client/issues/32)):
+
+```toml
+[[server]]
+name = "mlsgrid"
+base_url = "https://api.mlsgrid.com/v2"
+include = ["Property", "Member", "Office", "OpenHouse"]
+filter = "OriginatingSystemName eq 'example'"   # required on every MLS Grid request
+
+[server.resources.Property]
+expand = ["Media", "Rooms", "UnitTypes"]
+page_size = 1000                                # MLS Grid's limit with $expand
+
+[server.limits]
+per_second = 2
+per_hour = 7200
+```
+
+Expanded records stay inside their parent record, untouched. `reso-ingest media` does not read them yet
+([#67](https://github.com/jeremeybingham/reso_client/issues/67)).
+
 ## What it writes
 
 In `--out` (default `reso-out`):
@@ -127,7 +152,7 @@ cargo run -p reso-ingest --features parquet -- sync --config servers.toml --form
 Columns are the four tags, `fetched_at` (timestamp), `event`, `key` (delete events) and a `record` struct with one
 field per `$metadata` property: strings, booleans, integers, doubles, `Date32`, UTC millisecond timestamps, lists for
 collections. Decimals become doubles; enum, complex and unknown types become text. Properties missing from `$metadata`
-are dropped. A Parquet file is readable only once finished, so `sync` keeps one file open across pages and saves a checkpoint only
+are dropped, except navigation properties named in `expand`, which are kept as JSON text. A Parquet file is readable only once finished, so `sync` keeps one file open across pages and saves a checkpoint only
 when the file holding its rows is finished (at `--max-file-mb` or the end of the resource). A run that dies mid-file leaves
 a `.part` file and resumes from the last finished file, so those pages are fetched again (at-least-once).
 
@@ -135,4 +160,4 @@ a `.part` file and resumes from the last finished file, so those pages are fetch
 
 The same pieces are public: `Config` (parse the TOML), `run_servers` (one task per server, capped), `sync_resource`
 and `pull_resource` (one resource into a `RecordWriter`), `NdjsonWriter` / `ParquetWriter`, `CheckpointStore`,
-`RunManifest`, `reconcile_deletes`, `EventFeed`, and for media `sync_media`, `MediaIndex` and `MediaManifest`. See the crate docs: `cargo doc -p reso-ingest --open`.
+`RunManifest`, `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, and for media `sync_media`, `MediaIndex` and `MediaManifest`. See the crate docs: `cargo doc -p reso-ingest --open`.

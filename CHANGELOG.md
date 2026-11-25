@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (non-breaking: `ResoError` is `#[non_exhaustive]`). The `tokio` dependency gains the `fs` and `io-util` features; no
   new crates.
 
+- `StandardReplication::expand(&[&str])` sends `$expand` on every replication page, for servers that serve related
+  records only inline (MLS Grid's `Media`) (#65).
+
 ### Changed
 - `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
   `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
@@ -34,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `reso-ingest` README's configuration example no longer excludes `Media`, which `media` needs synced.
 
 ### reso-ingest (unpublished, in this repository)
+- Server `filter` and per-resource settings `[server.resources.<Name>]` (`filter`, `expand`, `page_size`) (#65). The
+  server filter goes on sync pulls and on the key pulls and lookups of `--deletes`. New `ResourceConfig`,
+  `ServerConfig::filter_for`, `expand_for`, `page_size_for`; `reconcile_deletes` takes a `DeleteTarget`
+  (resource, key field, filter) instead of the resource and key field (breaking for library callers); `ParquetWriter::with_expanded` keeps expanded navigation properties as JSON text.
 - `reso-ingest media` (#30): downloads the files of the `Media` records that `sync` wrote (NDJSON), into
   `<out>/media/<server>/<MediaKey>.<ext>`, with `--limit` and `--media-dir`. Re-downloads only when the media timestamp
   changes (not when only a signed URL changes), sends saved validators, removes files on delete events, keeps failures

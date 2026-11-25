@@ -103,6 +103,7 @@ pub struct StandardReplication {
     page_size: Option<u32>,
     filter: Option<String>,
     select: Option<Vec<String>>,
+    expand: Option<Vec<String>>,
     from: Option<Checkpoint>,
 }
 
@@ -116,6 +117,7 @@ impl StandardReplication {
             page_size: None,
             filter: None,
             select: None,
+            expand: None,
             from: None,
         }
     }
@@ -143,6 +145,21 @@ impl StandardReplication {
     /// The key and timestamp fields are added when missing, because the checkpoint needs them.
     pub fn select(mut self, fields: &[&str]) -> Self {
         self.select = Some(fields.iter().map(|f| f.to_string()).collect());
+        self
+    }
+
+    /// Expand these navigation properties (`$expand`) on every page, for example `&["Media"]`
+    ///
+    /// Some servers serve related records only this way (MLS Grid returns `Media` inside
+    /// `Property`, `Member` and `Office`). Servers may allow fewer records per page with `$expand`;
+    /// set [`page_size`](Self::page_size) to match. An empty list sends no `$expand`.
+    pub fn expand(mut self, navigation_properties: &[&str]) -> Self {
+        self.expand = Some(
+            navigation_properties
+                .iter()
+                .map(|f| f.to_string())
+                .collect(),
+        );
         self
     }
 
@@ -195,6 +212,12 @@ impl StandardReplication {
             params.push(format!(
                 "$select={}",
                 urlencoding::encode(&fields.join(","))
+            ));
+        }
+        if let Some(expand) = self.expand.as_ref().filter(|e| !e.is_empty()) {
+            params.push(format!(
+                "$expand={}",
+                urlencoding::encode(&expand.join(","))
             ));
         }
         if let Some(n) = self.page_size {
@@ -480,6 +503,32 @@ mod tests {
         assert!(urlencoding::decode(&q)
             .unwrap()
             .contains("$select=City,ListingKey,ModificationTimestamp"));
+    }
+
+    #[test]
+    fn expand_is_sent_on_first_request_and_requery() {
+        let spec = StandardReplication::new("Property", "ListingKey")
+            .filter("OriginatingSystemName eq 'mls'")
+            .expand(&["Media", "Rooms"])
+            .page_size(1000);
+        assert_eq!(
+            spec.path_and_query(None),
+            "Property?$filter=%28OriginatingSystemName%20eq%20%27mls%27%29\
+             &$orderby=ModificationTimestamp%2CListingKey&$expand=Media%2CRooms&$top=1000"
+        );
+        let requery = spec.path_and_query(Some(&Checkpoint::at("2026-01-01T00:00:00Z")));
+        let decoded = urlencoding::decode(&requery).unwrap();
+        assert!(decoded
+            .contains("$filter=(OriginatingSystemName eq 'mls') and ModificationTimestamp gt"));
+        assert!(decoded.contains("&$expand=Media,Rooms&$top=1000"));
+    }
+
+    #[test]
+    fn empty_expand_sends_nothing() {
+        let q = StandardReplication::new("Property", "ListingKey")
+            .expand(&[])
+            .path_and_query(None);
+        assert!(!q.contains("$expand"));
     }
 
     #[test]

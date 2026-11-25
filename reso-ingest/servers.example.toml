@@ -13,6 +13,13 @@ page_size = 1000
 timeout_secs = 60
 include = ["Property", "Member", "Office"]   # empty or absent = every resource
 exclude = ["Media"]                          # wins over include
+# filter = "OriginatingSystemName eq 'mls'"  # added to every query (some servers require one)
+
+# Settings for one resource (optional)
+# [server.resources.Property]
+# filter = "PropertyType eq 'Residential'"   # ANDed with the server filter
+# expand = ["Media"]                         # $expand on sync pulls
+# page_size = 1000                           # overrides the server's
 
 [server.auth]
 type = "client_credentials"
