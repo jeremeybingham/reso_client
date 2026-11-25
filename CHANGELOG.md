@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` leases (#81): `sync` takes a lock file `state/<server>.<resource>.lock` per feed (process id, host, expiry,
+  renewed while the run lives) and skips a feed another process holds, with a warning in the manifest; a crashed holder's
+  lease expires after 5 minutes. Library: `Lease`, `LeaseOutcome`, `LeaseHolder`. No new dependencies.
 - `ClientStats` counts responses by status (`ok`, `throttled` for 429, `client_errors`, `server_errors`) for both the
   API client and `Downloader`, and has `ClientStats::since` for the difference between two snapshots (#79). The new
   public fields break code that builds `ClientStats` with a struct literal.

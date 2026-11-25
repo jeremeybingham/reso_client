@@ -60,6 +60,7 @@ pub mod cli;
 mod config;
 mod deletes;
 mod error;
+mod lease;
 mod logging;
 mod manifest;
 mod media;
@@ -77,6 +78,7 @@ pub use config::{
 };
 pub use deletes::{reconcile_deletes, DeleteLimits, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;
+pub use lease::{Lease, LeaseHolder, LeaseOutcome};
 pub use logging::{env_filter, log_subscriber, LogFormat, DEFAULT_FILTER, LOG_FORMAT_ENV};
 pub use manifest::{
     pull_resource, sync_resource, sync_resource_media, FileEntry, ResourceEntry, ResourceStats,
