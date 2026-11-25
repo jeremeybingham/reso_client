@@ -392,6 +392,22 @@ mod tests {
     }
 
     #[test]
+    fn malformed_http_dates_are_ignored() {
+        for value in [
+            "Sun, 06 Nov 1994 08:49:37 UTC",
+            "Sun, xx Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 19x4 08:49:37 GMT",
+            "Sun, 06 Nov 1994 08:49 GMT",
+            "Sun, 06 Nov 1994 08:49:37:01 GMT",
+            "Sun, 06 Nov 1994 24:00:00 GMT",
+            "Sun, 32 Nov 1994 08:49:37 GMT",
+            "Sun, 06 Nov 1994 aa:49:37 GMT",
+        ] {
+            assert_eq!(parse_http_date(value), None, "{value}");
+        }
+    }
+
+    #[test]
     fn backoff_grows_and_is_capped() {
         let p = RetryPolicy::new(5).with_backoff(Duration::from_secs(1), Duration::from_secs(8));
         for _ in 0..50 {

@@ -352,3 +352,27 @@ async fn network_error_on_query_transport_hides_the_secret() {
         other => panic!("expected TokenRequest, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn concurrent_401s_share_one_renewed_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(counting_tokens())
+        .expect(2) // token-1 up front, then a single renewal for both requests
+        .mount(&server)
+        .await;
+    // Both requests are rejected with token-1 at about the same time
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .and(header("authorization", "Bearer token-1"))
+        .respond_with(ResponseTemplate::new(401).set_delay(Duration::from_millis(200)))
+        .mount(&server)
+        .await;
+    mount_property_for(&server, "token-2").await;
+
+    let client = client(&server, credentials(&server));
+    let (a, b) = tokio::join!(run_query(&client), run_query(&client));
+    a.unwrap();
+    b.unwrap();
+}
