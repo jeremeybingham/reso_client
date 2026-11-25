@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
   command.
+- README: Data Dictionary 2.1 notes (renamed unit fields, lookup values as strings, `any()` not `has`) (#17).
 
 ## [0.3.0] - 2026-11-24
 

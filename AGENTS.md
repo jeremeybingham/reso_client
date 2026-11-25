@@ -12,7 +12,7 @@ This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in 
 Records are handed over **raw**, tagged with their source. The typical user is an aggregator pulling from many MLS
 vendors into its own store. The crates do **not** de-duplicate across MLSs, map local fields, enforce data-licence or
 display rules, or choose a database. The plan is tracker issue #18 (milestone "Ingest layer"); the open work is a
-vendor-server run (#32), reference-server checks (#35), DD 2.1 notes (#17) and optional media download (#30).
+vendor-server run (#32) and optional media download (#30).
 
 ## Finding things
 
@@ -39,7 +39,8 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 ## Rules that must hold
 
 - **Resource-agnostic.** Resource and field names are strings and records are raw `serde_json::Value`; do not add typed
-  Property/Member structs. This keeps the crate working with any server schema, including Data Dictionary 2.1 (#17).
+  Property/Member structs. This keeps the crate working with any server schema, including Data Dictionary 2.1 (see the
+  README section of that name).
 - **Raw in, raw out.** The crate never transforms, maps or drops record fields; it may only add source tags (server,
   resource, fetch time, run id) around a record.
 - **Standard first, vendor second.** RESO-standard behaviour (`ModificationTimestamp` replication, `@odata.nextLink` in
