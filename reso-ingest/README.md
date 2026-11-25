@@ -393,7 +393,7 @@ The same pieces are public:
 - Running: `run_servers` (one task per server, capped), `sync_resource` and `pull_resource` (one resource into a
   `RecordWriter`), `sync_resource_media` (the same with `PageMedia` downloading each page's files), `reserve_run_id`.
 - Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`, `StateStore` (the state
-  backend interface) and `FileStateStore`, `Lease`.
+  backend interface) and `FileStateStore`, `FileSink` and `LocalDirSink` (where finished data files go), `Lease`.
 - Deletes: `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, `FlagDeleteWriter` (wraps a writer and adds an
   event after each flagged record).
 - Media: `sync_media`, `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `PageMedia`.

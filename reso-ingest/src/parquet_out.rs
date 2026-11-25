@@ -17,6 +17,7 @@ use serde_json::Value;
 use crate::error::IngestError;
 use crate::manifest::FileEntry;
 use crate::output::{create_new_file, output_error, sanitize, RecordWriter};
+use crate::sink::FileSink;
 
 /// Rows handed to the Arrow decoder at a time
 const DECODE_BATCH_ROWS: usize = 8192;
@@ -155,6 +156,7 @@ pub struct ParquetWriter {
     record_types: Vec<(String, DataType)>,
     current: Option<Open>,
     files: Vec<FileEntry>,
+    sink: Option<Arc<dyn FileSink>>,
 }
 
 impl ParquetWriter {
@@ -183,7 +185,18 @@ impl ParquetWriter {
             record_types: record_types(entity),
             current: None,
             files: Vec::new(),
+            sink: None,
         })
+    }
+
+    /// Deliver finished files to `sink` instead of leaving them in the directory given to `new`
+    ///
+    /// The directory becomes a staging area: a finished file is handed to the sink, then removed.
+    /// Call before the first row.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Arc<dyn FileSink>) -> Self {
+        self.sink = Some(sink);
+        self
     }
 
     /// Keep these expanded navigation properties (`$expand`) as columns of JSON text
@@ -226,7 +239,11 @@ impl ParquetWriter {
         );
         let final_path = self.dir.join(&name);
         let part_path = self.dir.join(format!("{name}.part"));
-        if final_path.exists() {
+        let taken = match &self.sink {
+            Some(sink) => sink.exists(&name)?,
+            None => final_path.exists(),
+        };
+        if taken {
             return Err(self.fail("file already exists; another run may share this run id"));
         }
         let file = create_new_file(&part_path)?;
@@ -302,8 +319,14 @@ impl ParquetWriter {
             .close()
             .map_err(|e| output_error(&part_path, std::io::Error::other(e)))?;
         file.sync_all().map_err(|e| output_error(&part_path, e))?;
-        fs::rename(&part_path, &final_path).map_err(|e| output_error(&final_path, e))?;
-        let bytes = fs::metadata(&final_path).map_or(0, |m| m.len());
+        let bytes = fs::metadata(&part_path).map_or(0, |m| m.len());
+        if let Some(sink) = &self.sink {
+            let name = self.files.last().map_or("", |f| f.name.as_str());
+            sink.put_file(name, &part_path)?;
+            fs::remove_file(&part_path).map_err(|e| output_error(&part_path, e))?;
+        } else {
+            fs::rename(&part_path, &final_path).map_err(|e| output_error(&final_path, e))?;
+        }
         if let Some(entry) = self.files.last_mut() {
             entry.records = rows;
             entry.bytes = bytes;

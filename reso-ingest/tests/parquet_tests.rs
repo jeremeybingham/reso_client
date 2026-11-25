@@ -250,3 +250,19 @@ fn expanded_navigation_properties_are_kept_as_json_text() {
     assert_eq!(rows[0]["record"]["ListingKey"], json!("A1"));
     assert!(rows[1]["record"].get("Media").is_none_or(Value::is_null));
 }
+
+#[test]
+fn a_sink_receives_each_finished_file_and_the_staged_copy_goes() {
+    let staging = TempDir::new("sink-stage");
+    let dest = TempDir::new("sink-dest");
+    let sink = std::sync::Arc::new(reso_ingest::LocalDirSink::new(&dest.0).unwrap());
+    let mut w = writer(&staging, 1 << 20).with_sink(sink);
+    let records = [json!({"ListingKey": "A1"})];
+    w.write_batch(&records, "2026-11-25T00:00:00Z").unwrap();
+    assert!(!w.commit().unwrap(), "the file is still open");
+    let entries = w.finish().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(read_rows(&dest.0.join(&entries[0].name)).len(), 1);
+    assert!(entries[0].bytes > 0);
+    assert_eq!(std::fs::read_dir(&staging.0).unwrap().count(), 0);
+}
