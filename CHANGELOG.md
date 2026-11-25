@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` container image with the `s3` feature (#107, fourth part): the `Dockerfile` builds `parquet,s3`, so the
+  image holds `aws-lc` (C, from `object_store`'s rustls) beside `ring`, both static on musl. The S3 client verifies
+  certificates against the system CA bundle (rustls-platform-verifier), which `scratch` lacks, so every S3 request failed
+  with `builder error`; the image now carries Alpine's `/etc/ssl/certs/ca-certificates.crt`. Checked from the image
+  against AWS S3 and the GCS interoperability endpoint with dummy keys (TLS completes, the store answers 403). CI checks
+  the bundle is in the image and that `sync` has `--s3-bucket`. About 30 MB, was 20 MB.
 - `reso-ingest` run records in the bucket (#107, third part, feature `s3`): with `--s3-bucket`, run manifests and
   `sync --media` manifests are uploaded to `<prefix>/data/` (the local copy is removed), a copy of the newest run manifest
   is kept at `<prefix>/state/runs/last.json` and `status` reads it, and run ids are also reserved in the state store

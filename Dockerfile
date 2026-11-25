@@ -4,24 +4,31 @@
 #   docker run --rm -v "$PWD/servers.toml:/config/servers.toml:ro" -v "$PWD/data:/data" \
 #     -e MLS_ONE_TOKEN reso-ingest sync --config /config/servers.toml --out /data
 #
-# The only C code in the binary is `ring` (rustls' crypto), compiled here and linked in statically.
-# TLS roots are built in (webpki-roots), so the image needs no CA bundle, libc or shell.
+# The binary is built with `parquet` and `s3`. Its only C code is two crypto libraries, both
+# compiled here and linked in statically: `ring` (rustls for RESO servers and the webhook) and
+# `aws-lc` (rustls inside `object_store`, used by `--s3-*`).
+# TLS roots: RESO servers and the webhook use roots built into the binary (webpki-roots). The S3
+# client checks certificates against the system CA bundle, so the image carries Alpine's
+# /etc/ssl/certs/ca-certificates.crt; mount your own file over it for a store with a private CA.
+# No libc or shell.
 
 FROM rust:1.91-alpine AS build
-# musl-dev: C headers and startup files for ring's build script
-RUN apk add --no-cache musl-dev
+# musl-dev: C headers and startup files for the ring and aws-lc build scripts;
+# ca-certificates: the CA bundle copied into the image for the S3 client
+RUN apk add --no-cache musl-dev ca-certificates
 WORKDIR /src
 # Strip symbols: about a third smaller (Cargo.toml's release profile is left as is for local builds)
 ENV CARGO_PROFILE_RELEASE_STRIP=symbols
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p reso-ingest --features parquet \
+    cargo build --release -p reso-ingest --features parquet,s3 \
     && cp target/release/reso-ingest /reso-ingest \
     && mkdir -p /out/data
 
 FROM scratch
 COPY --from=build /reso-ingest /reso-ingest
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 # Writable working directory for the default --out (reso-out); mount a volume over /data
 COPY --from=build --chown=65532:65532 /out/data /data
 USER 65532:65532
