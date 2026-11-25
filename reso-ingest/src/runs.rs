@@ -33,15 +33,23 @@ pub(crate) async fn reserve(
         // Each try leaves its local marker, so the next one gets the following suffix
         let id = reserve_run_id(out)?;
         let Some(sink) = sink else { return Ok(id) };
+        // Reserve first, then look at the sink: a worker delivers its manifest before it releases
+        // the reservation, so a reservation won here means any earlier run with this id has its
+        // manifest in the sink already. Checking the sink first lost that race: the other worker
+        // could deliver and release between the check and the create (two runs, one id).
+        let key = reservation_key(&id);
+        if !state.create(&key, b"").await? {
+            continue;
+        }
         let name = sanitize(&id);
         if sink.exists(&format!("manifest.{name}.json"))?
             || sink.exists(&format!("media.{name}.json"))?
         {
+            // Taken by a finished run: give the reservation back and try the next id
+            state.delete(&key, None).await?;
             continue;
         }
-        if state.create(&reservation_key(&id), b"").await? {
-            return Ok(id);
-        }
+        return Ok(id);
     }
 }
 
@@ -140,6 +148,119 @@ mod tests {
         assert_ne!(other, id);
         release(&state, Some(&sink), &id).await;
         assert!(state.get(&reservation_key(&id)).await.unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Another worker that picked the same id: it holds the reservation for the first id it is
+    /// seen with, and if the sink is asked first, it delivers its manifest and releases right
+    /// after that question (the interleaving that gave two runs one id)
+    #[derive(Debug, Default)]
+    struct OtherWorker {
+        inner: Option<FileStateStore>,
+        /// The other worker's id (sanitized) and whether it has delivered and released
+        other: Mutex<Option<(String, bool)>>,
+    }
+
+    impl OtherWorker {
+        fn state(&self) -> &FileStateStore {
+            self.inner.as_ref().unwrap()
+        }
+    }
+
+    impl FileSink for OtherWorker {
+        fn put_file(&self, _name: &str, _local: &Path) -> Result<(), IngestError> {
+            Ok(())
+        }
+        fn exists(&self, name: &str) -> Result<bool, IngestError> {
+            let Some(id) = name
+                .strip_prefix("manifest.")
+                .and_then(|n| n.strip_suffix(".json"))
+            else {
+                return Ok(false);
+            };
+            let mut other = self.other.lock().unwrap();
+            match &*other {
+                None => {
+                    // Not delivered at the time of this question; delivered just after
+                    *other = Some((id.to_string(), true));
+                    Ok(false)
+                }
+                Some((o, done)) => Ok(o == id && *done),
+            }
+        }
+    }
+
+    impl StateStore for OtherWorker {
+        fn get<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> crate::state::StoreFuture<'a, Option<crate::state::Versioned>> {
+            self.state().get(key)
+        }
+        fn put<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> crate::state::StoreFuture<'a, ()> {
+            self.state().put(key, bytes)
+        }
+        fn create<'a>(
+            &'a self,
+            key: &'a str,
+            bytes: &'a [u8],
+        ) -> crate::state::StoreFuture<'a, bool> {
+            let id = key
+                .strip_prefix("runs/")
+                .and_then(|k| k.strip_suffix(".reserved"))
+                .unwrap_or_default()
+                .to_string();
+            let held = {
+                let mut other = self.other.lock().unwrap();
+                match &*other {
+                    None => {
+                        *other = Some((id, false));
+                        true
+                    }
+                    Some((o, done)) => *o == id && !*done,
+                }
+            };
+            if held {
+                Box::pin(async { Ok(false) })
+            } else {
+                self.state().create(key, bytes)
+            }
+        }
+        fn replace<'a>(
+            &'a self,
+            key: &'a str,
+            bytes: &'a [u8],
+            version: &'a str,
+        ) -> crate::state::StoreFuture<'a, bool> {
+            self.state().replace(key, bytes, version)
+        }
+        fn delete<'a>(
+            &'a self,
+            key: &'a str,
+            version: Option<&'a str>,
+        ) -> crate::state::StoreFuture<'a, bool> {
+            self.state().delete(key, version)
+        }
+        fn list(&self) -> crate::state::StoreFuture<'_, Vec<String>> {
+            self.state().list()
+        }
+        fn location(&self, key: &str) -> String {
+            self.state().location(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_id_released_after_its_manifest_is_delivered_is_not_reused() {
+        let dir = temp("race");
+        let worker = OtherWorker {
+            inner: Some(FileStateStore::new(dir.join("state"))),
+            ..OtherWorker::default()
+        };
+        let id = reserve(&dir.join("out"), &worker, Some(&worker))
+            .await
+            .unwrap();
+        let other = worker.other.lock().unwrap().clone().unwrap().0;
+        assert_ne!(sanitize(&id), other, "two runs got one id");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -110,6 +110,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route, such as the RESO reference server. `Query::to_odata_string()` for count-only queries changes accordingly (#53).
 
 ### Fixed
+- `reso-ingest` with a bucket: two workers could get the same run id (#116). `reserve` checked the bucket for the id's
+  manifest before taking the shared reservation, so another worker could deliver that manifest and release the
+  reservation in between; the second run's manifest was then refused (`object already exists`) and stayed in `--out`.
+  The reservation is now taken first and the bucket checked after. Seen about once in 20 loaded runs of the two-`serve`
+  test, which also counted a worker's own back-to-back requests as overlap when a timer thread woke late.
 - Download network errors no longer include the URL (#96): signed media URLs reached the debug log and the media
   manifest through reqwest's error text.
 - `Metadata::parse` reads annotation values written as a `<String>` child element, resolves schema aliases in
