@@ -337,7 +337,10 @@ async fn sync_keeps_manifests_and_last_run_in_the_bucket() {
 fn bucket_lines(objects: &Objects) -> Vec<serde_json::Value> {
     let map = objects.lock().unwrap();
     map.iter()
-        .filter(|(k, _)| k.starts_with("p/data/") && k.ends_with(".ndjson"))
+        // Data files only: the access-log copies (`access.<run>.ndjson`, #93) are not records
+        .filter(|(k, _)| {
+            k.starts_with("p/data/") && k.ends_with(".ndjson") && !k.starts_with("p/data/access.")
+        })
         .flat_map(|(_, (bytes, _))| {
             String::from_utf8(bytes.clone())
                 .unwrap()
@@ -640,6 +643,10 @@ async fn two_serve_workers_share_a_bucket_through_leases() {
     written.sort();
     assert_eq!(written, ["Member", "Property"]);
     let keys: Vec<String> = objects.lock().unwrap().keys().cloned().collect();
+    assert!(
+        keys.iter().any(|k| k.starts_with("p/data/access.")),
+        "the access-log lines go to the bucket: {keys:?}"
+    );
     assert!(
         keys.iter().any(|k| k.starts_with("p/data/manifest.")),
         "{keys:?}"

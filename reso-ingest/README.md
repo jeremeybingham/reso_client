@@ -213,6 +213,21 @@ In `--out` (default `reso-out`):
 
   A delete event has the same tags, then `"event":"delete"` and the record's `key` instead of `record`.
 - `manifest.<run>.json`: counts, files, checkpoints and errors for the run.
+- `audit/access.ndjson`: the access log (#93), one line per resource pull, appended at the end of each resource step of
+  `sync` and of each `serve` feed sync, also when the pull failed:
+
+  ```json
+  {"at":"2026-11-25T12:00:00Z","run_id":"...","server":"mls-one","resource":"Property","credential":"env:MLS_ONE_TOKEN","window_start":"2026-11-24T00:00:00Z","window_end":"2026-11-25T11:59:58Z","records":120,"deletes":2,"bytes_received":815302,"bytes_written":402113,"status":"ok","error":null}
+  ```
+
+  `credential` names where the token (or, for client credentials, the client id) is read from: `env:VAR` or
+  `file:/path`, never the secret. `window_start` is the checkpoint the pull started after (`null` on a full load),
+  `window_end` the timestamp of the last record pulled. `status` is `ok`, `interrupted` or `failed` (with `error`).
+  A feed skipped because another process holds its lease is not a pull and gets no line. The file is opened in append
+  mode only; nothing in `reso-ingest` rewrites or truncates it, and a line that cannot be written fails that resource.
+  With `--s3-bucket` the lines a run appended are also delivered as `<prefix>/data/access.<run>.ndjson` (objects cannot
+  be appended to); `serve` delivers them only for runs that keep a manifest (a poll that found nothing new stays in the
+  local log only).
 - `.run.<run>`: an empty marker that reserves the run id. Ids are the start time (`20261124T173005Z`); a run started in
   the same second as another in the same `--out` gets `-02`, `-03`, … added. A writer never overwrites an existing file:
   it stops with an error instead.

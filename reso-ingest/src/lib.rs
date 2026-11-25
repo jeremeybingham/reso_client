@@ -56,6 +56,7 @@
 //! # Ok::<(), reso_ingest::IngestError>(())
 //! ```
 
+mod audit;
 mod checkpoint;
 mod checks;
 pub mod cli;
@@ -81,6 +82,7 @@ mod sink;
 mod state;
 mod webhook;
 
+pub use audit::{credential_id, AccessEntry, AccessLog, ACCESS_LOG};
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
 pub use checks::{count_warning, CheckingWriter, SchemaSnapshot};
 pub use config::{

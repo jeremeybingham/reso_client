@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` access log (#93, second part): each resource step of `sync` and `serve` appends one line to
+  `<out>/audit/access.ndjson` (run id, server, resource, credential id, replication window, records, deletes, bytes
+  received and written, status and error), also for a failed pull. The credential id names the variable or file the
+  secret is read from (`env:VAR`, `file:/path`), never the secret. The file is only appended to; a line that cannot be
+  written fails the resource. With `--s3-bucket` each run's lines also go to the bucket as `access.<run>.ndjson`
+  (`serve`: for runs that keep a manifest). New public items: `AccessLog`, `AccessEntry`, `credential_id`, `ACCESS_LOG`.
 - Scope (#93): source purge and an access audit trail are in scope for `reso-ingest`. They help the consumer comply
   with licence terms (deletion when a licence ends, audit questions about what was pulled); display rules stay out of
   scope and records stay raw. `AGENTS.md` and `README.md` say so; the access log and `purge` follow in their own PRs.
