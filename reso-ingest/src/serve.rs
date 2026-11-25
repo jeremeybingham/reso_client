@@ -57,6 +57,8 @@ pub struct ServeOptions {
     pub deletes: bool,
     /// Write deletes even when they pass the configured limits
     pub allow_mass_deletes: bool,
+    /// Where finished data files go; `None` leaves them in `out`
+    pub sink: Option<Arc<dyn crate::sink::FileSink>>,
     /// Download media files of each page into this directory
     pub media_dir: Option<PathBuf>,
     /// Start a new data file after this many bytes
@@ -73,6 +75,7 @@ impl ServeOptions {
             listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
             state: Arc::new(FileStateStore::new(out.join("state"))),
             out,
+            sink: None,
             deletes: false,
             allow_mass_deletes: false,
             media_dir: None,
@@ -408,7 +411,7 @@ async fn sync_once(
         start_over: false,
         max_file_bytes: options.max_file_bytes,
         format: options.format,
-        sink: None,
+        sink: options.sink.clone(),
         shutdown: shutdown.clone(),
     });
     // The lines `sync` prints as progress are in the log already

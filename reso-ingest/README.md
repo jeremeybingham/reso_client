@@ -221,8 +221,17 @@ synced and renamed. A library user can pass another backend (object storage, a d
 `Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85. With the `s3` feature, `S3StateStore` keeps state as objects under a bucket prefix (AWS S3,
 R2, MinIO, GCS interoperability; version = ETag, `create` and `replace` use `If-None-Match` and `If-Match`; credentials
 from `AWS_ACCESS_KEY_ID` and friends, never the config file; `S3Options.single_delete` for GCS, which has no
-multi-delete). The command does not select it yet; output and the command line follow under #107. Unconfirmed against a
-real bucket.
+multi-delete). `S3FileSink` uploads finished data files to the same kind of bucket (one conditional `PUT` up to 32 MiB,
+multipart above; never replaces a name; use it from a multi-threaded runtime).
+
+**Running against a bucket (`--features s3`).** `sync`, `serve`, `media` and `status` take `--s3-bucket` (env
+`RESO_S3_BUCKET`), `--s3-prefix`, `--s3-endpoint` (R2, MinIO, GCS), `--s3-region`, `--s3-allow-http` (a local test
+server) and `--s3-single-delete` (GCS). State then goes to `<prefix>/state/` and finished data files to `<prefix>/data/`,
+so a killed run resumes from the bucket and workers share feeds through leases. `--s3-bucket` conflicts with `--state`.
+Credentials are the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`. Manifests, the metrics file and media files
+still go to `--out` and `--media-dir` (routing them through the backends is the rest of #107).
+`cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_ENDPOINT` and
+`RESO_S3_TEST_BUCKET` are set (checked against RustFS 2026-11-25; MinIO no longer publishes binaries or images).
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
