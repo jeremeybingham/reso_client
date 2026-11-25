@@ -11,6 +11,7 @@ use crate::checkpoint::CheckpointStore;
 use crate::error::IngestError;
 use crate::media::PageMedia;
 use crate::output::{now_rfc3339, RecordWriter};
+use crate::shutdown::Shutdown;
 
 /// One output file in the manifest
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,6 +89,9 @@ pub struct ResourceEntry {
     pub warnings: Vec<String>,
     /// Delete events found but not written because they passed the configured limit
     pub deletes_held: u64,
+    /// True when a shutdown request stopped this resource before its end; what was written and
+    /// checkpointed is consistent and the next run continues from it
+    pub interrupted: bool,
 }
 
 /// A server that failed as a whole (for example a task error from `run_servers`)
@@ -125,6 +129,9 @@ pub struct RunManifest {
     pub server_failures: Vec<ServerFailure>,
     /// `$metadata` changes since the previous run, per server (servers with none are absent)
     pub schema_changes: Vec<SchemaChanges>,
+    /// True when a shutdown request (SIGTERM, Ctrl-C) ended the run early: resources in the list
+    /// are consistent with their checkpoints, and resources not started are absent
+    pub interrupted: bool,
 }
 
 impl RunManifest {
@@ -137,6 +144,7 @@ impl RunManifest {
             resources: Vec::new(),
             server_failures: Vec::new(),
             schema_changes: Vec::new(),
+            interrupted: false,
         }
     }
 
@@ -228,7 +236,17 @@ pub async fn pull_resource(
     spec: StandardReplication,
     writer: &mut dyn RecordWriter,
 ) -> ResourceEntry {
-    pull(client, server, resource, spec, writer, None, None).await
+    pull(
+        client,
+        server,
+        resource,
+        spec,
+        writer,
+        None,
+        None,
+        &Shutdown::new(),
+    )
+    .await
 }
 
 /// Incremental, resumable pull of one resource
@@ -256,7 +274,15 @@ pub async fn sync_resource(
     start_over: bool,
 ) -> ResourceEntry {
     sync_resource_media(
-        client, server, resource, spec, writer, store, start_over, None,
+        client,
+        server,
+        resource,
+        spec,
+        writer,
+        store,
+        start_over,
+        None,
+        &Shutdown::new(),
     )
     .await
 }
@@ -276,6 +302,7 @@ pub async fn sync_resource_media(
     store: &CheckpointStore,
     start_over: bool,
     media: Option<&mut PageMedia<'_>>,
+    shutdown: &Shutdown,
 ) -> ResourceEntry {
     let setup = if start_over {
         store.clear(server, resource).map(|()| None)
@@ -297,12 +324,24 @@ pub async fn sync_resource_media(
                 stats: ResourceStats::default(),
                 warnings: Vec::new(),
                 deletes_held: 0,
+                interrupted: false,
             };
         }
     }
-    pull(client, server, resource, spec, writer, Some(store), media).await
+    pull(
+        client,
+        server,
+        resource,
+        spec,
+        writer,
+        Some(store),
+        media,
+        shutdown,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pull(
     client: &ResoClient,
     server: &str,
@@ -311,17 +350,29 @@ async fn pull(
     writer: &mut dyn RecordWriter,
     store: Option<&CheckpointStore>,
     mut media: Option<&mut PageMedia<'_>>,
+    shutdown: &Shutdown,
 ) -> ResourceEntry {
     let mut run = client.replicate(spec);
     let mut records = 0u64;
     let mut checkpoint = checkpoint_json(run.checkpoint());
     let mut error = None;
+    let mut interrupted = false;
     // The checkpoint of the last page written in full, not yet saved because its rows are still
     // in an open file; saved once the file is finished
     let mut pending: Option<Checkpoint> = None;
 
     loop {
-        match run.next_batch().await {
+        // A shutdown request ends the loop between pages, or drops a request still in flight: the
+        // checkpoint only moves after a page is written, so an abandoned page is fetched again.
+        let next = tokio::select! {
+            biased;
+            () = shutdown.triggered() => {
+                interrupted = true;
+                break;
+            }
+            next = run.next_batch() => next,
+        };
+        match next {
             Ok(Some(batch)) => {
                 if let Err(e) = writer.write_batch(&batch, &now_rfc3339()) {
                     error = Some(e.to_string());
@@ -389,6 +440,7 @@ async fn pull(
         stats: ResourceStats::default(),
         warnings: Vec::new(),
         deletes_held: 0,
+        interrupted,
     }
 }
 

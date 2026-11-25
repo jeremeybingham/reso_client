@@ -199,6 +199,7 @@ pub async fn reconcile_deletes(
         stats: ResourceStats::default(),
         warnings,
         deletes_held: held,
+        interrupted: false,
     }
 }
 

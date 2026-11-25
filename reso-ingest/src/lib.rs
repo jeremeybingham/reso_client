@@ -69,6 +69,7 @@ mod output;
 #[cfg(feature = "parquet")]
 mod parquet_out;
 mod runner;
+mod shutdown;
 mod webhook;
 
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
@@ -93,4 +94,5 @@ pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWr
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};
+pub use shutdown::Shutdown;
 pub use webhook::{post_summary, run_summary};

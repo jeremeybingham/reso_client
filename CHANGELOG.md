@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` shutdown (#82): on SIGTERM or Ctrl-C `sync` stops after the last page written, flushes and checkpoints,
+  marks the manifest (and each cut resource) `interrupted`, and exits with code 3; a second signal exits at once with 130.
+  Library: `Shutdown`, `cli::run_with_shutdown`, `cli::EXIT_INTERRUPTED`; `RunManifest` and `ResourceEntry` gain an
+  `interrupted` field and `sync_resource_media` takes a `&Shutdown`. New feature of tokio (`signal`), no new crates.
 - `reso-ingest` leases (#81): `sync` takes a lock file `state/<server>.<resource>.lock` per feed (process id, host, expiry,
   renewed while the run lives) and skips a feed another process holds, with a warning in the manifest; a crashed holder's
   lease expires after 5 minutes. Library: `Lease`, `LeaseOutcome`, `LeaseHolder`. No new dependencies.
