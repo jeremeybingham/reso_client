@@ -12,8 +12,9 @@ base_url = "https://api.mls-one.example/odata"
 page_size = 1000
 timeout_secs = 60
 include = ["Property", "Member", "Office"]   # empty or absent = every resource
-exclude = ["Media"]                          # wins over include
+exclude = ["OpenHouse"]                      # wins over include
 # filter = "OriginatingSystemName eq 'mls'"  # added to every query (some servers require one)
+# deletes = { flag_field = "MlgCanView" }    # a record with this field false is deleted (MLS Grid)
 
 # Settings for one resource (optional)
 # [server.resources.Property]
@@ -49,10 +50,10 @@ dataset_id = "ref_data"
 type = "bearer"
 token_env = "MLS_TWO_TOKEN"
 
-# Media file downloads (`reso-ingest media`): their own limits, separate from the API's
+# Media file downloads (`reso-ingest media` and `sync --media`): their own limits, separate from the API's
 [server.media]
 per_second = 4
-bytes_per_day = 50000000000
+bytes_per_day = 50000000000                  # also per_hour, per_day, bytes_per_hour
 timeout_secs = 300
 send_token = "same_host"                     # never, same_host (default) or always
 # nested_field = "Media"                     # `sync --media`: array of media records inside a record

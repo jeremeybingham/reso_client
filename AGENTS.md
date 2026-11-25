@@ -23,6 +23,7 @@ under "What's next" in `README.md`.
 | What the crates do, limits, quick start, configuration, what's next | `README.md` |
 | The ingest command: configuration, output format, deletes, media files, Parquet | `reso-ingest/README.md` |
 | The full plan, gap list with code references, open owner decisions | GitHub issue #18 and its children |
+| What to check on a real server, and what may change | GitHub issue #76 (access: #32) |
 | API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |
 | Version history | `CHANGELOG.md` |
@@ -75,17 +76,18 @@ src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RE
 src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter, ClientStats counters
 src/error.rs        ResoError and the Result alias
 reso-ingest/        second workspace crate (unpublished); README.md documents the command
-  src/config.rs     Config: multi-server TOML, secrets read from the variables named by `*_env`
+  src/config.rs     Config: multi-server TOML, secrets read from the variables named by `*_env`; server filter,
+                    [server.resources.<Name>] (ResourceConfig), flag-field deletes (DeletesConfig), limits, media
   src/runner.rs     run_servers: one independent task per server, concurrency cap
-  src/output.rs     RecordWriter, NdjsonWriter: tagged lines, size rotation
+  src/output.rs     RecordWriter, NdjsonWriter: tagged lines, size rotation, never overwrite; reserve_run_id (.run.<id>)
   src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature)
-  src/manifest.rs   RunManifest, pull_resource, sync_resource
+  src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/checkpoint.rs CheckpointStore: JSON files for checkpoints, key sets, event sequences
-  src/deletes.rs    reconcile_deletes, EventFeed: delete events by key diff or EntityEvent
+  src/deletes.rs    reconcile_deletes, EventFeed, FlagDeleteWriter: delete events by key diff, EntityEvent or flag field
   src/media.rs      sync_media, MediaIndex, MediaManifest, PageMedia: Media files from sync output (`media`) or per page (`sync --media`)
   src/cli.rs, main.rs  the `reso-ingest` binary (sync, media, discover, status); run() takes writers so tests run in-process
   src/error.rs      IngestError
-  servers.example.toml, tests/ (wiremock servers, CLI run in-process)
+  servers.example.toml, tests/ (wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
