@@ -185,3 +185,27 @@ async fn rate_limit_paces_real_requests() {
     assert!(start.elapsed() >= Duration::from_secs(2));
     assert_eq!(c.stats().requests, 5);
 }
+
+#[tokio::test]
+async fn responses_are_counted_by_status_class() {
+    // 429 twice (throttled), then 200 (ok)
+    let server = flaky(429, 2, None).await;
+    let c = client(&server, fast(3));
+    c.execute(&query()).await.unwrap();
+    let s = c.stats();
+    assert_eq!(
+        (s.ok, s.throttled, s.client_errors, s.server_errors),
+        (1, 2, 0, 0)
+    );
+
+    // 503 once, then ok; and a plain 404 that is not retried
+    let server = flaky(503, 1, None).await;
+    let c = client(&server, fast(3));
+    c.execute(&query()).await.unwrap();
+    let before = c.stats();
+    assert_eq!((before.ok, before.server_errors), (1, 1));
+    let missing = QueryBuilder::new("Nope").build().unwrap();
+    assert!(c.execute(&missing).await.is_err());
+    let delta = c.stats().since(&before);
+    assert_eq!((delta.requests, delta.client_errors, delta.ok), (1, 1, 0));
+}

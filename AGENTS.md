@@ -88,9 +88,11 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/cli.rs, main.rs  the `reso-ingest` binary (sync, media, discover, status); run() takes writers so tests run in-process,
                     run_main() also installs the log subscriber
   src/logging.rs    LogFormat, log_subscriber: text or JSON log lines, RUST_LOG filter; run/server/resource spans
+  src/metrics.rs    render_prometheus: freshness lag and per-run metrics as Prometheus text; write_metrics_file; parse_rfc3339
   src/error.rs      IngestError
+  monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
   servers.example.toml, tests/ (wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
-                    log_json.rs for JSON log lines, own binary)
+                    log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),

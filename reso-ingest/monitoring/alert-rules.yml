@@ -1,0 +1,44 @@
+# Prometheus alert rules for reso-ingest (see reso-ingest/README.md, "Metrics").
+# Thresholds are starting points: set them from how often you run `sync`.
+groups:
+  - name: reso-ingest
+    rules:
+      - alert: ResoFeedStale
+        # The newest ModificationTimestamp written is over 2 hours old. A quiet MLS overnight can
+        # trigger this; raise the threshold or add a time-of-day condition for such feeds.
+        expr: reso_ingest_freshness_lag_seconds > 2 * 3600
+        for: 15m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.server }}/{{ $labels.resource }} is {{ $value | humanizeDuration }} behind"
+
+      - alert: ResoResourceFailed
+        # The last pull of the resource ended in an error
+        expr: reso_ingest_last_run_success == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.server }}/{{ $labels.resource }} failed in its last run"
+
+      - alert: ResoServerFailed
+        # The whole server failed (no $metadata, no resources to pull)
+        expr: reso_ingest_server_failed == 1
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.server }} failed as a whole in its last run"
+
+      - alert: ResoRepeatedThrottling
+        # 429 responses in the last run, for three runs in a row
+        expr: reso_ingest_last_run_responses{class="429"} > 0
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $labels.server }}/{{ $labels.resource }} keeps getting 429s; lower [server.limits]"
+
+      - alert: ResoRunsStopped
+        # No run has finished for 3 hours (the metrics file is only written at the end of a run)
+        expr: time() - reso_ingest_last_run_finished_timestamp_seconds > 3 * 3600
+        labels: {severity: page}
+        annotations:
+          summary: "reso-ingest has not finished a run in {{ $value | humanizeDuration }}"

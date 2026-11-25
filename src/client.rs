@@ -500,13 +500,16 @@ impl ResoClient {
     async fn send_get(&self, url: &str, accept: &str, token: &str) -> Result<reqwest::Response> {
         self.limiter.acquire().await;
         self.counters.request();
-        self.http_client
+        let response = self
+            .http_client
             .get(url)
             .bearer_auth(token)
             .header("Accept", accept)
             .send()
             .await
-            .map_err(|e| ResoError::Network(e.to_string()))
+            .map_err(|e| ResoError::Network(e.to_string()))?;
+        self.counters.status(response.status().as_u16());
+        Ok(response)
     }
 
     /// Read a response body, counting its bytes

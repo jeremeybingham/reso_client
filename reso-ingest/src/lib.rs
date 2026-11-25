@@ -27,6 +27,11 @@
 //! servers whose media URLs are single-use or expire quickly. Downloads use their own limits
 //! ([`MediaConfig`]).
 //!
+//! [`render_prometheus`] turns a run's manifest into Prometheus text: per server and resource, the
+//! freshness lag (now minus the newest `ModificationTimestamp` written), records, request and
+//! response counts, duration and success; `sync --metrics-file` writes it for the node_exporter
+//! textfile collector.
+//!
 //! The crates log through [`tracing`]; [`log_subscriber`] builds the text or JSON subscriber the
 //! binary installs, and the `run`, server and resource spans put `run_id`, `server` and `resource` on
 //! every event.
@@ -57,6 +62,7 @@ mod error;
 mod logging;
 mod manifest;
 mod media;
+mod metrics;
 mod output;
 #[cfg(feature = "parquet")]
 mod parquet_out;
@@ -70,13 +76,14 @@ pub use deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;
 pub use logging::{env_filter, log_subscriber, LogFormat, DEFAULT_FILTER, LOG_FORMAT_ENV};
 pub use manifest::{
-    pull_resource, sync_resource, sync_resource_media, FileEntry, ResourceEntry, RunManifest,
-    ServerFailure,
+    pull_resource, sync_resource, sync_resource_media, FileEntry, ResourceEntry, ResourceStats,
+    RunManifest, ServerFailure,
 };
 pub use media::{
     encode_name, sync_media, MediaEntry, MediaFailure, MediaIndex, MediaManifest, MediaOptions,
     MediaReport, PageMedia, DEFAULT_NESTED_FIELD, MEDIA_RESOURCE,
 };
+pub use metrics::{parse_rfc3339, render_prometheus, render_prometheus_at, write_metrics_file};
 pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};

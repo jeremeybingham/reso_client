@@ -27,6 +27,7 @@ cargo run -p reso-ingest -- status --out data/
 - **`media`** downloads the files that the top-level `Media` records from `sync` point at (see
   [Media files](#media-files)).
 - **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums.
+- **`sync --metrics-file PATH`** also writes the run's metrics (see Metrics below).
 - **`status`** shows the saved checkpoints and the last run's manifest.
 
 Progress lines (`##progress step=N/T label=server/resource`) go to stderr and the summary to stdout. Exit code `0` on
@@ -49,6 +50,37 @@ synced records=17 deletes=0`. The progress and per-resource lines are plain text
 lines with `grep '^{'`. Logs never hold tokens, client secrets or record contents. At `info` each server logs its
 `$metadata` fetch and query URLs, each resource one `resource synced` (or `resource failed`) line, and each
 `media` server one summary line; `debug` adds retries, batch sizes and checkpoints.
+
+## Metrics
+
+`sync` records, per server and resource, how long the pull took and what its requests did (`stats` in the manifest).
+`--metrics-file PATH` also writes them as Prometheus text when the run ends (replaced atomically; point the
+node_exporter textfile collector at its directory). The `/metrics` endpoint for a long-running process comes with
+daemon mode ([#83](https://github.com/jeremeybingham/reso_client/issues/83)); it will use `render_prometheus`.
+
+The main number is **freshness lag**: now minus the newest `ModificationTimestamp` written, taken from the saved
+checkpoint, so it keeps growing for a feed that fails or goes quiet, and is absent for one that never wrote a record.
+The rest describe the run just finished. Labels are `server` and `resource` unless noted.
+
+| Metric | Meaning |
+|---|---|
+| `reso_ingest_freshness_lag_seconds` | Seconds behind (see above) |
+| `reso_ingest_last_run_success` | 1 if the pull ended without error, else 0 |
+| `reso_ingest_last_success_timestamp_seconds` | End of the last error-free run (absent after a failed run) |
+| `reso_ingest_last_run_records`, `_deletes`, `_files`, `_file_bytes` | Records, delete events, data files and their size |
+| `reso_ingest_last_run_duration_seconds`, `_records_per_second` | Time taken, and records over time |
+| `reso_ingest_last_run_requests`, `_retries`, `_http_bytes` | HTTP requests (retries included), retries, body bytes |
+| `reso_ingest_last_run_responses` (also `class`) | Responses by `2xx` (3xx included), `429`, `4xx`, `5xx` |
+| `reso_ingest_server_failed` (`server` only) | 1 for a server that failed as a whole |
+| `reso_ingest_last_run_finished_timestamp_seconds`, `_resources` | No labels: when the run ended, resources handled |
+
+Not measured yet: the rate-limit budget used (the limiter does not report it) and checkpoint age (the freshness lag
+covers the same question). The request counters cover the pull and delete detection, not media downloads. OpenTelemetry
+is not exported; the text format needs no new dependency.
+
+`monitoring/` holds an example Grafana dashboard (`grafana-dashboard.json`: import it and pick the Prometheus data
+source) and Prometheus alert rules (`alert-rules.yml`: stale feed, failed resource or server, repeated 429s, no run
+finished). A test checks that both use only the metrics above. Their thresholds are starting points.
 
 ## Configuration
 

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `ClientStats` counts responses by status (`ok`, `throttled` for 429, `client_errors`, `server_errors`) for both the
+  API client and `Downloader`, and has `ClientStats::since` for the difference between two snapshots (#79). The new
+  public fields break code that builds `ClientStats` with a struct literal.
+- `reso-ingest` metrics (#79): `sync --metrics-file PATH` writes Prometheus text (freshness lag per feed, records,
+  requests, responses by class, duration, success); the manifest gains `stats` per resource. Library:
+  `render_prometheus`, `render_prometheus_at`, `write_metrics_file`, `parse_rfc3339`, `ResourceStats`; `ResourceEntry`
+  gains a `stats` field. Example Grafana dashboard and alert rules in `reso-ingest/monitoring/`. No new dependencies.
 - File downloads (#30): `ResoClient::downloader(DownloadConfig)` returns a `Downloader` with its own `RetryPolicy`,
   `RateLimit`, timeout and counters. `Downloader::download_to(url, dest, &Validators)` sends a conditional GET
   (`If-None-Match`, `If-Modified-Since`), streams the body to `<dest>.part` and renames it when complete, and returns

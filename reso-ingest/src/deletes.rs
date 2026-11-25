@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::checkpoint::CheckpointStore;
 use crate::error::IngestError;
 use crate::manifest::FileEntry;
-use crate::manifest::ResourceEntry;
+use crate::manifest::{ResourceEntry, ResourceStats};
 use crate::output::{now_rfc3339, RecordWriter};
 
 /// A server resource that lists changes, used instead of the key comparison
@@ -143,6 +143,7 @@ pub async fn reconcile_deletes(
         files,
         checkpoint: None,
         error,
+        stats: ResourceStats::default(),
     }
 }
 

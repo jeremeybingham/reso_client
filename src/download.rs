@@ -403,11 +403,13 @@ impl Downloader<'_> {
         if let Some(date) = &validators.last_modified {
             request = request.header(IF_MODIFIED_SINCE, date);
         }
-        request
+        let response = request
             .send()
             .await
             // Without the URL: media URLs are often signed, and errors end up in logs and manifests
-            .map_err(|e| ResoError::Network(e.without_url().to_string()))
+            .map_err(|e| ResoError::Network(e.without_url().to_string()))?;
+        self.counters.status(response.status().as_u16());
+        Ok(response)
     }
 
     async fn count_bytes(&self, n: u64) {
