@@ -4,7 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use reso_client::{
-    Auth, ClientConfig, ClientCredentials, CredentialTransport, RateLimit, RetryPolicy,
+    Auth, ClientConfig, ClientCredentials, CredentialTransport, DownloadConfig, RateLimit,
+    RetryPolicy, SendToken,
 };
 use serde::Deserialize;
 
@@ -45,6 +46,10 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// [server.limits]                     # optional
 /// max_retries = 4
 /// per_second = 2
+///
+/// [server.media]                      # optional; file downloads (`reso-ingest media`)
+/// per_second = 4
+/// send_token = "same_host"            # never, same_host (default) or always
 /// ```
 ///
 /// See `reso-ingest/servers.example.toml` for a complete file.
@@ -84,6 +89,9 @@ pub struct ServerConfig {
     /// Retry and rate limits
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Media file downloads: their own limits, and where the token goes
+    #[serde(default)]
+    pub media: MediaConfig,
 }
 
 /// Authentication settings; secrets are named by environment variable, never written in the file
@@ -137,6 +145,91 @@ pub struct LimitsConfig {
     /// Response bytes per day
     #[serde(default)]
     pub bytes_per_day: Option<u64>,
+}
+
+/// Timeout for one media file when `timeout_secs` is not set
+pub const DEFAULT_MEDIA_TIMEOUT_SECS: u64 = 120;
+
+/// Media download settings, separate from the API's (all optional)
+///
+/// Defaults: 5 retries, no rate limit, a 120-second timeout per file, and the API token sent
+/// only to the API's own host (`send_token = "same_host"`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaConfig {
+    /// Retries after the first attempt
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// First backoff in milliseconds
+    #[serde(default)]
+    pub initial_backoff_ms: Option<u64>,
+    /// Longest backoff in milliseconds
+    #[serde(default)]
+    pub max_backoff_ms: Option<u64>,
+    /// File requests per second
+    #[serde(default)]
+    pub per_second: Option<u32>,
+    /// File requests per hour
+    #[serde(default)]
+    pub per_hour: Option<u32>,
+    /// File bytes per day
+    #[serde(default)]
+    pub bytes_per_day: Option<u64>,
+    /// Timeout for one file in seconds (default 120)
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// `never`, `same_host` (default) or `always`
+    #[serde(default)]
+    pub send_token: Option<String>,
+}
+
+impl MediaConfig {
+    /// The [`DownloadConfig`] these settings describe
+    pub fn download_config(&self) -> DownloadConfig {
+        let defaults = RetryPolicy::default();
+        let retry = RetryPolicy::new(self.max_retries.unwrap_or(DEFAULT_MAX_RETRIES)).with_backoff(
+            self.initial_backoff_ms
+                .map(Duration::from_millis)
+                .unwrap_or(defaults.initial_backoff),
+            self.max_backoff_ms
+                .map(Duration::from_millis)
+                .unwrap_or(defaults.max_backoff),
+        );
+        DownloadConfig::default()
+            .with_timeout(Duration::from_secs(
+                self.timeout_secs.unwrap_or(DEFAULT_MEDIA_TIMEOUT_SECS),
+            ))
+            .with_retry(retry)
+            .with_rate_limit(rate_limit(
+                self.per_second,
+                self.per_hour,
+                self.bytes_per_day,
+            ))
+            .with_send_token(
+                self.send_token
+                    .as_deref()
+                    .and_then(SendToken::parse)
+                    .unwrap_or_default(),
+            )
+    }
+}
+
+fn rate_limit(
+    per_second: Option<u32>,
+    per_hour: Option<u32>,
+    bytes_per_day: Option<u64>,
+) -> RateLimit {
+    let mut rate = RateLimit::default();
+    if let Some(n) = per_second {
+        rate = rate.per_second(n);
+    }
+    if let Some(n) = per_hour {
+        rate = rate.per_hour(n);
+    }
+    if let Some(n) = bytes_per_day {
+        rate = rate.bytes_per_day(n);
+    }
+    rate
 }
 
 impl Config {
@@ -249,6 +342,16 @@ impl ServerConfig {
         if self.page_size == Some(0) {
             return Err("page_size must be at least 1".into());
         }
+        if let Some(t) = &self.media.send_token {
+            if SendToken::parse(t).is_none() {
+                return Err(format!(
+                    "media.send_token `{t}` is not one of never, same_host, always"
+                ));
+            }
+        }
+        if self.media.timeout_secs == Some(0) {
+            return Err("media.timeout_secs must be at least 1".into());
+        }
         let env_names: Vec<(&str, &str)> = match &self.auth {
             AuthConfig::Bearer { token_env } => vec![("token_env", token_env)],
             AuthConfig::ClientCredentials {
@@ -350,16 +453,6 @@ impl ServerConfig {
         );
         config = config.with_retry(retry);
 
-        let mut rate = RateLimit::default();
-        if let Some(n) = l.per_second {
-            rate = rate.per_second(n);
-        }
-        if let Some(n) = l.per_hour {
-            rate = rate.per_hour(n);
-        }
-        if let Some(n) = l.bytes_per_day {
-            rate = rate.bytes_per_day(n);
-        }
-        Ok(config.with_rate_limit(rate))
+        Ok(config.with_rate_limit(rate_limit(l.per_second, l.per_hour, l.bytes_per_day)))
     }
 }

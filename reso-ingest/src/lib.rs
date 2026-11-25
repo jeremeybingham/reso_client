@@ -40,17 +40,22 @@ mod config;
 mod deletes;
 mod error;
 mod manifest;
+mod media;
 mod output;
 #[cfg(feature = "parquet")]
 mod parquet_out;
 mod runner;
 
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
-pub use config::{AuthConfig, Config, LimitsConfig, ServerConfig};
+pub use config::{AuthConfig, Config, LimitsConfig, MediaConfig, ServerConfig};
 pub use deletes::{reconcile_deletes, EventFeed};
 pub use error::IngestError;
 pub use manifest::{
     pull_resource, sync_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure,
+};
+pub use media::{
+    encode_name, sync_media, MediaEntry, MediaFailure, MediaIndex, MediaManifest, MediaOptions,
+    MediaReport, MEDIA_RESOURCE,
 };
 pub use output::{new_run_id, now_rfc3339, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]

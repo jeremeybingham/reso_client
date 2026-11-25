@@ -12,6 +12,7 @@ run locally; not yet run against a vendor server
 ```sh
 cargo run -p reso-ingest -- sync --config servers.toml --out data/
 cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --deletes
+cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
 cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
 cargo run -p reso-ingest -- status --out data/
 ```
@@ -20,6 +21,7 @@ cargo run -p reso-ingest -- status --out data/
   continuing from the saved checkpoint; the first run is the full load. `--server` and `--resource` narrow it (each can
   be repeated). `--deletes` also writes delete events. `--start-over` drops the selected checkpoints first.
   `--max-file-mb` (default 256) starts a new data file after that size.
+- **`media`** downloads the files that the `Media` records from `sync` point at (see [Media files](#media-files)).
 - **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums.
 - **`status`** shows the saved checkpoints and the last run's manifest.
 
@@ -50,6 +52,11 @@ client_secret_env = "MLS_ONE_CLIENT_SECRET"
 
 [server.limits]                     # optional; default 5 retries, no rate limit
 per_second = 2
+
+[server.media]                      # optional; file downloads, separate from the API limits
+per_second = 4                      # also per_hour, bytes_per_day, max_retries, *_backoff_ms
+timeout_secs = 300                  # per file; default 120
+send_token = "same_host"            # never, same_host (default) or always
 ```
 
 Each server runs as its own task: one server failing does not stop the others.
@@ -78,6 +85,36 @@ In `--out` (default `reso-out`):
   number and each named record is looked up; otherwise every key is pulled and compared with the previous run's (the
   first run is the baseline and reports no deletes).
 
+## Media files
+
+`reso-ingest media` turns the `Media` records that `sync` wrote into files:
+
+1. It reads the NDJSON `Media` data files listed in the `manifest.*.json` files in `--out`, skipping the ones it has
+   read before, and keeps the newest record per `MediaKey`. Parquet data files are not read (listed as skipped).
+2. It downloads each new or changed `MediaURL` into `--media-dir` (default `<out>/media`) as `<server>/<MediaKey>.<ext>`.
+   The key is kept as is when it has only letters, digits, `-` and `_`; other characters are percent-encoded. The
+   extension comes from the response's `Content-Type` (none when unknown); `MediaType` is not used, as it is often wrong.
+3. It writes `media.<run>.json` (per server: downloaded, not modified, deleted, failed with the error, still pending,
+   bytes) and prints a summary.
+
+What counts as changed: a new `MediaKey`, or a new `MediaModificationTimestamp` (`ModificationTimestamp` when that is
+absent). A new URL alone does **not** count, because signed CDN URLs change on every pull; the newest URL is kept for
+the next download. A record with no timestamp at all is fetched again when its URL changes. A re-download sends the
+saved `ETag` and `Last-Modified`, so an unchanged file costs a 304 and no transfer. A delete event removes the file.
+
+A file that fails (404, an expired signed URL, a timeout after retries) is listed in the media manifest and stays
+pending; the run carries on, exits `1`, and the next run tries it again. `--limit N` caps downloads per server per run;
+the rest stay pending. Files are written to `<name>.part` and renamed when complete, so a partial file never sits under
+the final name.
+
+The index of what was read and saved is `state/media/<server>.json`. Downloads have their own limits (`[server.media]`),
+so they do not use up the API's. The API token goes only to the API's own host by default (`send_token = "same_host"`):
+media usually lives on a CDN that does not need it. Downloads run one at a time per server; servers run in parallel.
+
+Not yet checked against a vendor file host
+([#32](https://github.com/jeremeybingham/reso_client/issues/32)): signed URLs that expire before the run reaches them
+(they fail with 403 until the next `sync` brings a fresh URL), vendor media limits, and real volumes.
+
 ## Parquet
 
 Build with the `parquet` feature and pass `--format parquet` for typed columns instead of NDJSON:
@@ -97,4 +134,4 @@ a `.part` file and resumes from the last finished file, so those pages are fetch
 
 The same pieces are public: `Config` (parse the TOML), `run_servers` (one task per server, capped), `sync_resource`
 and `pull_resource` (one resource into a `RecordWriter`), `NdjsonWriter` / `ParquetWriter`, `CheckpointStore`,
-`RunManifest`, `reconcile_deletes` and `EventFeed`. See the crate docs: `cargo doc -p reso-ingest --open`.
+`RunManifest`, `reconcile_deletes`, `EventFeed`, and for media `sync_media`, `MediaIndex` and `MediaManifest`. See the crate docs: `cargo doc -p reso-ingest --open`.

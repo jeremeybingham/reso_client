@@ -12,14 +12,14 @@ This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in 
 Records are handed over **raw**, tagged with their source. The typical user is an aggregator pulling from many MLS
 vendors into its own store. The crates do **not** de-duplicate across MLSs, map local fields, enforce data-licence or
 display rules, or choose a database. The plan is tracker issue #18 (milestone "Ingest layer"); the open work is a
-vendor-server run (#32) and optional media download (#30).
+vendor-server run (#32).
 
 ## Finding things
 
 | You want | Go to |
 |---|---|
 | What the crates do, limits, quick start, configuration, what's next | `README.md` |
-| The ingest command: configuration, output format, deletes, Parquet | `reso-ingest/README.md` |
+| The ingest command: configuration, output format, deletes, media files, Parquet | `reso-ingest/README.md` |
 | The full plan, gap list with code references, open owner decisions | GitHub issue #18 and its children |
 | API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |
@@ -63,6 +63,7 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 ```
 src/lib.rs          public API, re-exports, crate docs
 src/client.rs       ResoClient, ClientConfig, HTTP operations
+src/download.rs     Downloader, DownloadConfig, SendToken: file downloads with their own limits (Media files)
 src/auth.rs         Auth, ClientCredentials, token fetch, cache and renewal (OAuth2 client credentials)
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/metadata.rs     Metadata model parsed from $metadata (roxmltree): entity sets, types, keys, properties, enums
@@ -79,12 +80,14 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/manifest.rs   RunManifest, pull_resource, sync_resource
   src/checkpoint.rs CheckpointStore: JSON files for checkpoints, key sets, event sequences
   src/deletes.rs    reconcile_deletes, EventFeed: delete events by key diff or EntityEvent
-  src/cli.rs, main.rs  the `reso-ingest` binary (sync, discover, status); run() takes writers so tests run in-process
+  src/media.rs      sync_media, MediaIndex, MediaManifest: Media files from sync output (`media` command)
+  src/cli.rs, main.rs  the `reso-ingest` binary (sync, media, discover, status); run() takes writers so tests run in-process
   src/error.rs      IngestError
   servers.example.toml, tests/ (wiremock servers, CLI run in-process)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
+                    download_tests.rs (conditional GET, .part files, retries, token scope),
                     retry_tests.rs (retries, Retry-After, counters; limiter timing is in src/retry.rs with a paused clock),
                     auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- File downloads (#30): `ResoClient::downloader(DownloadConfig)` returns a `Downloader` with its own `RetryPolicy`,
+  `RateLimit`, timeout and counters. `Downloader::download_to(url, dest, &Validators)` sends a conditional GET
+  (`If-None-Match`, `If-Modified-Since`), streams the body to `<dest>.part` and renames it when complete, and returns
+  `DownloadOutcome::NotModified` or `Saved(SavedFile)` (bytes, `ETag`, `Last-Modified`, `Content-Type`). `SendToken`
+  decides where the API token goes (default: the API's own scheme, host and port only). New error `ResoError::Io`
+  (non-breaking: `ResoError` is `#[non_exhaustive]`). The `tokio` dependency gains the `fs` and `io-util` features; no
+  new crates.
+
 ### Changed
 - `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
   `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
@@ -21,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
   command.
 - README: Data Dictionary 2.1 notes (renamed unit fields, lookup values as strings, `any()` not `has`) (#17).
+
+### reso-ingest (unpublished, in this repository)
+- `reso-ingest media` (#30): downloads the files of the `Media` records that `sync` wrote (NDJSON), into
+  `<out>/media/<server>/<MediaKey>.<ext>`, with `--limit` and `--media-dir`. Re-downloads only when the media timestamp
+  changes (not when only a signed URL changes), sends saved validators, removes files on delete events, keeps failures
+  pending for the next run, and writes `media.<run>.json`. Per-server `[server.media]` settings (`MediaConfig`);
+  library API `sync_media`, `MediaIndex`, `MediaOptions`, `MediaReport`, `MediaManifest`.
 
 ## [0.3.0] - 2026-11-24
 

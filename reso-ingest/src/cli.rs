@@ -1,4 +1,4 @@
-//! The `reso-ingest` command line: `sync`, `discover` and `status`
+//! The `reso-ingest` command line: `sync`, `media`, `discover` and `status`
 //!
 //! [`run`] takes the arguments and two writers (stdout and stderr in the binary) and returns the exit
 //! code, so tests drive it in-process. Exit codes: `0` success, `1` a server or resource failed,
@@ -20,6 +20,7 @@ use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, EventFeed};
 use crate::manifest::{sync_resource, ResourceEntry, RunManifest};
+use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport};
 use crate::output::{new_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
@@ -78,6 +79,31 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Format::Ndjson)]
         format: Format,
     },
+    /// Download the files of the Media records that `sync` wrote
+    ///
+    /// Reads the NDJSON Media data files listed in the manifests in --out, and downloads new and
+    /// changed files into --media-dir/<server>/, named by MediaKey. Files that failed are retried
+    /// on the next run. Downloads use the [server.media] limits, not the API's.
+    Media {
+        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        #[arg(long)]
+        config: PathBuf,
+        /// Only this server; repeat for several (default: all)
+        #[arg(long = "server")]
+        servers: Vec<String>,
+        /// The sync output directory (manifests and data files)
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// State directory (default: <out>/state); the media index goes in <state>/media/
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// Where files go (default: <out>/media)
+        #[arg(long)]
+        media_dir: Option<PathBuf>,
+        /// Most downloads per server in this run; the rest wait for the next run
+        #[arg(long)]
+        limit: Option<u64>,
+    },
     /// Print each server's $metadata model as JSON (resources, keys, properties, enums)
     Discover {
         /// Server configuration (TOML; see reso-ingest/servers.example.toml)
@@ -124,6 +150,8 @@ struct Args {
     start_over: bool,
     max_file_mb: Option<u64>,
     format: Format,
+    media_dir: Option<PathBuf>,
+    limit: Option<u64>,
 }
 
 impl Args {
@@ -177,8 +205,28 @@ pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i
                 start_over,
                 max_file_mb: Some(max_file_mb),
                 format,
+                ..Args::default()
             };
             sync(args, out, err).await
+        }
+        Command::Media {
+            config,
+            servers,
+            out: out_dir,
+            state,
+            media_dir,
+            limit,
+        } => {
+            let args = Args {
+                config: Some(config),
+                servers,
+                out: Some(out_dir),
+                state,
+                media_dir,
+                limit,
+                ..Args::default()
+            };
+            media(args, out, err).await
         }
         Command::Discover {
             config,
@@ -554,6 +602,107 @@ fn print_summary(manifest: &RunManifest, path: Option<&Path>, out: &mut dyn Writ
     if let Some(path) = path {
         let _ = writeln!(out, "manifest: {}", path.display());
     }
+}
+
+// ---------------------------------------------------------------- media
+
+async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let (config, servers) = match load_servers(&args, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let options = Arc::new(MediaOptions {
+        out: args.out(),
+        state: args.state(),
+        media_dir: args
+            .media_dir
+            .clone()
+            .unwrap_or_else(|| args.out().join("media")),
+        limit: args.limit,
+    });
+    let mut manifest = MediaManifest::new(new_run_id());
+
+    let (tx, mut rx) = unbounded_channel::<String>();
+    let task_options = Arc::clone(&options);
+    let reports = {
+        let task = move |server: ServerConfig| {
+            let options = Arc::clone(&task_options);
+            let tx = tx.clone();
+            async move {
+                let client = client_for(&server)?;
+                let download = server.media.download_config();
+                let progress = |line: String| send(&tx, line);
+                let report = sync_media(&client, &server.name, download, &options, progress).await;
+                send(&tx, media_line(&report));
+                Ok::<MediaReport, String>(report)
+            }
+        };
+        let run = run_servers(servers, config.max_concurrent_servers, task);
+        let progress = async {
+            while let Some(line) = rx.recv().await {
+                let _ = writeln!(err, "{line}");
+            }
+        };
+        let (reports, ()) = tokio::join!(run, progress);
+        reports
+    };
+    for report in reports {
+        manifest
+            .servers
+            .push(report.result.unwrap_or_else(|message| MediaReport {
+                server: report.name,
+                error: Some(message),
+                ..MediaReport::default()
+            }));
+    }
+
+    let path = manifest.write(&options.out);
+    let _ = writeln!(out, "media run {}:", manifest.run_id);
+    for r in &manifest.servers {
+        let _ = writeln!(out, "  {}", media_line(r));
+        for f in r.failed.iter().take(5) {
+            let _ = writeln!(out, "    {}: {}", f.key, f.error);
+        }
+        if r.failed.len() > 5 {
+            let _ = writeln!(out, "    ... {} more in the manifest", r.failed.len() - 5);
+        }
+    }
+    match &path {
+        Ok(p) => {
+            let _ = writeln!(out, "manifest: {}", p.display());
+        }
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return 1;
+        }
+    }
+    i32::from(!manifest.is_clean())
+}
+
+fn media_line(r: &MediaReport) -> String {
+    if let Some(e) = &r.error {
+        return format!("[{}/media] FAILED: {e}", r.server);
+    }
+    let mut line = format!(
+        "[{}/media] {} downloaded, {} not modified, {} deleted, {} failed, {} pending, {} bytes",
+        r.server,
+        r.downloaded,
+        r.not_modified,
+        r.deleted,
+        r.failed.len(),
+        r.pending,
+        r.bytes
+    );
+    if r.without_url > 0 {
+        line.push_str(&format!(", {} without MediaURL", r.without_url));
+    }
+    if !r.files_skipped.is_empty() {
+        line.push_str(&format!(
+            ", {} non-NDJSON data files not read",
+            r.files_skipped.len()
+        ));
+    }
+    line
 }
 
 // ---------------------------------------------------------------- discover
