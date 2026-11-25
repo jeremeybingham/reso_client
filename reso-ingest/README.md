@@ -1,7 +1,8 @@
 # reso-ingest
 
 Pulls every resource from one or more [RESO Web API](https://www.reso.org/reso-web-api/) servers into files, keeps
-them current with incremental runs, and records deletes. Built on [`reso-client`](../README.md).
+them current with incremental runs, records deletes, and downloads the photos and documents that `Media` records
+point at. Built on [`reso-client`](../README.md).
 
 Status: in this repository only (`publish = false`, version 0.0.1). Checked end to end against RESO's reference server
 run locally; not yet run against a vendor server
@@ -41,8 +42,8 @@ max_concurrent_servers = 2          # default 4
 [[server]]
 name = "mls-one"
 base_url = "https://api.mls-one.example/odata"
-include = ["Property", "Member", "Office"]   # empty or absent: every resource
-exclude = ["Media"]
+include = ["Property", "Member", "Office", "Media"]   # empty or absent: every resource
+exclude = ["OpenHouse"]             # wins over include
 
 [server.auth]
 type = "client_credentials"         # or "bearer" with token_env

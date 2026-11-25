@@ -9,12 +9,16 @@
 //! A file that contains a literal secret is rejected.
 //!
 //! Output goes through [`RecordWriter`]; [`NdjsonWriter`] writes one tagged line per record, rotating
-//! files by size (with the `parquet` feature, `ParquetWriter` writes the same rows as typed Parquet), and [`RunManifest`] records counts, files, checkpoints and errors for the run.
+//! files by size (with the `parquet` feature, `ParquetWriter` writes the same rows as typed
+//! Parquet), and [`RunManifest`] records counts, files, checkpoints and errors for the run.
 //! [`pull_resource`] streams one resource into a writer; [`sync_resource`] does it incrementally, saving
 //! a JSON checkpoint ([`CheckpointStore`]) after each batch is written so the next run, or a rerun after
 //! a crash, continues from there.
 //! [`reconcile_deletes`] finds records that left a server's feed, from its event resource ([`EventFeed`])
 //! when it has one, otherwise by comparing key sets, and writes them as delete events.
+//! [`sync_media`] downloads the files that synced `Media` records point at (NDJSON output only),
+//! keeping a [`MediaIndex`] per server so later runs fetch only new and changed files, and writes a
+//! [`MediaManifest`] for the run. Downloads use their own limits ([`MediaConfig`]).
 //!
 //! # Examples
 //!
