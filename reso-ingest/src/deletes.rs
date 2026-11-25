@@ -228,7 +228,7 @@ async fn by_key_diff(
     store: &CheckpointStore,
 ) -> Outcome {
     let (resource, key_field) = (target.resource, target.key_field);
-    let previous = store.load_keys(server, resource).map_err(text)?;
+    let previous = store.load_keys(server, resource).await.map_err(text)?;
 
     // Pull every key first; nothing is decided until the whole pull has succeeded.
     let query = target
@@ -277,7 +277,10 @@ async fn by_key_diff(
         emit(writer, &deleted)?;
     }
     let keys: Vec<Value> = current.into_values().collect();
-    store.save_keys(server, resource, &keys).map_err(text)?;
+    store
+        .save_keys(server, resource, &keys)
+        .await
+        .map_err(text)?;
     Ok(Pass::Written(deleted.len() as u64))
 }
 
@@ -291,7 +294,11 @@ async fn by_events(
 ) -> Outcome {
     let resource = target.resource;
     let seq = feed.sequence_field.as_str();
-    let Some(after) = store.load_event_sequence(server, resource).map_err(text)? else {
+    let Some(after) = store
+        .load_event_sequence(server, resource)
+        .await
+        .map_err(text)?
+    else {
         // First call: remember where the feed is now; earlier events are already in the full load.
         let query = QueryBuilder::new(&feed.resource)
             .select(&[seq])
@@ -303,6 +310,7 @@ async fn by_events(
         let newest = page.records.iter().filter_map(|r| r[seq].as_i64()).max();
         store
             .save_event_sequence(server, resource, newest.unwrap_or(0))
+            .await
             .map_err(text)?;
         return Ok(Pass::Written(0));
     };
@@ -351,6 +359,7 @@ async fn by_events(
     emit(writer, &deleted)?;
     store
         .save_event_sequence(server, resource, newest)
+        .await
         .map_err(text)?;
     Ok(Pass::Written(deleted.len() as u64))
 }

@@ -1,14 +1,12 @@
 //! Leases: one writer per (server, resource) feed
 //!
 //! Two `reso-ingest` processes syncing the same feed would read the same checkpoint and key set and
-//! the last writer would win. A [`Lease`] is a lock file next to the checkpoints; it records the
-//! holder (process id, host) and an expiry that a background task keeps pushing forward while the
-//! holder is alive. A holder that crashes stops renewing, so its lease expires and the next process
-//! takes the feed over.
+//! the last writer would win. A [`Lease`] is a value in the state store next to the checkpoints
+//! ([`StateStore`]); it records the holder (process id, host) and an expiry that a background task
+//! keeps pushing forward while the holder is alive. A holder that crashes stops renewing, so its
+//! lease expires and the next process takes the feed over. Taking, renewing and releasing use the
+//! store's conditional writes, so a lease is as strong as the backend's (see [`FileStateStore`](crate::FileStateStore)).
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,7 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
+use crate::checkpoint::sanitize;
 use crate::error::IngestError;
+use crate::state::{invalid, StateStore, Versioned};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct LeaseFile {
@@ -56,46 +56,10 @@ impl std::fmt::Display for LeaseHolder {
 /// The result of asking for a lease
 #[derive(Debug)]
 pub enum LeaseOutcome {
-    /// The caller holds the feed until the [`Lease`] is dropped
+    /// The caller holds the feed until the [`Lease`] is released or dropped
     Acquired(Lease),
     /// Another live process holds it
     Held(LeaseHolder),
-}
-
-/// A lease on one (server, resource) feed, released when dropped
-///
-/// A file in the state directory (`{server}.{resource}.lock`) holds the process id, host and expiry.
-/// While the value lives, a background task renews the expiry every third of the time-to-live; if
-/// the process dies the file is left behind and is taken over once it has expired. Taking over an
-/// expired lease is not atomic against another process doing the same at the same instant (a window
-/// of a few microseconds); the loser notices at the next renewal, see [`is_lost`](Self::is_lost).
-/// The lock works between processes that share the state directory on a local disk; shared
-/// backends are a later step (#85).
-///
-/// # Examples
-///
-/// ```
-/// # async fn demo() -> Result<(), reso_ingest::IngestError> {
-/// use std::time::Duration;
-/// use reso_ingest::{Lease, LeaseOutcome};
-///
-/// let dir = std::env::temp_dir().join(format!("reso-ingest-lease-doc-{}", std::process::id()));
-/// let ttl = Duration::from_secs(60);
-/// let LeaseOutcome::Acquired(lease) = Lease::acquire(&dir, "mls", "Property", ttl)? else {
-///     return Ok(()); // someone else is syncing this feed
-/// };
-/// // a second request for the same feed is refused while `lease` lives
-/// assert!(matches!(Lease::acquire(&dir, "mls", "Property", ttl)?, LeaseOutcome::Held(_)));
-/// drop(lease);
-/// # let _ = std::fs::remove_dir_all(&dir);
-/// # Ok(()) }
-/// ```
-#[derive(Debug)]
-pub struct Lease {
-    path: PathBuf,
-    token: String,
-    lost: Arc<AtomicBool>,
-    heartbeat: JoinHandle<()>,
 }
 
 fn now_secs() -> u64 {
@@ -105,7 +69,7 @@ fn now_secs() -> u64 {
 }
 
 fn host_name() -> String {
-    fs::read_to_string("/proc/sys/kernel/hostname")
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -120,32 +84,6 @@ fn new_token() -> String {
     format!("{}-{nanos}", std::process::id())
 }
 
-fn io_err(path: &Path, e: impl std::fmt::Display) -> IngestError {
-    IngestError::Output {
-        path: path.display().to_string(),
-        message: e.to_string(),
-    }
-}
-
-fn read(path: &Path) -> Result<Option<LeaseFile>, IngestError> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(serde_json::from_str(&text).ok()), // an unreadable body counts as stale
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(io_err(path, e)),
-    }
-}
-
-/// Write a temporary file next to `path` and rename it over, so a reader never sees half a file
-fn replace(path: &Path, lease: &LeaseFile) -> Result<(), IngestError> {
-    let tmp = path.with_extension(format!("lock.{}.tmp", lease.token));
-    let body = serde_json::to_vec(lease).map_err(|e| io_err(path, e))?;
-    fs::write(&tmp, body).map_err(|e| io_err(&tmp, e))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        io_err(path, e)
-    })
-}
-
 fn holder(f: LeaseFile) -> LeaseOutcome {
     LeaseOutcome::Held(LeaseHolder {
         pid: f.pid,
@@ -154,28 +92,70 @@ fn holder(f: LeaseFile) -> LeaseOutcome {
     })
 }
 
+/// The lease in a stored value; `None` when the bytes are not a lease (counted as stale)
+fn parse(v: &Versioned) -> Option<LeaseFile> {
+    serde_json::from_slice(&v.bytes).ok()
+}
+
+fn encode(store: &dyn StateStore, key: &str, lease: &LeaseFile) -> Result<Vec<u8>, IngestError> {
+    serde_json::to_vec(lease).map_err(|e| invalid(store, key, e.to_string()))
+}
+
+/// A lease on one (server, resource) feed
+///
+/// The value `{server}.{resource}.lock` in the state store holds the process id, host and expiry.
+/// While the lease lives, a background task renews the expiry every third of the time-to-live; if
+/// the process dies the value is left behind and is taken over once it has expired. Call
+/// [`release`](Self::release) when done; dropping the lease instead stops the renewal and releases
+/// it in the background. With a [`FileStateStore`](crate::FileStateStore), taking over an expired lease is not atomic
+/// against another process doing the same at the same instant (a window of a few microseconds); the
+/// loser notices at the next renewal, see [`is_lost`](Self::is_lost).
+///
+/// # Examples
+///
+/// ```
+/// # async fn demo() -> Result<(), reso_ingest::IngestError> {
+/// use std::sync::Arc;
+/// use std::time::Duration;
+/// use reso_ingest::{FileStateStore, Lease, LeaseOutcome, StateStore};
+///
+/// let dir = std::env::temp_dir().join(format!("reso-ingest-lease-doc-{}", std::process::id()));
+/// let store: Arc<dyn StateStore> = Arc::new(FileStateStore::new(&dir));
+/// let ttl = Duration::from_secs(60);
+/// let LeaseOutcome::Acquired(lease) = Lease::acquire(&store, "mls", "Property", ttl).await? else {
+///     return Ok(()); // someone else is syncing this feed
+/// };
+/// // a second request for the same feed is refused while `lease` lives
+/// assert!(matches!(Lease::acquire(&store, "mls", "Property", ttl).await?, LeaseOutcome::Held(_)));
+/// lease.release().await;
+/// # let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(()) }
+/// ```
+#[derive(Debug)]
+pub struct Lease {
+    store: Arc<dyn StateStore>,
+    key: String,
+    token: String,
+    lost: Arc<AtomicBool>,
+    heartbeat: Option<JoinHandle<()>>,
+}
+
 impl Lease {
     /// Take the lease on `server`/`resource`, or report who holds it
     ///
     /// `ttl` is how long the lease lasts without renewal; a crashed holder blocks the feed for at
-    /// most that long. The state directory is created when missing. Call it from inside a tokio
-    /// runtime (the renewal task is spawned on it).
+    /// most that long. Call it from inside a tokio runtime (the renewal task is spawned on it).
     ///
     /// # Errors
     ///
-    /// [`IngestError::Output`] when the lock file cannot be read or written.
-    pub fn acquire(
-        dir: &Path,
+    /// [`IngestError::Output`] when the store cannot be read or written.
+    pub async fn acquire(
+        store: &Arc<dyn StateStore>,
         server: &str,
         resource: &str,
         ttl: Duration,
     ) -> Result<LeaseOutcome, IngestError> {
-        fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-        let path = dir.join(format!(
-            "{}.{}.lock",
-            crate::checkpoint::sanitize(server),
-            crate::checkpoint::sanitize(resource)
-        ));
+        let key = format!("{}.{}.lock", sanitize(server), sanitize(resource));
         let mine = LeaseFile {
             server: server.into(),
             resource: resource.into(),
@@ -184,74 +164,75 @@ impl Lease {
             token: new_token(),
             expires_at: now_secs() + ttl.as_secs().max(1),
         };
-        let body = serde_json::to_vec(&mine).map_err(|e| io_err(&path, e))?;
+        let body = encode(store.as_ref(), &key, &mine)?;
         // Two tries: the second one follows removing a stale lease
         for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut f) => {
-                    f.write_all(&body)
-                        .and_then(|()| f.sync_all())
-                        .map_err(|e| io_err(&path, e))?;
-                    return Ok(LeaseOutcome::Acquired(Self::start(path, mine, ttl)));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(io_err(&path, e)),
+            if store.create(&key, &body).await? {
+                let lease = Self::start(Arc::clone(store), key, mine, ttl);
+                return Ok(LeaseOutcome::Acquired(lease));
             }
-            match read(&path)? {
+            let Some(found) = store.get(&key).await? else {
+                continue; // released in between
+            };
+            match parse(&found) {
                 Some(held) if held.expires_at > now_secs() => return Ok(holder(held)),
-                stale => {
-                    // Expired or unreadable: remove it only if it is still the one judged stale
-                    if read(&path)? == stale {
-                        match fs::remove_file(&path) {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(e) => return Err(io_err(&path, e)),
-                        }
-                    }
+                // Expired or unreadable: remove it only if it is still the one judged stale
+                _ => {
+                    store.delete(&key, Some(&found.version)).await?;
                 }
             }
         }
         // Lost the race for the stale lease to another process, which is now the holder
-        match read(&path)? {
+        match store.get(&key).await?.as_ref().and_then(parse) {
             Some(held) => Ok(holder(held)),
-            None => Err(io_err(&path, "could not take the lease")),
+            None => Err(invalid(
+                store.as_ref(),
+                &key,
+                "could not take the lease".into(),
+            )),
         }
     }
 
-    fn start(path: PathBuf, mut file: LeaseFile, ttl: Duration) -> Self {
+    fn start(store: Arc<dyn StateStore>, key: String, mut file: LeaseFile, ttl: Duration) -> Self {
         let lost = Arc::new(AtomicBool::new(false));
         let token = file.token.clone();
         let heartbeat = {
-            let (path, lost) = (path.clone(), Arc::clone(&lost));
+            let (store, key, lost) = (Arc::clone(&store), key.clone(), Arc::clone(&lost));
             let every = (ttl / 3).max(Duration::from_secs(1));
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(every).await;
-                    // Renew only while the file is still ours
-                    match read(&path) {
-                        Ok(Some(f)) if f.token == file.token => {}
+                    // Renew only while the value is still ours
+                    let found = match store.get(&key).await {
+                        Ok(Some(v)) if parse(&v).is_some_and(|f| f.token == file.token) => v,
                         Ok(_) => {
                             lost.store(true, Ordering::SeqCst);
-                            tracing::warn!(path = %path.display(), "lease lost: another process took the feed");
+                            tracing::warn!(lease = %store.location(&key), "lease lost: another process took the feed");
                             return;
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "cannot read the lease file; will retry");
+                            tracing::warn!(error = %e, "cannot read the lease; will retry");
                             continue;
                         }
-                    }
+                    };
                     file.expires_at = now_secs() + ttl.as_secs().max(1);
-                    if let Err(e) = replace(&path, &file) {
+                    let renewed = match encode(store.as_ref(), &key, &file) {
+                        Ok(body) => store.replace(&key, &body, &found.version).await,
+                        Err(e) => Err(e),
+                    };
+                    // `Ok(false)`: changed since it was read; the next round finds out by whom
+                    if let Err(e) = renewed {
                         tracing::warn!(error = %e, "cannot renew the lease; will retry");
                     }
                 }
             })
         };
         Self {
-            path,
+            store,
+            key,
             token,
             lost,
-            heartbeat,
+            heartbeat: Some(heartbeat),
         }
     }
 
@@ -259,14 +240,42 @@ impl Lease {
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::SeqCst)
     }
+
+    /// Stop renewing and remove the lease if it is still ours
+    ///
+    /// A failure is logged, not returned: the lease then runs out on its own.
+    pub async fn release(mut self) {
+        if let Some(h) = self.heartbeat.take() {
+            h.abort();
+        }
+        release(&self.store, &self.key, &self.token).await;
+    }
+}
+
+async fn release(store: &Arc<dyn StateStore>, key: &str, token: &str) {
+    let result = match store.get(key).await {
+        Ok(Some(v)) if parse(&v).is_some_and(|f| f.token == token) => {
+            store.delete(key, Some(&v.version)).await.map(|_| ())
+        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = %e, "cannot release the lease; it runs out on its own");
+    }
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.heartbeat.abort();
-        // Remove the file only when it is still ours
-        if matches!(read(&self.path), Ok(Some(f)) if f.token == self.token) {
-            let _ = fs::remove_file(&self.path);
+        let Some(heartbeat) = self.heartbeat.take() else {
+            return; // released
+        };
+        heartbeat.abort();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let store = Arc::clone(&self.store);
+            let key = std::mem::take(&mut self.key);
+            let token = std::mem::take(&mut self.token);
+            rt.spawn(async move { release(&store, &key, &token).await });
         }
     }
 }
@@ -274,42 +283,65 @@ impl Drop for Lease {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::FileStateStore;
 
-    fn tmp(name: &str) -> PathBuf {
+    fn store(name: &str) -> (std::path::PathBuf, Arc<dyn StateStore>) {
         let d = std::env::temp_dir().join(format!("lease-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        d
+        let _ = std::fs::remove_dir_all(&d);
+        (d.clone(), Arc::new(FileStateStore::new(&d)))
+    }
+
+    async fn stored(store: &Arc<dyn StateStore>, key: &str) -> LeaseFile {
+        parse(&store.get(key).await.unwrap().unwrap()).unwrap()
     }
 
     const TTL: Duration = Duration::from_secs(60);
 
     #[tokio::test]
     async fn second_request_is_held_until_release() {
-        let dir = tmp("held");
-        let LeaseOutcome::Acquired(a) = Lease::acquire(&dir, "s", "R", TTL).unwrap() else {
+        let (dir, s) = store("held");
+        let LeaseOutcome::Acquired(a) = Lease::acquire(&s, "s", "R", TTL).await.unwrap() else {
             panic!("first must acquire");
         };
-        let LeaseOutcome::Held(h) = Lease::acquire(&dir, "s", "R", TTL).unwrap() else {
+        let LeaseOutcome::Held(h) = Lease::acquire(&s, "s", "R", TTL).await.unwrap() else {
             panic!("second must be held");
         };
         assert_eq!(h.pid, std::process::id());
         // another feed is independent
         assert!(matches!(
-            Lease::acquire(&dir, "s", "Other", TTL).unwrap(),
+            Lease::acquire(&s, "s", "Other", TTL).await.unwrap(),
             LeaseOutcome::Acquired(_)
         ));
-        drop(a);
+        a.release().await;
         assert!(matches!(
-            Lease::acquire(&dir, "s", "R", TTL).unwrap(),
+            Lease::acquire(&s, "s", "R", TTL).await.unwrap(),
             LeaseOutcome::Acquired(_)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dropping_releases_in_the_background() {
+        let (dir, s) = store("drop");
+        let LeaseOutcome::Acquired(a) = Lease::acquire(&s, "s", "R", TTL).await.unwrap() else {
+            panic!("first must acquire");
+        };
+        drop(a);
+        let mut released = false;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if s.get("s.R.lock").await.unwrap().is_none() {
+                released = true;
+                break;
+            }
+        }
+        assert!(released, "the lease value should be removed after a drop");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn crashed_holders_lease_expires() {
-        let dir = tmp("stale");
-        fs::create_dir_all(&dir).unwrap();
+        let (dir, s) = store("stale");
         let stale = LeaseFile {
             server: "s".into(),
             resource: "R".into(),
@@ -318,45 +350,67 @@ mod tests {
             token: "dead".into(),
             expires_at: now_secs() - 5,
         };
-        fs::write(dir.join("s.R.lock"), serde_json::to_vec(&stale).unwrap()).unwrap();
+        s.put("s.R.lock", &serde_json::to_vec(&stale).unwrap())
+            .await
+            .unwrap();
         assert!(matches!(
-            Lease::acquire(&dir, "s", "R", TTL).unwrap(),
+            Lease::acquire(&s, "s", "R", TTL).await.unwrap(),
             LeaseOutcome::Acquired(_)
         ));
-        // a lock file whose body is not a lease is treated as stale too
-        fs::write(dir.join("s.Q.lock"), b"garbage").unwrap();
+        // a lock whose body is not a lease is treated as stale too
+        s.put("s.Q.lock", b"garbage").await.unwrap();
         assert!(matches!(
-            Lease::acquire(&dir, "s", "Q", TTL).unwrap(),
+            Lease::acquire(&s, "s", "Q", TTL).await.unwrap(),
             LeaseOutcome::Acquired(_)
         ));
-        let _ = fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(start_paused = true)]
     async fn live_holder_renews_and_keeps_the_feed() {
-        let dir = tmp("renew");
+        let (dir, s) = store("renew");
         let ttl = Duration::from_secs(3);
-        let LeaseOutcome::Acquired(a) = Lease::acquire(&dir, "s", "R", ttl).unwrap() else {
+        let LeaseOutcome::Acquired(a) = Lease::acquire(&s, "s", "R", ttl).await.unwrap() else {
             panic!("first must acquire");
         };
-        let before = read(&dir.join("s.R.lock")).unwrap().unwrap().expires_at;
+        let before = stored(&s, "s.R.lock").await.expires_at;
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let after = read(&dir.join("s.R.lock")).unwrap().unwrap().expires_at;
+        let after = stored(&s, "s.R.lock").await.expires_at;
         assert!(after >= before);
         assert!(!a.is_lost());
-        drop(a);
-        let _ = fs::remove_dir_all(&dir);
+        a.release().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_holder_whose_lease_was_taken_notices() {
+        let (dir, s) = store("lost");
+        let ttl = Duration::from_secs(3);
+        let LeaseOutcome::Acquired(a) = Lease::acquire(&s, "s", "R", ttl).await.unwrap() else {
+            panic!("first must acquire");
+        };
+        let mut other = stored(&s, "s.R.lock").await;
+        other.token = "other".into();
+        s.put("s.R.lock", &serde_json::to_vec(&other).unwrap())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(a.is_lost());
+        // releasing leaves the other holder's lease alone
+        a.release().await;
+        assert_eq!(stored(&s, "s.R.lock").await.token, "other");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn concurrent_acquires_have_one_winner() {
-        let dir = tmp("race");
+        let (dir, s) = store("race");
         let mut tasks = Vec::new();
         for _ in 0..8 {
-            let dir = dir.clone();
-            tasks.push(tokio::spawn(
-                async move { Lease::acquire(&dir, "s", "R", TTL) },
-            ));
+            let s = Arc::clone(&s);
+            tasks.push(tokio::spawn(async move {
+                Lease::acquire(&s, "s", "R", TTL).await
+            }));
         }
         let mut held = 0;
         let mut keep = Vec::new();
@@ -369,6 +423,6 @@ mod tests {
         assert_eq!(keep.len(), 1);
         assert_eq!(held, 7);
         drop(keep);
-        let _ = fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

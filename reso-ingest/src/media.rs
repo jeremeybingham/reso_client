@@ -3,7 +3,7 @@
 //! [`sync_media`] reads the NDJSON data files of the `Media` resource that the run manifests in
 //! the output directory list, keeps the newest record per `MediaKey`, and downloads each new or
 //! changed `MediaURL` with a [`Downloader`] (its own retry, rate limit and token rule). A
-//! per-server [`MediaIndex`] in `<state>/media/<server>.json` records which data files were read
+//! per-server [`MediaIndex`] (state store key `media/<server>.json`) records which data files were read
 //! and what each file was saved from, so a run only downloads what changed and picks up failed
 //! files again.
 //!
@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use reso_client::{DownloadConfig, DownloadOutcome, ResoClient, Validators};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,7 @@ use serde_json::Value;
 
 use crate::error::IngestError;
 use crate::output::now_rfc3339;
+use crate::state::{invalid, StateStore};
 
 /// The resource whose records point at files
 pub const MEDIA_RESOURCE: &str = "Media";
@@ -67,40 +69,37 @@ pub struct MediaIndex {
 }
 
 impl MediaIndex {
-    /// The index file of `server` under `state`
-    pub fn path(state: &Path, server: &str) -> PathBuf {
-        state
-            .join("media")
-            .join(format!("{}.json", encode_name(server)))
+    /// The state store key of `server`'s index: `media/<server>.json` (with a
+    /// [`FileStateStore`](crate::FileStateStore), the file `<state>/media/<server>.json`)
+    pub fn key(server: &str) -> String {
+        format!("media/{}.json", encode_name(server))
     }
 
-    /// Load the index, or an empty one when there is no file yet
+    /// Load the index of `server`, or an empty one when there is none yet
     ///
     /// # Errors
     ///
-    /// [`IngestError::Output`] when the file is unreadable or not a valid index (a damaged index
+    /// [`IngestError::Output`] when the value is unreadable or not a valid index (a damaged index
     /// is an error, not a fresh start, so it never triggers a full re-download silently).
-    pub fn load(path: &Path) -> Result<Self, IngestError> {
-        match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| output_error(path, e)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(output_error(path, e.kind())),
+    pub async fn load(store: &dyn StateStore, server: &str) -> Result<Self, IngestError> {
+        let key = Self::key(server);
+        match store.get(&key).await? {
+            Some(v) => {
+                serde_json::from_slice(&v.bytes).map_err(|e| invalid(store, &key, e.to_string()))
+            }
+            None => Ok(Self::default()),
         }
     }
 
-    /// Write the index (to a temporary file, then renamed over the old one)
+    /// Save the index of `server`, replacing the old one whole
     ///
     /// # Errors
     ///
-    /// [`IngestError::Output`] when the file cannot be written.
-    pub fn save(&self, path: &Path) -> Result<(), IngestError> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(|e| output_error(dir, e.kind()))?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let text = serde_json::to_string(self).map_err(|e| output_error(path, e))?;
-        fs::write(&tmp, text).map_err(|e| output_error(&tmp, e.kind()))?;
-        fs::rename(&tmp, path).map_err(|e| output_error(path, e.kind()))
+    /// [`IngestError::Output`] when the value cannot be written.
+    pub async fn save(&self, store: &dyn StateStore, server: &str) -> Result<(), IngestError> {
+        let key = Self::key(server);
+        let text = serde_json::to_string(self).map_err(|e| invalid(store, &key, e.to_string()))?;
+        store.put(&key, text.as_bytes()).await
     }
 
     /// Take in one `Media` record; returns `false` when it has no `MediaKey`
@@ -158,7 +157,8 @@ pub const DEFAULT_NESTED_FIELD: &str = "Media";
 pub struct PageMedia<'a> {
     nested_field: String,
     dir: PathBuf,
-    index_path: PathBuf,
+    store: Arc<dyn StateStore>,
+    server: String,
     index: MediaIndex,
     downloader: reso_client::Downloader<'a>,
     report: MediaReport,
@@ -170,24 +170,24 @@ impl<'a> PageMedia<'a> {
     /// # Errors
     ///
     /// [`IngestError::Output`] when the index is unreadable or the HTTP client cannot be built.
-    pub fn new(
+    pub async fn new(
         client: &'a ResoClient,
         server: &str,
         download: DownloadConfig,
-        state: &Path,
+        state: Arc<dyn StateStore>,
         media_dir: &Path,
         nested_field: Option<&str>,
     ) -> Result<Self, IngestError> {
-        let index_path = MediaIndex::path(state, server);
         let dir = media_dir.join(encode_name(server));
-        let index = MediaIndex::load(&index_path)?;
+        let index = MediaIndex::load(state.as_ref(), server).await?;
         let downloader = client
             .downloader(download)
             .map_err(|e| output_error(&dir, e))?;
         Ok(Self {
             nested_field: nested_field.unwrap_or(DEFAULT_NESTED_FIELD).to_string(),
             dir,
-            index_path,
+            store: state,
+            server: server.to_string(),
             index,
             downloader,
             report: MediaReport {
@@ -231,7 +231,7 @@ impl<'a> PageMedia<'a> {
             }
             download_one(&self.downloader, &self.dir, &key, entry, &mut self.report).await;
         }
-        self.index.save(&self.index_path)
+        self.index.save(self.store.as_ref(), &self.server).await
     }
 
     /// Final report: files still pending (their records were not seen again) and bytes
@@ -252,8 +252,8 @@ impl<'a> PageMedia<'a> {
 pub struct MediaOptions {
     /// The `sync` output directory: manifests and data files
     pub out: PathBuf,
-    /// The state directory; the index goes in `<state>/media/`
-    pub state: PathBuf,
+    /// The state store; the index of each server is under `media/` (see [`MediaIndex::key`])
+    pub state: Arc<dyn StateStore>,
     /// Files go in `<media_dir>/<server>/`
     pub media_dir: PathBuf,
     /// Most downloads per server in this run (`None` = all)
@@ -349,8 +349,8 @@ async fn run(
     progress: &impl Fn(String),
     report: &mut MediaReport,
 ) -> Result<(), IngestError> {
-    let index_path = MediaIndex::path(&options.state, server);
-    let mut index = MediaIndex::load(&index_path)?;
+    let store = options.state.as_ref();
+    let mut index = MediaIndex::load(store, server).await?;
     let dir = options.media_dir.join(encode_name(server));
 
     // 1. Read the Media data files not read before, oldest run first
@@ -366,7 +366,7 @@ async fn run(
         index.read_files.insert(name);
         report.files_read += 1;
     }
-    index.save(&index_path)?;
+    index.save(store, server).await?;
 
     // 2. Download what is pending
     let mut todo: Vec<String> = Vec::new();
@@ -398,7 +398,7 @@ async fn run(
         };
         download_one(&downloader, &dir, key, entry, report).await;
         if (i as u64 + 1).is_multiple_of(SAVE_EVERY) {
-            index.save(&index_path)?;
+            index.save(store, server).await?;
         }
     }
     report.bytes = downloader.stats().bytes;
@@ -407,7 +407,7 @@ async fn run(
         .values()
         .filter(|e| e.pending && e.url.is_some())
         .count() as u64;
-    index.save(&index_path)
+    index.save(store, server).await
 }
 
 async fn download_one(

@@ -139,7 +139,7 @@ async fn second_run_pulls_only_newer_records() {
     assert_eq!(e1.error, None);
     assert_eq!(e1.records, 5);
     assert_eq!(
-        store.load("mls", "Property").unwrap().unwrap().key,
+        store.load("mls", "Property").await.unwrap().unwrap().key,
         Some(json!("K5"))
     );
 
@@ -219,7 +219,7 @@ async fn failed_write_never_advances_the_checkpoint_and_rerun_loses_nothing() {
     )
     .await;
     assert!(e.error.unwrap().contains("disk full"));
-    let cp = store.load("mls", "Property").unwrap().unwrap();
+    let cp = store.load("mls", "Property").await.unwrap().unwrap();
     assert_eq!(
         cp.key,
         Some(json!("K2")),
@@ -298,25 +298,38 @@ async fn damaged_checkpoint_is_an_error_not_a_full_reload() {
     assert_eq!(e.records, 0);
 }
 
-#[test]
-fn store_is_per_server_and_resource_and_leaves_no_temp_file() {
+#[tokio::test]
+async fn store_is_per_server_and_resource_and_leaves_no_temp_file() {
     let dir = TempDir::new("store");
     let store = CheckpointStore::new(&dir.0);
     store
         .save("a", "Property", &Checkpoint::new("t1", json!("K1")))
+        .await
         .unwrap();
-    store.save("b", "Property", &Checkpoint::at("t2")).unwrap();
+    store
+        .save("b", "Property", &Checkpoint::at("t2"))
+        .await
+        .unwrap();
     assert_eq!(
-        store.load("a", "Property").unwrap().unwrap().timestamp,
+        store
+            .load("a", "Property")
+            .await
+            .unwrap()
+            .unwrap()
+            .timestamp,
         "t1"
     );
-    assert_eq!(store.load("b", "Property").unwrap().unwrap().key, None);
-    assert!(store.load("a", "Member").unwrap().is_none());
+    assert_eq!(
+        store.load("b", "Property").await.unwrap().unwrap().key,
+        None
+    );
+    assert!(store.load("a", "Member").await.unwrap().is_none());
     store
         .save("a", "Property", &Checkpoint::new("t3", json!(7)))
+        .await
         .unwrap();
     assert_eq!(
-        store.load("a", "Property").unwrap().unwrap().key,
+        store.load("a", "Property").await.unwrap().unwrap().key,
         Some(json!(7))
     );
     let tmp = std::fs::read_dir(&dir.0)
@@ -330,9 +343,9 @@ fn store_is_per_server_and_resource_and_leaves_no_temp_file() {
         })
         .count();
     assert_eq!(tmp, 0);
-    store.clear("a", "Property").unwrap();
-    store.clear("a", "Property").unwrap();
-    assert!(store.load("a", "Property").unwrap().is_none());
+    store.clear("a", "Property").await.unwrap();
+    store.clear("a", "Property").await.unwrap();
+    assert!(store.load("a", "Property").await.unwrap().is_none());
 }
 
 /// Parquet keeps one file open across pages, so checkpoints wait for the file to finish
@@ -413,7 +426,7 @@ mod parquet_sync {
         assert_eq!(e.error, None);
         assert_eq!(e.records, 5);
         assert_eq!(rows_per_file(&out), [5]);
-        let cp = store.load("mls", "Property").unwrap().unwrap();
+        let cp = store.load("mls", "Property").await.unwrap().unwrap();
         assert_eq!(cp.key, Some(json!("K5")));
     }
 
@@ -438,7 +451,7 @@ mod parquet_sync {
         assert_eq!(e.error, None);
         assert_eq!(rows_per_file(&out), [2, 2, 1]);
         assert_eq!(
-            store.load("mls", "Property").unwrap().unwrap().key,
+            store.load("mls", "Property").await.unwrap().unwrap().key,
             Some(json!("K5"))
         );
     }
@@ -502,7 +515,7 @@ mod parquet_sync {
         assert_eq!(rows_per_file(&out), [2]);
         assert_eq!(part_files(&out), 0);
         assert_eq!(
-            store.load("mls", "Property").unwrap().unwrap().key,
+            store.load("mls", "Property").await.unwrap().unwrap().key,
             Some(json!("K2"))
         );
 
@@ -540,6 +553,6 @@ mod parquet_sync {
         drop(w);
         assert_eq!(rows_per_file(&out), Vec::<i64>::new());
         assert_eq!(part_files(&out), 1);
-        assert!(store.load("mls", "Property").unwrap().is_none());
+        assert!(store.load("mls", "Property").await.unwrap().is_none());
     }
 }

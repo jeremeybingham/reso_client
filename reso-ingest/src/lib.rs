@@ -71,6 +71,7 @@ mod parquet_out;
 mod runner;
 mod serve;
 mod shutdown;
+mod state;
 mod webhook;
 
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
@@ -98,4 +99,5 @@ pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};
 pub use serve::{Daemon, ServeOptions};
 pub use shutdown::Shutdown;
+pub use state::{FileStateStore, StateStore, StoreFuture, Versioned};
 pub use webhook::{post_summary, run_summary};

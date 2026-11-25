@@ -213,7 +213,12 @@ In `--out` (default `reso-out`):
   every 100 seconds and removed when the sync ends). A second `sync` on the same state directory skips that feed with a
   warning in the manifest and log (`skipped: another process is syncing this feed`), without failing the run. After a
   crash the lease runs out in at most 5 minutes, then the next run takes the feed over. It works for processes that share
-  the state directory on a local disk; `media` does not take leases yet. Shared backends are #85.
+  the state directory on a local disk; `media` does not take leases yet.
+
+All of `state/` goes through one key-value interface, `StateStore` (get, put, create-if-absent, replace-if-unchanged,
+delete, list). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
+synced and renamed. A library user can pass another backend (object storage, a database) to `CheckpointStore::with_store`,
+`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85.
 
 ## Daemon mode (`serve`)
 
@@ -254,7 +259,7 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 | Path | Answer |
 |---|---|
 | `/healthz` | `200` while the process is up |
-| `/readyz` | `200` when the state directory can be written, `503` when not (config is read before the server starts, so a bad one never gets this far) |
+| `/readyz` | `200` when state can be saved (a probe key `.readyz` is written and deleted), `503` when not (config is read before the server starts, so a bad one never gets this far) |
 | `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures` and `reso_ingest_feed_interval_seconds` (labels `server`, `resource`) |
 | `/status` | JSON: `started_at` and, per feed, `state` (`waiting`, `queued`, `running`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
 
@@ -387,7 +392,8 @@ The same pieces are public:
   `ResourceConfig`, `DeletesConfig`, `LimitsConfig`, `MediaConfig`.
 - Running: `run_servers` (one task per server, capped), `sync_resource` and `pull_resource` (one resource into a
   `RecordWriter`), `sync_resource_media` (the same with `PageMedia` downloading each page's files), `reserve_run_id`.
-- Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`.
+- Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`, `StateStore` (the state
+  backend interface) and `FileStateStore`, `Lease`.
 - Deletes: `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, `FlagDeleteWriter` (wraps a writer and adds an
   event after each flagged record).
 - Media: `sync_media`, `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `PageMedia`.

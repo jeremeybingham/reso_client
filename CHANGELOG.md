@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` state backends (#85, first part): `StateStore`, an async key-value trait with conditional writes
+  (`get` with a version, `put`, `create`, `replace`, `delete`, `list`; boxed futures, usable as `dyn StateStore`), and
+  `FileStateStore`, today's files behind it (same names and contents). Checkpoints, key sets, event sequences, schema
+  snapshots, leases and the media index all go through it. No new dependencies.
 - Container image and deployment examples (#84): a `Dockerfile` building `reso-ingest` (with `parquet`) as a static
   musl binary on `scratch`, about 20 MB, non-root, read-only root filesystem friendly; `deploy/kubernetes/` (ConfigMap,
   Secret, PVC, CronJob for `sync`, Deployment and Service for `serve` with probes) and `deploy/systemd/` (a hardened
@@ -53,6 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only: `tracing-subscriber` (`fmt`, `json`, `env-filter`).
 
 ### Changed
+- **Breaking (`reso-ingest`, unpublished):** state is async and backend-neutral (#85). `CheckpointStore` methods are
+  `async` and it gains `with_store`/`store`; `Lease::acquire` is `async` and takes `&Arc<dyn StateStore>`, and
+  `Lease::release` (async) is the clean way to end a lease (dropping one still releases it in the background);
+  `MediaIndex::path` is replaced by `MediaIndex::key`, `load`/`save` are `async` and take a `&dyn StateStore`;
+  `MediaOptions.state` and `ServeOptions.state` are `Arc<dyn StateStore>`; `PageMedia::new` is `async`. `/readyz`
+  answers `503 not ready: state cannot be saved` when the probe write fails.
 - `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
   `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
   route, such as the RESO reference server. `Query::to_odata_string()` for count-only queries changes accordingly (#53).
