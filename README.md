@@ -12,8 +12,8 @@ This repository holds two crates:
 
 | Crate | What it is | Status |
 |---|---|---|
-| [`reso-client`](https://crates.io/crates/reso-client) | Async client for one server: queries, standard paging and replication, OAuth2, retries and rate limits, a parsed `$metadata` model | v0.3.0 on crates.io |
-| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection | In this repository only, not published |
+| [`reso-client`](https://crates.io/crates/reso-client) | Async client for one server: queries, standard paging and replication, OAuth2, retries and rate limits, a parsed `$metadata` model, file downloads | v0.3.0 on crates.io |
+| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection, and download the `Media` files they point at | In this repository only, not published |
 
 Together they form an **ingest layer**: they connect to many servers, follow the API's rules, keep each copy current,
 and hand the records over **raw**, tagged with where they came from. Mapping fields, de-duplicating across MLSs,
@@ -116,6 +116,10 @@ What else the client does:
   hour and bytes per day; request counters (`ResoClient::stats`). Off by default.
 - `$metadata` as raw XML (`fetch_metadata`) or a model (`fetch_metadata_model`): entity sets, keys, properties,
   navigation properties, enum types.
+- File downloads (`ResoClient::downloader`): a `Downloader` with its own retries, rate limit, timeout and counters,
+  so `Media` files do not use up the API's budget. Each download is a conditional GET (`ETag`, `Last-Modified`) written
+  to a `.part` file and renamed when complete; the API token goes only to the API's own host unless `SendToken` says
+  otherwise.
 - Bridge Interactive's `/replication` endpoint and `dataset_id` path segment, as a vendor mode.
 - Typed errors (`ResoError`: `Unauthorized`, `RateLimited`, `ODataError`, `Network` and others); secrets are never
   logged and are redacted from `Debug` output.

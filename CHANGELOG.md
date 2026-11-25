@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
   command.
 - README: Data Dictionary 2.1 notes (renamed unit fields, lookup values as strings, `any()` not `has`) (#17).
+- README, AGENTS.md and crate docs describe file downloads (`Downloader`) and `reso-ingest media`; the
+  `reso-ingest` README's configuration example no longer excludes `Media`, which `media` needs synced.
 
 ### reso-ingest (unpublished, in this repository)
 - `reso-ingest media` (#30): downloads the files of the `Media` records that `sync` wrote (NDJSON), into

@@ -4,8 +4,9 @@
 //!
 //! `reso-client` talks to one server: it builds OData queries, follows server-driven paging,
 //! replicates resources the RESO-standard way, authenticates with a bearer token or OAuth2 client
-//! credentials, retries and paces requests, and parses `$metadata`. Records come back as raw
-//! [`serde_json::Value`]s: resource and field names are strings, so any server schema works.
+//! credentials, retries and paces requests, parses `$metadata`, and downloads files such as
+//! `Media` photos. Records come back as raw [`serde_json::Value`]s: resource and field names are
+//! strings, so any server schema works.
 //!
 //! Pulling many servers into files is the job of the `reso-ingest` crate in the same repository.
 //! The crate is pre-1.0; breaking changes are listed in the changelog.
@@ -125,11 +126,34 @@
 //! [`ResoClient::execute_count`] sends `$count=true&$top=0` and reads `@odata.count`, so it
 //! needs only `$count=true` support, not a `/Resource/$count` route.
 //!
+//! # File downloads
+//!
+//! [`ResoClient::downloader`] returns a [`Downloader`] for files such as a `Media` record's
+//! `MediaURL`. It shares the client's token but has its own [`RetryPolicy`], [`RateLimit`] and
+//! timeout ([`DownloadConfig`]), so downloads do not use up the API's budget. Each download is a
+//! conditional GET written to `<dest>.part` and renamed when complete; pass the [`Validators`]
+//! from the last download to get [`DownloadOutcome::NotModified`] for an unchanged file. The token
+//! goes only to the API's own host unless [`SendToken`] says otherwise.
+//!
+//! ```no_run
+//! # use reso_client::{DownloadConfig, DownloadOutcome, ResoClient, Validators};
+//! # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+//! let downloader = client.downloader(DownloadConfig::default())?;
+//! let url = "https://cdn.mls.example/photo/1.jpg";
+//! match downloader.download_to(url, "media/1".as_ref(), &Validators::default()).await? {
+//!     DownloadOutcome::Saved(file) => println!("{} bytes, {:?}", file.bytes, file.etag),
+//!     DownloadOutcome::NotModified => println!("unchanged"),
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Errors
 //!
 //! Every call returns [`ResoError`], so a bad token (`Unauthorized`), a rate limit
 //! (`RateLimited`), a server-side OData error (`ODataError`) and a network fault (`Network`) can
-//! be told apart. The enum is `#[non_exhaustive]`.
+//! be told apart; [`ResoError::Io`] covers files that cannot be written. The enum is
+//! `#[non_exhaustive]`.
 //!
 //! # Server support
 //!
