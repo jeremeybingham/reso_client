@@ -31,7 +31,8 @@ field names are plain strings and records are raw JSON, so any server schema wor
   [#32](https://github.com/jeremeybingham/reso_client/issues/32).
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
 - `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is finished.
-- Media files are not downloaded ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
+- Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output); checked against the
+  reference server's `Media` records, not yet against a vendor's file host (signed URLs, media limits).
 - Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md).
 
 ### Data Dictionary 2.1
@@ -161,11 +162,12 @@ let client = ResoClient::with_config(config)?;
 
 ```sh
 cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server
+cargo run -p reso-ingest -- media --config servers.toml --out data/   # download new and changed Media files
 cargo run -p reso-ingest -- discover --config servers.toml            # each server's $metadata model as JSON
 cargo run -p reso-ingest -- status --out data/                        # checkpoints and the last run
 ```
 
-Configuration, output format, delete detection and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
+Configuration, output format, delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
 
 ## Examples
 
@@ -204,7 +206,7 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 - Run against a vendor server and fix what it shows ([#32](https://github.com/jeremeybingham/reso_client/issues/32)),
   then publish `reso-ingest`.
-- Optional: media download ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
+- Check media download against a vendor's file host (signed URLs, media limits) as part of #32.
 
 The overall plan is tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18).
 

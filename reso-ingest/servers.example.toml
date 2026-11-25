@@ -39,3 +39,10 @@ dataset_id = "ref_data"
 [server.auth]
 type = "bearer"
 token_env = "MLS_TWO_TOKEN"
+
+# Media file downloads (`reso-ingest media`): their own limits, separate from the API's
+[server.media]
+per_second = 4
+bytes_per_day = 50000000000
+timeout_secs = 300
+send_token = "same_host"                     # never, same_host (default) or always

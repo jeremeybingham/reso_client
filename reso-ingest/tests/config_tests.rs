@@ -187,3 +187,26 @@ token_env = "SOME_TOKEN"
     let client = config.servers[0].client_config().unwrap();
     assert_eq!(client.retry.max_retries, 5);
 }
+
+#[test]
+fn media_settings_build_a_download_config() {
+    use reso_client::SendToken;
+    let config = Config::parse(EXAMPLE).unwrap();
+    let two = config.servers[1].media.download_config();
+    assert_eq!(two.rate_limit.per_second, Some(4));
+    assert_eq!(two.timeout, std::time::Duration::from_secs(300));
+    assert_eq!(two.send_token, SendToken::SameHost);
+    assert_eq!(two.retry.max_retries, 5, "the ingest default applies");
+    // A server without [server.media] gets the defaults
+    let one = config.servers[0].media.download_config();
+    assert_eq!(one.rate_limit, reso_client::RateLimit::default());
+    assert_eq!(one.timeout, std::time::Duration::from_secs(120));
+}
+
+#[test]
+fn bad_send_token_is_rejected() {
+    let text = "[[server]]\nname = \"x\"\nbase_url = \"https://a\"\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"T\"\n[server.media]\nsend_token = \"sometimes\"\n";
+    let (server, message) = server_error(text);
+    assert_eq!(server, "x");
+    assert!(message.contains("media.send_token"), "{message}");
+}

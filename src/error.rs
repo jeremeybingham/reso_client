@@ -157,6 +157,10 @@ pub enum ResoError {
     /// would not be safe to resume from.
     #[error("Replication order error: {0}")]
     OutOfOrder(String),
+
+    /// A downloaded file could not be written to disk (see [`Downloader`](crate::Downloader))
+    #[error("File error: {0}")]
+    Io(String),
 }
 
 impl ResoError {

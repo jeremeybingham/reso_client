@@ -382,6 +382,16 @@ impl ResoClient {
         self.counters.snapshot()
     }
 
+    /// The token provider, shared with a [`Downloader`](crate::Downloader)
+    pub(crate) fn tokens(&self) -> &TokenProvider {
+        &self.tokens
+    }
+
+    /// The HTTP client used for API and token requests
+    pub(crate) fn http(&self) -> &Client {
+        &self.http_client
+    }
+
     /// Build full URL with optional dataset_id
     ///
     /// Some RESO servers require a dataset ID in the URL path between the base URL
