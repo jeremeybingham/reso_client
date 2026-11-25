@@ -559,12 +559,13 @@ async fn two_serve_workers_share_a_bucket_through_leases() {
                 *most = (*most).max(now);
                 *l.total.entry(resource.into()).or_default() += 1;
             }
-            // The in-flight count drops when the delay is over; close enough for a check of
-            // overlap, which needs two requests inside one 300 ms window
+            // The in-flight count drops 100 ms before the 300 ms response goes out, so a late
+            // timer thread cannot count one worker's next request as an overlap (it did about
+            // once in 20 loaded runs); two workers on one feed still overlap by far more
             let l2 = Arc::clone(&l);
             let r = resource.to_string();
             std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(std::time::Duration::from_millis(200));
                 *l2.lock().unwrap().now.get_mut(&r).unwrap() -= 1;
             });
             let value = if req.url.query_pairs().any(|(k, _)| k == "$filter") {
