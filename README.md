@@ -215,6 +215,7 @@ To run against RESO's reference server started locally (see
 cargo fmt && cargo clippy -- -D warnings   # both crates
 cargo test                                 # unit, wiremock integration and doc tests; offline
 cargo test -p reso-ingest --features parquet
+cargo test -p reso-ingest --features s3   # S3 state store against an in-process fake
 RESO_LIVE_URL=http://localhost:8080 cargo test --test live_reference_server -- --ignored   # local reference server
 ```
 

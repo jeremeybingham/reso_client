@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` S3-compatible state store (#107, first part, feature `s3`): `S3StateStore` and `S3Options` keep state
+  under a bucket prefix on AWS S3, R2, MinIO or GCS (interoperability API), with `create` as `If-None-Match` and
+  `replace` as `If-Match` on the ETag, so leases work across workers. Uses the `object_store` crate (approved);
+  credentials from the standard `AWS_*` environment. The output sink, CLI selection and routing of manifests,
+  media index and metrics through the backends follow in later parts of #107. Unconfirmed against a real bucket
+  (tests use an in-process S3 fake). The feature adds `aws-lc-rs` (C) and a second `reqwest` to the build.
 - `reso-ingest` output sinks (#85, second part): `FileSink` (`put_file`, `exists`) and `LocalDirSink`, with
   `NdjsonWriter::with_sink` and `ParquetWriter::with_sink`. With a sink, the writer stages a file under its directory,
   hands it to the sink when it is full or at `flush`/`finish`, then removes the staged copy; `commit` returns `true`
