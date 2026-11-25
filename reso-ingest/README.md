@@ -218,8 +218,11 @@ In `--out` (default `reso-out`):
 All of `state/` goes through one key-value interface, `StateStore` (get, put, create-if-absent, replace-if-unchanged,
 delete, list). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
 synced and renamed. A library user can pass another backend (object storage, a database) to `CheckpointStore::with_store`,
-`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85; the S3-compatible one (state and
-output, feature `s3`) is #107.
+`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85. With the `s3` feature, `S3StateStore` keeps state as objects under a bucket prefix (AWS S3,
+R2, MinIO, GCS interoperability; version = ETag, `create` and `replace` use `If-None-Match` and `If-Match`; credentials
+from `AWS_ACCESS_KEY_ID` and friends, never the config file; `S3Options.single_delete` for GCS, which has no
+multi-delete). The command does not select it yet; output and the command line follow under #107. Unconfirmed against a
+real bucket.
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
@@ -399,7 +402,7 @@ The same pieces are public:
 - Running: `run_servers` (one task per server, capped), `sync_resource` and `pull_resource` (one resource into a
   `RecordWriter`), `sync_resource_media` (the same with `PageMedia` downloading each page's files), `reserve_run_id`.
 - Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`, `StateStore` (the state
-  backend interface) and `FileStateStore`, `FileSink` and `LocalDirSink` (where finished data files go), `Lease`.
+  backend interface) and `FileStateStore` (and `S3StateStore` with feature `s3`), `FileSink` and `LocalDirSink` (where finished data files go), `Lease`.
 - Deletes: `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, `FlagDeleteWriter` (wraps a writer and adds an
   event after each flagged record).
 - Media: `sync_media`, `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `PageMedia`.
