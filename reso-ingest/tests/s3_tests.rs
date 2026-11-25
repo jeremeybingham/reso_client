@@ -184,3 +184,151 @@ async fn two_workers_hold_different_feeds_and_one_holds_a_feed() {
     );
     assert!(matches!(c, LeaseOutcome::Acquired(_)));
 }
+
+const METADATA: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
+<Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="org.reso.metadata">
+<EntityType Name="Property"><Key><PropertyRef Name="ListingKey"/></Key>
+<Property Name="ListingKey" Type="Edm.String" Nullable="false"/>
+<Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>
+<EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/></EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#;
+
+/// A RESO server with `$metadata` and two `Property` records on one page
+async fn reso_server() -> wiremock::MockServer {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/$metadata"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(METADATA))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .respond_with(|req: &wiremock::Request| {
+            // A filter from the newest record on (the follow-up query) finds nothing new
+            let after_newest = req
+                .url
+                .query_pairs()
+                .any(|(k, v)| k == "$filter" && v.contains("2026-01-01T00:00:02Z"));
+            let value = if after_newest {
+                serde_json::json!([])
+            } else {
+                serde_json::json!([
+                    {"ListingKey": "K1", "ModificationTimestamp": "2026-01-01T00:00:01Z"},
+                    {"ListingKey": "K2", "ModificationTimestamp": "2026-01-01T00:00:02Z"}
+                ])
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value }))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn cli(args: &[String]) -> (i32, String, String) {
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = reso_ingest::cli::run(args, &mut out, &mut err).await;
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+fn local_names(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_keeps_manifests_and_last_run_in_the_bucket() {
+    set_credentials();
+    std::env::set_var("S3_CLI_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3().await;
+    let reso = reso_server().await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_CLI_TEST_TOKEN\"\n",
+            reso.uri()
+        ),
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let bucket = [
+        "--out",
+        out.to_str().unwrap(),
+        "--s3-bucket",
+        "bkt",
+        "--s3-prefix",
+        "p",
+        "--s3-endpoint",
+        &endpoint,
+        "--s3-region",
+        "us-east-1",
+        "--s3-allow-http",
+        "--s3-single-delete",
+    ]
+    .map(String::from);
+    let args = |cmd: &[&str]| -> Vec<String> {
+        cmd.iter()
+            .map(|s| s.to_string())
+            .chain(bucket.iter().cloned())
+            .collect()
+    };
+
+    let (code, o, e) = cli(&args(&["sync", "--config", config.to_str().unwrap()])).await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(o.contains("manifest: s3://bkt/p/data/manifest."), "{o}");
+
+    let keys: Vec<String> = objects.lock().unwrap().keys().cloned().collect();
+    let manifests: Vec<&String> = keys
+        .iter()
+        .filter(|k| k.starts_with("p/data/manifest."))
+        .collect();
+    assert_eq!(manifests.len(), 1, "{keys:?}");
+    assert!(keys
+        .iter()
+        .any(|k| k.starts_with("p/data/") && k.ends_with(".ndjson")));
+    assert!(keys.contains(&"p/state/runs/last.json".to_string()));
+    assert!(
+        !keys.iter().any(|k| k.ends_with(".reserved")),
+        "reservation left behind: {keys:?}"
+    );
+    // Nothing a later run needs stays on the local disk
+    let local = local_names(&out);
+    assert!(
+        !local
+            .iter()
+            .any(|n| n.starts_with("manifest.") || n.ends_with(".ndjson")),
+        "{local:?}"
+    );
+
+    // A fresh worker (empty --out) sees the last run and the checkpoint in the bucket
+    std::fs::remove_dir_all(&out).unwrap();
+    let (code, o, e) = cli(&args(&["status"])).await;
+    assert_eq!(code, 0, "{e}");
+    assert!(
+        o.contains("mls/Property: up to 2026-01-01T00:00:02Z"),
+        "{o}"
+    );
+    assert!(o.contains("mls/Property: 2 records"), "{o}");
+    assert!(o.contains("s3://bkt/p/state/runs/last.json"), "{o}");
+
+    // `media` cannot read data files from the bucket and says what to use instead
+    let (code, _, e) = cli(&args(&["media", "--config", config.to_str().unwrap()])).await;
+    assert_eq!(code, 2);
+    assert!(e.contains("sync --media"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest` run records in the bucket (#107, third part, feature `s3`): with `--s3-bucket`, run manifests and
+  `sync --media` manifests are uploaded to `<prefix>/data/` (the local copy is removed), a copy of the newest run manifest
+  is kept at `<prefix>/state/runs/last.json` and `status` reads it, and run ids are also reserved in the state store
+  (`runs/<run>.reserved`, removed once the manifest is delivered) so workers with separate `--out` directories never share
+  one; `serve` does the same per sync. `media` refuses `--s3-bucket` (its input files are in the bucket; use
+  `sync --media`). The metrics file and downloaded media files stay local. `FileSink` gains a provided `location` method.
+  Without a bucket nothing changes.
 - `reso-ingest` S3 output sink and CLI selection (#107, second part, feature `s3`): `S3FileSink` uploads finished data
   files (one `PUT` with `If-None-Match: *` up to 32 MiB, multipart above, never replaces a name). `sync`, `serve`, `media`
   and `status` take `--s3-bucket`, `--s3-prefix`, `--s3-endpoint`, `--s3-region`, `--s3-allow-http`, `--s3-single-delete`
