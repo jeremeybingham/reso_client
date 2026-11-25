@@ -408,6 +408,7 @@ async fn sync_once(
         start_over: false,
         max_file_bytes: options.max_file_bytes,
         format: options.format,
+        sink: None,
         shutdown: shutdown.clone(),
     });
     // The lines `sync` prints as progress are in the log already

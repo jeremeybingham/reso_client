@@ -3,6 +3,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -10,6 +11,7 @@ use serde_json::Value;
 
 use crate::error::IngestError;
 use crate::manifest::FileEntry;
+use crate::sink::FileSink;
 
 /// A sink for the records of one resource on one server in one run
 ///
@@ -93,6 +95,10 @@ struct DeleteLine<'a> {
 /// memory use does not grow with the size of the pull. Delete events share the files:
 /// `{"source":…,"resource":…,"fetched_at":…,"run_id":…,"event":"delete","key":…}`; a line with
 /// an `event` is an event, a line with a `record` is a record.
+///
+/// With [`with_sink`](Self::with_sink), `dir` is a staging area: a file is written as `….ndjson.part`,
+/// delivered to the sink when it is full or at [`flush`](RecordWriter::flush) or `finish`, then
+/// removed. [`commit`](RecordWriter::commit) returns `true` only when no file is open.
 pub struct NdjsonWriter {
     dir: PathBuf,
     source: String,
@@ -101,6 +107,7 @@ pub struct NdjsonWriter {
     max_file_bytes: u64,
     current: Option<BufWriter<File>>,
     files: Vec<FileEntry>,
+    sink: Option<Arc<dyn FileSink>>,
 }
 
 impl NdjsonWriter {
@@ -126,7 +133,26 @@ impl NdjsonWriter {
             max_file_bytes,
             current: None,
             files: Vec::new(),
+            sink: None,
         })
+    }
+
+    /// Deliver finished files to `sink` instead of leaving them in the directory given to `new`
+    ///
+    /// Call before the first record.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Arc<dyn FileSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// The path the open file is written to: `name`, or `name.part` when a sink delivers it
+    fn work_path(&self, name: &str) -> PathBuf {
+        if self.sink.is_some() {
+            self.dir.join(format!("{name}.part"))
+        } else {
+            self.dir.join(name)
+        }
     }
 
     fn open_next(&mut self) -> Result<(), IngestError> {
@@ -137,8 +163,15 @@ impl NdjsonWriter {
             sanitize(&self.run_id),
             self.files.len() + 1
         );
-        let path = self.dir.join(&name);
-        let file = create_new_file(&path)?;
+        if let Some(sink) = &self.sink {
+            if sink.exists(&name)? {
+                return Err(IngestError::Output {
+                    path: name,
+                    message: "file already exists; another run may share this run id".to_string(),
+                });
+            }
+        }
+        let file = create_new_file(&self.work_path(&name))?;
         self.current = Some(BufWriter::new(file));
         self.files.push(FileEntry {
             name,
@@ -150,10 +183,19 @@ impl NdjsonWriter {
 
     fn close_current(&mut self) -> Result<(), IngestError> {
         if let Some(mut w) = self.current.take() {
-            let path = self
-                .dir
-                .join(self.files.last().map_or("", |f| f.name.as_str()));
+            let name = self
+                .files
+                .last()
+                .map_or("", |f| f.name.as_str())
+                .to_string();
+            let path = self.work_path(&name);
             w.flush().map_err(|e| output_error(&path, e))?;
+            if let Some(sink) = &self.sink {
+                w.get_ref().sync_all().map_err(|e| output_error(&path, e))?;
+                drop(w);
+                sink.put_file(&name, &path)?;
+                fs::remove_file(&path).map_err(|e| output_error(&path, e))?;
+            }
         }
         Ok(())
     }
@@ -174,9 +216,7 @@ impl NdjsonWriter {
             self.close_current()?;
             self.open_next()?;
         }
-        let path = self
-            .dir
-            .join(self.files.last().map_or("", |f| f.name.as_str()));
+        let path = self.work_path(self.files.last().map_or("", |f| f.name.as_str()));
         if let Some(w) = self.current.as_mut() {
             w.write_all(&bytes).map_err(|e| output_error(&path, e))?;
         }
@@ -226,13 +266,21 @@ impl RecordWriter for NdjsonWriter {
     }
 
     fn flush(&mut self) -> Result<(), IngestError> {
+        if self.sink.is_some() {
+            return self.close_current();
+        }
+        let path = self.work_path(self.files.last().map_or("", |f| f.name.as_str()));
         if let Some(w) = self.current.as_mut() {
-            let path = self
-                .dir
-                .join(self.files.last().map_or("", |f| f.name.as_str()));
             w.flush().map_err(|e| output_error(&path, e))?;
         }
         Ok(())
+    }
+
+    fn commit(&mut self) -> Result<bool, IngestError> {
+        if self.sink.is_some() {
+            return Ok(self.current.is_none());
+        }
+        self.flush().map(|()| true)
     }
 
     fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {

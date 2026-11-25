@@ -593,6 +593,8 @@ pub(crate) struct SyncOptions {
     pub(crate) start_over: bool,
     pub(crate) max_file_bytes: u64,
     pub(crate) format: Format,
+    /// Where finished data files go; `None` leaves them in `out`
+    pub(crate) sink: Option<Arc<dyn crate::sink::FileSink>>,
     pub(crate) shutdown: Shutdown,
 }
 
@@ -623,6 +625,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         start_over: args.start_over,
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
+        sink: None,
         shutdown,
     });
 
@@ -1009,13 +1012,19 @@ fn make_writer(
     #[cfg_attr(not(feature = "parquet"), allow(unused_variables))] expanded: &[String],
 ) -> Result<Box<dyn RecordWriter>, crate::error::IngestError> {
     match options.format {
-        Format::Ndjson => Ok(Box::new(NdjsonWriter::new(
-            &options.out,
-            server,
-            resource,
-            &options.run_id,
-            options.max_file_bytes,
-        )?)),
+        Format::Ndjson => {
+            let mut writer = NdjsonWriter::new(
+                &options.out,
+                server,
+                resource,
+                &options.run_id,
+                options.max_file_bytes,
+            )?;
+            if let Some(sink) = &options.sink {
+                writer = writer.with_sink(Arc::clone(sink));
+            }
+            Ok(Box::new(writer))
+        }
         #[cfg(feature = "parquet")]
         Format::Parquet => {
             let entity =
@@ -1025,17 +1034,19 @@ fn make_writer(
                         path: options.out.display().to_string(),
                         message: format!("no entity type for {resource} in $metadata"),
                     })?;
-            Ok(Box::new(
-                ParquetWriter::new(
-                    &options.out,
-                    server,
-                    resource,
-                    &options.run_id,
-                    options.max_file_bytes,
-                    entity,
-                )?
-                .with_expanded(expanded),
-            ))
+            let mut writer = ParquetWriter::new(
+                &options.out,
+                server,
+                resource,
+                &options.run_id,
+                options.max_file_bytes,
+                entity,
+            )?
+            .with_expanded(expanded);
+            if let Some(sink) = &options.sink {
+                writer = writer.with_sink(Arc::clone(sink));
+            }
+            Ok(Box::new(writer))
         }
     }
 }
