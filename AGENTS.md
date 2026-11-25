@@ -57,8 +57,8 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 - **Public API.** Every public item has a `///` doc comment, with an example where useful. Breaking changes are allowed
   before 1.0 but are recorded in `CHANGELOG.md` with a version bump.
 - **No new dependencies without discussion.** Keep `reso-client` lean (its XML parser is `roxmltree`; OAuth2 and rate
-  limiting are hand-written); heavier ones belong in `reso-ingest` (`clap`, `toml`, and `arrow`/`parquet` behind the
-  `parquet` feature).
+  limiting are hand-written); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, and
+  `arrow`/`parquet` behind the `parquet` feature).
 - Every bug fixed gets a regression test. Docs change in the same commit as the behaviour they describe.
 
 ## Where things are
@@ -85,9 +85,12 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/checkpoint.rs CheckpointStore: JSON files for checkpoints, key sets, event sequences
   src/deletes.rs    reconcile_deletes, EventFeed, FlagDeleteWriter: delete events by key diff, EntityEvent or flag field
   src/media.rs      sync_media, MediaIndex, MediaManifest, PageMedia: Media files from sync output (`media`) or per page (`sync --media`)
-  src/cli.rs, main.rs  the `reso-ingest` binary (sync, media, discover, status); run() takes writers so tests run in-process
+  src/cli.rs, main.rs  the `reso-ingest` binary (sync, media, discover, status); run() takes writers so tests run in-process,
+                    run_main() also installs the log subscriber
+  src/logging.rs    LogFormat, log_subscriber: text or JSON log lines, RUST_LOG filter; run/server/resource spans
   src/error.rs      IngestError
-  servers.example.toml, tests/ (wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media)
+  servers.example.toml, tests/ (wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
+                    log_json.rs for JSON log lines, own binary)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),

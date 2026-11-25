@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 use crate::config::ServerConfig;
 
@@ -19,7 +20,8 @@ pub struct ServerReport<T> {
 /// Run `task` once per server, at most `max_concurrent` at a time, and collect every outcome
 ///
 /// Servers are independent: an error or panic in one is recorded in its [`ServerReport`] and the
-/// others carry on. Reports come back in the order of `servers`.
+/// others carry on. Reports come back in the order of `servers`. Each task runs inside a `server`
+/// span (field `server`), a child of the caller's current span, so its log events name the server.
 ///
 /// # Examples
 ///
@@ -50,11 +52,16 @@ where
         let name = server.name.clone();
         let permits = Arc::clone(&permits);
         let fut = task(server);
-        let handle = tokio::spawn(async move {
-            // The semaphore is never closed, so acquiring cannot fail
-            let _permit = permits.acquire_owned().await.ok();
-            fut.await.map_err(|e| e.to_string())
-        });
+        // A child of the caller's current span (the `run` span of the command line)
+        let span = tracing::info_span!("server", server = %name);
+        let handle = tokio::spawn(
+            async move {
+                // The semaphore is never closed, so acquiring cannot fail
+                let _permit = permits.acquire_owned().await.ok();
+                fut.await.map_err(|e| e.to_string())
+            }
+            .instrument(span),
+        );
         handles.push((name, handle));
     }
 

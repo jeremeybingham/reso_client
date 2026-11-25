@@ -369,7 +369,10 @@ impl Downloader<'_> {
                     }
                 }
                 Ok(None) => break Ok(()),
-                Err(e) => break Err(ResoError::Network(format!("download broke off: {e}"))),
+                Err(e) => {
+                    let e = e.without_url();
+                    break Err(ResoError::Network(format!("download broke off: {e}")));
+                }
             }
         };
         self.count_bytes(saved.bytes).await;
@@ -403,7 +406,8 @@ impl Downloader<'_> {
         request
             .send()
             .await
-            .map_err(|e| ResoError::Network(e.to_string()))
+            // Without the URL: media URLs are often signed, and errors end up in logs and manifests
+            .map_err(|e| ResoError::Network(e.without_url().to_string()))
     }
 
     async fn count_bytes(&self, n: u64) {

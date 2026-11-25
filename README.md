@@ -181,7 +181,7 @@ cargo run -p reso-ingest -- status --out data/                        # checkpoi
 ```
 
 Configuration (including per-server filters, per-resource `expand` and flag-field deletes), output format, run ids,
-delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
+logs (`--log-format json`, `RUST_LOG`), delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
 
 ## Examples
 

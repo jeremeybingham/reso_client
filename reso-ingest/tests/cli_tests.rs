@@ -345,6 +345,30 @@ async fn usage_errors_exit_2_and_help_exits_0() {
     assert!(h.out.contains("Usage"));
 }
 
+#[tokio::test]
+async fn log_format_is_a_global_option() {
+    let dir = TempDir::new("logfmt");
+    let out = dir.path("out");
+    let out_s = out.to_str().unwrap();
+    // Before or after the subcommand; `run` itself installs no subscriber
+    assert_eq!(
+        cli(&["--log-format", "json", "status", "--out", out_s])
+            .await
+            .code,
+        0
+    );
+    assert_eq!(
+        cli(&["status", "--out", out_s, "--log-format", "text"])
+            .await
+            .code,
+        0
+    );
+    let bad = cli(&["status", "--out", out_s, "--log-format", "xml"]).await;
+    assert_eq!(bad.code, 2);
+    assert!(bad.err.contains("xml"));
+    assert!(cli(&["sync", "--help"]).await.out.contains("--log-format"));
+}
+
 #[cfg(feature = "parquet")]
 #[tokio::test]
 async fn sync_writes_parquet_with_the_format_flag() {

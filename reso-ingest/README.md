@@ -33,6 +33,23 @@ Progress lines (`##progress step=N/T label=server/resource`) go to stderr and th
 success, `1` if a server or resource failed (the summary names it), `2` for bad usage or configuration. `--help` on
 any command lists every option.
 
+## Logs
+
+Log lines go to stderr, between the progress lines. The level comes from `RUST_LOG` (default `info`; for example
+`RUST_LOG=reso_ingest=info,reso_client=warn` or `RUST_LOG=debug`). `--log-format json` (or `RESO_LOG_FORMAT=json`;
+the flag wins) writes one JSON object per line for log shippers; the default is `text`. Every line inside a run carries
+`run_id`, `server` and `resource` (when it belongs to one), so one feed can be filtered out of a busy log:
+
+```json
+{"timestamp":"2026-11-25T04:36:53.112587Z","level":"INFO","fields":{"message":"resource synced","records":17,"deletes":0},"target":"reso_ingest::cli","spans":[{"run_id":"20261125T043653Z","name":"run"},{"server":"ref","name":"server"},{"resource":"Office","name":"resource"}]}
+```
+
+In text format the spans are a prefix: `run{run_id=...}:server{server=ref}:resource{resource=Office}: ... resource
+synced records=17 deletes=0`. The progress and per-resource lines are plain text in both formats; keep only the JSON
+lines with `grep '^{'`. Logs never hold tokens, client secrets or record contents. At `info` each server logs its
+`$metadata` fetch and query URLs, each resource one `resource synced` (or `resource failed`) line, and each
+`media` server one summary line; `debug` adds retries, batch sizes and checkpoints.
+
 ## Configuration
 
 One TOML file lists the servers; [servers.example.toml](servers.example.toml) shows every setting. Secrets are never

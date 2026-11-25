@@ -266,10 +266,16 @@ async fn refused_connection_is_a_network_error() {
         .unwrap();
     let dest = temp_dir().join("f");
     let err = d
-        .download_to("http://127.0.0.1:1/f", &dest, &Validators::default())
+        .download_to(
+            "http://127.0.0.1:1/f?X-Amz-Signature=sig-value",
+            &dest,
+            &Validators::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, ResoError::Network(_)));
+    // Signed media URLs stay out of the error text, which goes to logs and manifests
+    assert!(!err.to_string().contains("sig-value"), "{err}");
     assert_eq!(d.stats().retries, 1);
 }
 
