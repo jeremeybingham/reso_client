@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use reso_client::{
-    ClientConfig, DownloadConfig, DownloadOutcome, ResoClient, ResoError, RetryPolicy, SendToken,
-    Validators,
+    ClientConfig, ClientCredentials, DownloadConfig, DownloadOutcome, ResoClient, ResoError,
+    RetryPolicy, SendToken, Validators,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -271,4 +271,64 @@ async fn refused_connection_is_a_network_error() {
         .unwrap_err();
     assert!(matches!(err, ResoError::Network(_)));
     assert_eq!(d.stats().retries, 1);
+}
+
+#[tokio::test]
+async fn download_renews_an_oauth_token_after_401() {
+    let server = MockServer::start().await;
+    let issued = AtomicU32::new(0);
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(move |_: &wiremock::Request| {
+            let n = issued.fetch_add(1, Ordering::SeqCst) + 1;
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": format!("token-{n}"),
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .and(header("Authorization", "Bearer token-1"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .and(header("Authorization", "Bearer token-2"))
+        .respond_with(photo())
+        .expect(1)
+        .mount(&server)
+        .await;
+    let credentials = ClientCredentials::new(format!("{}/oauth/token", server.uri()), "id", "s");
+    let client =
+        ResoClient::with_config(ClientConfig::with_auth(server.uri(), credentials)).unwrap();
+    let d = client.downloader(DownloadConfig::default()).unwrap();
+    let dest = temp_dir().join("f");
+    let outcome = d
+        .download_to(
+            &format!("{}/f", server.uri()),
+            &dest,
+            &Validators::default(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DownloadOutcome::Saved(_)));
+    assert_eq!(std::fs::read(&dest).unwrap(), b"JPEGDATA");
+}
+
+#[tokio::test]
+async fn token_scope_decisions() {
+    let client = client("https://api.example.com/odata");
+    let same = client.downloader(DownloadConfig::default()).unwrap();
+    assert!(same.sends_token_to("https://api.example.com/media/1.jpg"));
+    assert!(!same.sends_token_to("https://cdn.example.com/1.jpg"));
+    assert!(!same.sends_token_to("not a url"));
+    let never = client
+        .downloader(DownloadConfig::default().with_send_token(SendToken::Never))
+        .unwrap();
+    assert!(!never.sends_token_to("https://api.example.com/media/1.jpg"));
 }

@@ -210,3 +210,50 @@ fn bad_send_token_is_rejected() {
     assert_eq!(server, "x");
     assert!(message.contains("media.send_token"), "{message}");
 }
+
+#[test]
+fn more_bad_values_are_rejected() {
+    let bearer = "[[server]]\nname = \"a\"\nbase_url = \"https://a.example\"\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"T\"\n";
+    let (_, message) = server_error(&bearer.replace("name = \"a\"", "name = \" \""));
+    assert!(message.contains("name"), "{message}");
+    let (_, message) = server_error(&format!("{bearer}[server.media]\ntimeout_secs = 0\n"));
+    assert!(message.contains("media.timeout_secs"), "{message}");
+
+    let oauth = "[[server]]\nname = \"b\"\nbase_url = \"https://b.example\"\n[server.auth]\ntype = \"client_credentials\"\ntoken_url = \"https://b.example/token\"\nclient_id_env = \"I\"\nclient_secret_env = \"S\"\n";
+    Config::parse(oauth).unwrap();
+    let (_, message) = server_error(&format!("{oauth}transport = \"pigeon\"\n"));
+    assert!(message.contains("auth.transport"), "{message}");
+    let (_, message) = server_error(&oauth.replace("https://b.example/token", "b.example/token"));
+    assert!(message.contains("auth.token_url"), "{message}");
+}
+
+#[test]
+fn server_must_be_an_array_of_tables() {
+    let err = Config::parse("server = 1\n").unwrap_err();
+    assert!(
+        matches!(err, IngestError::Parse(ref m) if m.contains("[[server]]")),
+        "{err}"
+    );
+}
+
+#[test]
+fn unreadable_config_file_is_a_read_error() {
+    let path =
+        std::env::temp_dir().join(format!("reso-ingest-no-such-{}.toml", std::process::id()));
+    let err = Config::from_file(&path).unwrap_err();
+    assert!(matches!(err, IngestError::Read { .. }), "{err}");
+}
+
+#[test]
+fn credential_transport_and_scope_reach_the_client_config() {
+    let text = "[[server]]\nname = \"b\"\nbase_url = \"https://b.example\"\n[server.auth]\ntype = \"client_credentials\"\ntoken_url = \"https://b.example/token\"\nclient_id_env = \"I\"\nclient_secret_env = \"S\"\nscope = \"api\"\ntransport = \"header\"\n";
+    let config = Config::parse(text).unwrap();
+    let client = config.servers[0]
+        .client_config_with(|_| Some("x".into()))
+        .unwrap();
+    let Auth::ClientCredentials(c) = client.auth else {
+        panic!("expected client credentials");
+    };
+    assert_eq!(c.scope.as_deref(), Some("api"));
+    assert_eq!(c.transport, reso_client::CredentialTransport::BasicHeader);
+}

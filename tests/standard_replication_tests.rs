@@ -278,3 +278,67 @@ async fn repeating_its_own_next_link_is_an_error() {
     let err = run.next_batch().await.unwrap_err();
     assert!(matches!(err, ResoError::Parse(_)), "{err}");
 }
+
+/// Serve one page of `records` for any request
+async fn serving(records: Value) -> (MockServer, ResoClient) {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": records })))
+        .mount(&server)
+        .await;
+    let client = ResoClient::with_config(ClientConfig::new(server.uri(), "t")).unwrap();
+    (server, client)
+}
+
+#[tokio::test]
+async fn bad_timestamp_or_missing_key_is_a_parse_error() {
+    for records in [
+        json!([{"ListingKey": "A", "ModificationTimestamp": "yesterday"}]),
+        json!([{"ModificationTimestamp": "2026-01-01T00:00:00Z"}]),
+        json!([{"ListingKey": null, "ModificationTimestamp": "2026-01-01T00:00:00Z"}]),
+    ] {
+        let (_s, client) = serving(records.clone()).await;
+        let err = pull(&client, spec()).await.unwrap_err();
+        assert!(matches!(err, ResoError::Parse(_)), "{records}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_record_returned_again_is_out_of_order() {
+    let (_s, client) = serving(json!([
+        {"ListingKey": "A", "ModificationTimestamp": "2026-01-01T00:00:00Z"}
+    ]))
+    .await;
+    let checkpoint = Checkpoint::new("2026-01-01T00:00:00Z", json!("A"));
+    let err = pull(&client, spec().from_checkpoint(checkpoint))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ResoError::OutOfOrder(_)), "{err}");
+}
+
+#[tokio::test]
+async fn another_timestamp_field_drives_order_and_checkpoint() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+            {"ListingKey": "A", "PhotosChangeTimestamp": "2026-01-01T00:00:00Z"},
+            {"ListingKey": "B", "PhotosChangeTimestamp": "2026-01-02T00:00:00Z"},
+        ]})))
+        .mount(&server)
+        .await;
+    let client = ResoClient::with_config(ClientConfig::new(server.uri(), "t")).unwrap();
+    let mut run = client.replicate(spec().timestamp_field("PhotosChangeTimestamp"));
+    assert_eq!(run.next_batch().await.unwrap().unwrap().len(), 2);
+    assert_eq!(
+        run.checkpoint().unwrap().timestamp,
+        "2026-01-02T00:00:00Z".to_string()
+    );
+    let url = &server.received_requests().await.unwrap()[0].url;
+    let orderby = url
+        .query_pairs()
+        .find(|(k, _)| k == "$orderby")
+        .unwrap()
+        .1
+        .into_owned();
+    assert!(orderby.starts_with("PhotosChangeTimestamp"), "{orderby}");
+}

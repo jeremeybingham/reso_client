@@ -382,3 +382,182 @@ async fn sync_writes_parquet_with_the_format_flag() {
     assert!(files >= 1);
     assert_eq!(data_keys(&out), Vec::<String>::new(), "no NDJSON files");
 }
+
+const RICH_METADATA: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
+<Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="org.reso.metadata">
+<EnumType Name="StandardStatus"><Member Name="Active" Value="0"/><Member Name="Closed" Value="1"/></EnumType>
+<EntityType Name="Property"><Key><PropertyRef Name="ListingKey"/></Key>
+<Property Name="ListingKey" Type="Edm.String" Nullable="false"/>
+<Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>
+<EntityType Name="Pair"><Key><PropertyRef Name="A"/><PropertyRef Name="B"/></Key>
+<Property Name="A" Type="Edm.String"/><Property Name="B" Type="Edm.String"/>
+<Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>
+<EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/>
+<EntitySet Name="Pair" EntityType="org.reso.metadata.Pair"/></EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#;
+
+/// `$metadata` with a composite-key resource and an enum type; one `Property` record, then
+/// nothing once the request resumes after it (has a `$filter`)
+async fn rich_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(|req: &wiremock::Request| {
+            if req.url.path().ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(RICH_METADATA);
+            }
+            if req.url.query_pairs().any(|(k, _)| k == "$filter") {
+                return ResponseTemplate::new(200).set_body_json(json!({"value": []}));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"ListingKey": "K1", "ModificationTimestamp": "2026-01-01T00:00:01Z"}
+            ]}))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+fn write_text_config(dir: &TempDir, text: &str) -> String {
+    let path = dir.path("servers.toml");
+    std::fs::write(&path, text).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+fn bearer_server(name: &str, url: &str, env: &str, extra: &str) -> String {
+    format!(
+        "[[server]]\nname = \"{name}\"\nbase_url = \"{url}\"\n{extra}\n[server.limits]\nmax_retries = 0\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"{env}\"\n"
+    )
+}
+
+#[tokio::test]
+async fn unreadable_config_is_a_usage_error_for_every_command() {
+    let dir = TempDir::new("noconfig");
+    let missing = dir.path("missing.toml");
+    let missing = missing.to_str().unwrap();
+    for command in ["sync", "media", "discover"] {
+        let r = cli(&[command, "--config", missing]).await;
+        assert_eq!(r.code, 2, "{command}: {}", r.err);
+        assert!(r.err.contains("error:"), "{command}: {}", r.err);
+    }
+    let r = cli(&["media"]).await;
+    assert_eq!(r.code, 2);
+    let r = cli(&["discover"]).await;
+    assert_eq!(r.code, 2);
+}
+
+#[tokio::test]
+async fn composite_key_resource_is_skipped_unless_asked_for_and_page_size_is_sent() {
+    std::env::set_var("CLI_TEST_TOKEN_F", SECRET);
+    let srv = rich_server().await;
+    let dir = TempDir::new("pair");
+    let config = write_text_config(
+        &dir,
+        &bearer_server("mls", &srv.uri(), "CLI_TEST_TOKEN_F", "page_size = 7"),
+    );
+    let out = dir.path("out");
+    let out_s = out.to_str().unwrap();
+
+    let r = cli(&["sync", "--config", &config, "--out", out_s]).await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    assert!(r.err.contains("[mls/Pair] skipped"), "{}", r.err);
+    let tops: Vec<String> = srv
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|q| {
+            q.url
+                .query_pairs()
+                .find(|(k, _)| k == "$top")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect();
+    assert!(
+        !tops.is_empty() && tops.iter().all(|t| t == "7"),
+        "{tops:?}"
+    );
+
+    // Asked for by name, it is a failure
+    let r = cli(&[
+        "sync",
+        "--config",
+        &config,
+        "--out",
+        out_s,
+        "--resource",
+        "Pair",
+    ])
+    .await;
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(r.out.contains("FAILED servers: mls"), "{}", r.out);
+}
+
+#[tokio::test]
+async fn sync_with_nothing_to_pull_fails_the_server() {
+    std::env::set_var("CLI_TEST_TOKEN_G", SECRET);
+    let srv = rich_server().await;
+    let dir = TempDir::new("empty");
+    let config = write_text_config(
+        &dir,
+        &bearer_server(
+            "mls",
+            &srv.uri(),
+            "CLI_TEST_TOKEN_G",
+            "include = [\"Nothing\"]",
+        ),
+    );
+    let out = dir.path("out");
+    let r = cli(&["sync", "--config", &config, "--out", out.to_str().unwrap()]).await;
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(r.out.contains("FAILED servers: mls"), "{}", r.out);
+}
+
+#[tokio::test]
+async fn discover_lists_enum_types_and_fails_on_a_missing_resource() {
+    std::env::set_var("CLI_TEST_TOKEN_H", SECRET);
+    let srv = rich_server().await;
+    let dir = TempDir::new("discover-enum");
+    let config = write_text_config(
+        &dir,
+        &bearer_server("mls", &srv.uri(), "CLI_TEST_TOKEN_H", ""),
+    );
+
+    let r = cli(&["discover", "--config", &config]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    let docs: Value = serde_json::from_str(&r.out).unwrap();
+    let enums = &docs[0]["metadata"]["enum_types"];
+    assert_eq!(enums[0]["name"], "StandardStatus");
+    assert_eq!(enums[0]["members"][1]["name"], "Closed");
+
+    let r = cli(&["discover", "--config", &config, "--resource", "Nope"]).await;
+    assert_eq!(r.code, 1);
+    assert!(r.err.contains("[mls] FAILED"), "{}", r.err);
+    assert!(r.err.contains("Nope"), "{}", r.err);
+}
+
+#[tokio::test]
+async fn status_of_an_empty_directory_says_so() {
+    let dir = TempDir::new("status-empty");
+    let out = dir.path("out");
+    let r = cli(&["status", "--out", out.to_str().unwrap()]).await;
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("  none"), "{}", r.out);
+    assert!(r.out.contains("no"), "{}", r.out);
+}
+
+#[tokio::test]
+async fn status_with_a_broken_state_or_out_directory_fails() {
+    let dir = TempDir::new("status-broken");
+    let file = dir.path("a-file");
+    std::fs::write(&file, "x").unwrap();
+    let file = file.to_str().unwrap();
+    // The state directory is a file: checkpoints cannot be listed
+    let r = cli(&["status", "--out", dir.0.to_str().unwrap(), "--state", file]).await;
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    // The out directory is a file: manifests cannot be listed
+    let state = dir.path("state");
+    let r = cli(&["status", "--out", file, "--state", state.to_str().unwrap()]).await;
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(r.err.contains("error:"), "{}", r.err);
+}

@@ -419,3 +419,94 @@ async fn damaged_index_stops_the_server_without_downloading() {
     assert!(report.error.is_some());
     assert!(!report.is_clean());
 }
+
+#[tokio::test]
+async fn media_command_reports_failures_skipped_files_and_records_it_cannot_use() {
+    std::env::set_var("MEDIA_TEST_TOKEN_REPORT", "t");
+    let world = Arc::new(Mutex::new(World::default()));
+    let server = server(world).await;
+    let base = server.uri();
+    let dir = TempDir::new("report");
+    let config = write_config(&dir, &base, "MEDIA_TEST_TOKEN_REPORT");
+    let out = dir.path("out");
+
+    // Seven records whose files are missing (404), one without MediaURL, one without MediaKey
+    let mut lines: Vec<Value> = (1..=7)
+        .map(|i| {
+            line(
+                "r1",
+                media(
+                    &format!("M{i}"),
+                    Some(format!("{base}/files/gone{i}")),
+                    "t",
+                    "t",
+                ),
+            )
+        })
+        .collect();
+    lines.push(line("r1", media("NOURL", None, "t", "t")));
+    lines.push(line("r1", json!({"MediaURL": format!("{base}/files/b")})));
+    write_run(&out, "20260101T000000Z", &lines);
+    // A Parquet data file in a later manifest is listed but not read
+    std::fs::write(out.join("srv.Media.20260102T000000Z.0001.parquet"), b"PAR1").unwrap();
+    std::fs::write(
+        out.join("manifest.20260102T000000Z.json"),
+        json!({
+            "run_id": "20260102T000000Z",
+            "resources": [{"server": "srv", "resource": "Media",
+                           "files": [{"name": "srv.Media.20260102T000000Z.0001.parquet"}]}],
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = cli(&[
+        "media",
+        "--config",
+        config.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ])
+    .await;
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stdout.contains("7 failed"), "{stdout}");
+    assert!(stdout.contains("... 2 more in the manifest"), "{stdout}");
+    assert!(stdout.contains("1 without MediaURL"), "{stdout}");
+    assert!(
+        stdout.contains("1 non-NDJSON data files not read"),
+        "{stdout}"
+    );
+    let manifest = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            let n = p.file_name().unwrap().to_str().unwrap();
+            n.starts_with("media.") && n.ends_with(".json")
+        })
+        .expect("a media manifest");
+    let m: Value = serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+    assert_eq!(m["servers"][0]["records_without_key"], 1, "{m}");
+}
+
+#[tokio::test]
+async fn media_command_names_a_server_that_failed() {
+    std::env::set_var("MEDIA_TEST_TOKEN_FAIL", "t");
+    let dir = TempDir::new("cmdfail");
+    let config = write_config(&dir, "http://127.0.0.1:1", "MEDIA_TEST_TOKEN_FAIL");
+    let state = dir.path("state");
+    let path = MediaIndex::path(&state, "srv");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{not json").unwrap();
+    let (code, stdout, _) = cli(&[
+        "media",
+        "--config",
+        config.to_str().unwrap(),
+        "--out",
+        dir.path("out").to_str().unwrap(),
+        "--state",
+        state.to_str().unwrap(),
+    ])
+    .await;
+    assert_eq!(code, 1);
+    assert!(stdout.contains("[srv/media] FAILED"), "{stdout}");
+}

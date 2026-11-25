@@ -961,6 +961,10 @@ mod tests {
             "RESO_TOKEN_URI",
             "RESO_SCOPE",
             "RESO_CREDENTIAL_TRANSPORT",
+            "RESO_RATE_PER_SECOND",
+            "RESO_RATE_PER_HOUR",
+            "RESO_BYTES_PER_DAY",
+            "RESO_MAX_RETRIES",
         ] {
             std::env::remove_var(name);
         }
@@ -1038,6 +1042,29 @@ mod tests {
         assert_eq!(bearer(&config), "my-test-token");
         assert_eq!(config.dataset_id, None);
         assert_eq!(config.timeout, Duration::from_secs(30));
+
+        cleanup_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_from_env_reads_rate_limits_and_retries() {
+        cleanup_env_vars();
+        std::env::set_var("RESO_BASE_URL", "https://api.example.com/odata/");
+        std::env::set_var("RESO_TOKEN", "my-test-token");
+        std::env::set_var("RESO_RATE_PER_SECOND", "2");
+        std::env::set_var("RESO_RATE_PER_HOUR", "99999999999");
+        std::env::set_var("RESO_BYTES_PER_DAY", "1000000");
+        std::env::set_var("RESO_MAX_RETRIES", "3");
+
+        let config = ClientConfig::from_env().unwrap();
+
+        assert_eq!(config.base_url, "https://api.example.com/odata");
+        assert_eq!(config.rate_limit.per_second, Some(2));
+        // Values above u32::MAX are capped rather than rejected
+        assert_eq!(config.rate_limit.per_hour, Some(u32::MAX));
+        assert_eq!(config.rate_limit.bytes_per_day, Some(1_000_000));
+        assert_eq!(config.retry.max_retries, 3);
 
         cleanup_env_vars();
     }

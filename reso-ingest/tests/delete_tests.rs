@@ -341,3 +341,22 @@ fn state_files_are_checked_for_owner() {
     std::fs::write(dir.0.join("c.Property.keys.json"), "{").unwrap();
     assert!(store.load_keys("c", "Property").is_err());
 }
+
+#[tokio::test]
+async fn key_pull_with_a_keyless_record_is_not_trusted() {
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": [{"ListingKey": "K1"}, {"ListingKey": null}]})),
+        )
+        .mount(&srv)
+        .await;
+    let dir = TempDir::new("keyless");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let out = dir.0.join("out");
+    let e = run(&srv, &store, &out, "r1", None).await;
+    assert!(e.error.unwrap().contains("not trusted"));
+    assert_eq!(e.deletes, 0);
+    assert!(store.load_keys("mls", "Property").unwrap().is_none());
+}
