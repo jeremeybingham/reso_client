@@ -17,6 +17,7 @@ cargo run -p reso-ingest -- sync --config servers.toml --server mlsgrid --media
 cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
 cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
 cargo run -p reso-ingest -- status --out data/
+cargo run -p reso-ingest -- serve --config servers.toml --out data/ --listen 0.0.0.0:9090
 ```
 
 - **`sync`** pulls each resource the server's `$metadata` lists (after the config's `include`/`exclude` filters),
@@ -29,6 +30,8 @@ cargo run -p reso-ingest -- status --out data/
 - **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums.
 - **`sync --metrics-file PATH`** also writes the run's metrics (see Metrics below).
 - **`status`** shows the saved checkpoints and the last run's manifest.
+- **`serve`** runs as a daemon: each resource syncs on its own interval, and health, metrics and status endpoints answer
+  over HTTP (see [Daemon mode](#daemon-mode-serve)).
 
 Progress lines (`##progress step=N/T label=server/resource`) go to stderr and the summary to stdout. Exit code `0` on
 success, `1` if a server or resource failed (the summary names it), `2` for bad usage or configuration, `3` when a shutdown request ended a `sync` early (see Shutdown). `--help` on
@@ -55,8 +58,8 @@ lines with `grep '^{'`. Logs never hold tokens, client secrets or record content
 
 `sync` records, per server and resource, how long the pull took and what its requests did (`stats` in the manifest).
 `--metrics-file PATH` also writes them as Prometheus text when the run ends (replaced atomically; point the
-node_exporter textfile collector at its directory). The `/metrics` endpoint for a long-running process comes with
-daemon mode ([#83](https://github.com/jeremeybingham/reso_client/issues/83)); it will use `render_prometheus`.
+node_exporter textfile collector at its directory). A long-running process serves the same numbers at `/metrics`
+(see [Daemon mode](#daemon-mode-serve)).
 
 The main number is **freshness lag**: now minus the newest `ModificationTimestamp` written, taken from the saved
 checkpoint, so it keeps growing for a feed that fails or goes quiet, and is absent for one that never wrote a record.
@@ -211,6 +214,52 @@ In `--out` (default `reso-out`):
   warning in the manifest and log (`skipped: another process is syncing this feed`), without failing the run. After a
   crash the lease runs out in at most 5 minutes, then the next run takes the feed over. It works for processes that share
   the state directory on a local disk; `media` does not take leases yet. Shared backends are #85.
+
+## Daemon mode (`serve`)
+
+`cron` starting `sync` syncs every resource at the same pace. `serve` is one long-running process that gives each
+resource its own pace: Property every two minutes, Member every hour. A resource is scheduled when it has an
+`interval` (`"500ms"`, `"30s"`, `"2m"`, `"1h"`, `"1d"`); a server's own `interval` covers the resources in its `include`
+list that have none. Nothing is scheduled by default, and `serve` refuses to start when no resource has an interval.
+
+```toml
+[[server]]
+name = "mls-one"
+include = ["Property", "Member", "Office"]
+interval = "1h"             # Member and Office
+concurrency = 2             # feeds of this server syncing at once (default 2)
+
+[server.resources.Property]
+interval = "2m"
+```
+
+- **Each sync is `sync --server S --resource R`** for that one feed: it takes the feed's lease, writes tagged files,
+  checkpoints after each page, and does the options you gave `serve` (`--deletes`, `--allow-mass-deletes`, `--media`,
+  `--format`, `--max-file-mb`). `$metadata` is read at the start of every sync.
+- **Timing.** The first sync of each feed starts after a random delay of up to 10 seconds (or its interval, if shorter) so
+  the feeds do not hit a server together; after a sync the feed waits its interval plus up to 10% jitter. A feed
+  that fails waits twice as long after each failure in a row, up to 15 minutes (or its interval, if that is longer), and
+  goes back to its interval after one success. Failing feeds do not stop the others.
+- **Rate limits.** All feeds of a server share one client, so its `[server.limits]` (requests per second, minute, hour,
+  day) and its OAuth token cover them together; `concurrency` caps how many of them run at once.
+- **Output.** Data files are written as in `sync`. A manifest is written only for a sync that wrote records or deletes,
+  failed, or had findings; a poll that found nothing leaves no manifest and no `.run.*` marker.
+- **Stopping.** On SIGTERM or Ctrl-C every feed stops after its current page, with output and checkpoint consistent (see
+  Shutdown), and `serve` exits `0`. Exit `2` for bad configuration, no scheduled resource, a missing secret variable or an
+  address that cannot be bound.
+
+The endpoints speak plain HTTP with no authentication and no TLS: bind to a private address (default `127.0.0.1:8080`,
+`--listen ADDR:PORT`) and let the platform's network rules decide who can reach it.
+
+| Path | Answer |
+|---|---|
+| `/healthz` | `200` while the process is up |
+| `/readyz` | `200` when the state directory can be written, `503` when not (config is read before the server starts, so a bad one never gets this far) |
+| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures` and `reso_ingest_feed_interval_seconds` (labels `server`, `resource`) |
+| `/status` | JSON: `started_at` and, per feed, `state` (`waiting`, `queued`, `running`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
+
+Unconfirmed against a real server (#32): everything here is tested against mock servers only. With concurrent feeds of one
+server the per-feed request counters in the metrics overlap, because they are differences of one shared client's counters.
 
 ## Shutdown
 

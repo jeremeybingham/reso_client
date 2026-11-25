@@ -19,12 +19,15 @@ exclude = ["OpenHouse"]                      # wins over include
 # filter = "OriginatingSystemName eq 'mls'"  # added to every query (some servers require one)
 # deletes = { flag_field = "MlgCanView" }    # a record with this field false is deleted (MLS Grid)
 # deletes = { max_deletes = 5000, max_percent = 20 }   # hold a --deletes pass over these limits for review
+# interval = "1h"                            # `serve` only: how often to sync included resources with no interval of their own
+# concurrency = 2                            # `serve` only: feeds of this server syncing at once
 
 # Settings for one resource (optional)
 # [server.resources.Property]
 # filter = "PropertyType eq 'Residential'"   # ANDed with the server filter
 # expand = ["Media"]                         # $expand on sync pulls
 # page_size = 1000                           # overrides the server's
+# interval = "2m"                            # `serve` only: how often to sync this resource
 
 [server.auth]
 type = "client_credentials"

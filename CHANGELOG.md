@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest serve` (#83): daemon mode. Each resource with an `interval` (on the resource, or on the server for
+  its `include` list) syncs on its own schedule with start-up and per-run jitter, a per-server `concurrency` cap, one
+  shared client per server (so rate limits cover all its feeds) and doubling backoff for failing feeds (up to 15 minutes).
+  Endpoints `/healthz`, `/readyz`, `/metrics` and `/status` over plain HTTP. Library: `Daemon`, `ServeOptions`,
+  `parse_interval`, `cli::Format` is public; config keys `interval` (server, resource) and `concurrency` (server).
+  New dependency in `reso-ingest`: `axum` (HTTP/1 only); tokio gains the `net` feature.
 - `reso-ingest` shutdown (#82): on SIGTERM or Ctrl-C `sync` stops after the last page written, flushes and checkpoints,
   marks the manifest (and each cut resource) `interrupted`, and exits with code 3; a second signal exits at once with 130.
   Library: `Shutdown`, `cli::run_with_shutdown`, `cli::EXIT_INTERRUPTED`; `RunManifest` and `ResourceEntry` gain an
