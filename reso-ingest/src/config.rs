@@ -186,6 +186,12 @@ pub struct LimitsConfig {
     /// Requests per hour
     #[serde(default)]
     pub per_hour: Option<u32>,
+    /// Requests per day
+    #[serde(default)]
+    pub per_day: Option<u32>,
+    /// Response bytes per hour
+    #[serde(default)]
+    pub bytes_per_hour: Option<u64>,
     /// Response bytes per day
     #[serde(default)]
     pub bytes_per_day: Option<u64>,
@@ -216,6 +222,12 @@ pub struct MediaConfig {
     /// File requests per hour
     #[serde(default)]
     pub per_hour: Option<u32>,
+    /// File requests per day
+    #[serde(default)]
+    pub per_day: Option<u32>,
+    /// File bytes per hour
+    #[serde(default)]
+    pub bytes_per_hour: Option<u64>,
     /// File bytes per day
     #[serde(default)]
     pub bytes_per_day: Option<u64>,
@@ -250,6 +262,8 @@ impl MediaConfig {
             .with_rate_limit(rate_limit(
                 self.per_second,
                 self.per_hour,
+                self.per_day,
+                self.bytes_per_hour,
                 self.bytes_per_day,
             ))
             .with_send_token(
@@ -264,6 +278,8 @@ impl MediaConfig {
 fn rate_limit(
     per_second: Option<u32>,
     per_hour: Option<u32>,
+    per_day: Option<u32>,
+    bytes_per_hour: Option<u64>,
     bytes_per_day: Option<u64>,
 ) -> RateLimit {
     let mut rate = RateLimit::default();
@@ -272,6 +288,12 @@ fn rate_limit(
     }
     if let Some(n) = per_hour {
         rate = rate.per_hour(n);
+    }
+    if let Some(n) = per_day {
+        rate = rate.per_day(n);
+    }
+    if let Some(n) = bytes_per_hour {
+        rate = rate.bytes_per_hour(n);
     }
     if let Some(n) = bytes_per_day {
         rate = rate.bytes_per_day(n);
@@ -554,6 +576,12 @@ impl ServerConfig {
         );
         config = config.with_retry(retry);
 
-        Ok(config.with_rate_limit(rate_limit(l.per_second, l.per_hour, l.bytes_per_day)))
+        Ok(config.with_rate_limit(rate_limit(
+            l.per_second,
+            l.per_hour,
+            l.per_day,
+            l.bytes_per_hour,
+            l.bytes_per_day,
+        )))
     }
 }

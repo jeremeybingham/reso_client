@@ -142,7 +142,7 @@ The full API, with examples, is the rustdoc: [docs.rs/reso-client](https://docs.
 | `RESO_DATASET_ID` | No | Bridge Interactive's dataset path segment; leave unset for other servers |
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
 | `RESO_MAX_RETRIES` | No | Retries for network errors and 429/502/503/504 (default 0) |
-| `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` | No | Client-side ceilings (default none) |
+| `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_RATE_PER_DAY`, `RESO_BYTES_PER_HOUR`, `RESO_BYTES_PER_DAY` | No | Client-side ceilings (default none) |
 
 Or in code:
 
@@ -214,8 +214,6 @@ filter on every request and inline `$expand` are now supported, [#65](https://gi
 
 - **Media from expanded records** ([#67](https://github.com/jeremeybingham/reso_client/issues/67)), downloaded during sync. `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
   are signed, single-use and expire after an hour, so files must be fetched soon after the sync that saw them.
-- **More rate limits** ([#68](https://github.com/jeremeybingham/reso_client/issues/68)). MLS Grid also caps requests per day (40,000) and download volume per hour (4 GB); `RateLimit`
-  has per second, per hour and bytes per day only.
 
 **Small fixes:** run ids ([#69](https://github.com/jeremeybingham/reso_client/issues/69)) have one-second resolution, so two syncs in the same second would share file names.
 

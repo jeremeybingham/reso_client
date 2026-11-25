@@ -39,6 +39,8 @@ fn secrets_resolve_from_named_env_variables() {
     assert!(matches!(one.auth, Auth::ClientCredentials(ref c) if c.client_secret == "the-secret"));
     assert_eq!(one.retry.max_retries, 4);
     assert_eq!(one.rate_limit.per_second, Some(2));
+    assert_eq!(one.rate_limit.per_day, Some(40_000));
+    assert_eq!(one.rate_limit.bytes_per_hour, Some(4_000_000_000));
     let two = config.servers[1].client_config_with(env).unwrap();
     assert!(matches!(two.auth, Auth::Bearer(ref t) if t == "the-token"));
     assert_eq!(two.dataset_id.as_deref(), Some("ref_data"));
@@ -194,6 +196,13 @@ fn media_settings_build_a_download_config() {
     let config = Config::parse(EXAMPLE).unwrap();
     let two = config.servers[1].media.download_config();
     assert_eq!(two.rate_limit.per_second, Some(4));
+    let media = "[server.media]\nper_day = 9\nbytes_per_hour = 7\n";
+    let text = EXAMPLE.replace("[server.media]\n", media);
+    let again = Config::parse(&text).unwrap();
+    assert_eq!(
+        again.servers[1].media.download_config().rate_limit.per_day,
+        Some(9)
+    );
     assert_eq!(two.timeout, std::time::Duration::from_secs(300));
     assert_eq!(two.send_token, SendToken::SameHost);
     assert_eq!(two.retry.max_retries, 5, "the ingest default applies");

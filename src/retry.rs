@@ -10,7 +10,7 @@
 //!   errors and 429/502/503/504 are retried with exponential backoff and jitter; a `Retry-After`
 //!   header (seconds, or an HTTP date) replaces the computed wait. Other 4xx answers are never
 //!   retried.
-//! - [`RateLimit`]: a ceiling on requests per second, requests per hour and bytes per day for one
+//! - [`RateLimit`]: a ceiling on requests per second, hour and day and bytes per hour and day for one
 //!   client (one server). Requests wait their turn instead of failing.
 //! - [`ClientStats`]: counters of requests sent, retries made and body bytes received.
 //!
@@ -167,9 +167,10 @@ fn parse_http_date(value: &str) -> Option<SystemTime> {
 ///
 /// - `per_second`: requests started in any one second.
 /// - `per_hour`: requests started in any one hour.
-/// - `bytes_per_day`: response body bytes received in any 24 hours. The size of a response is
-///   known only after it arrives, so one response can overshoot the ceiling; the next request
-///   waits until enough older bytes have aged out.
+/// - `per_day`: requests started in any 24 hours.
+/// - `bytes_per_hour`, `bytes_per_day`: response body bytes received in any hour or 24 hours. The
+///   size of a response is known only after it arrives, so one response can overshoot the
+///   ceiling; the next request waits until enough older bytes have aged out.
 ///
 /// # Examples
 ///
@@ -184,6 +185,10 @@ pub struct RateLimit {
     pub per_second: Option<u32>,
     /// Requests per hour (`None` = unlimited)
     pub per_hour: Option<u32>,
+    /// Requests per 24 hours (`None` = unlimited)
+    pub per_day: Option<u32>,
+    /// Response bytes per hour (`None` = unlimited)
+    pub bytes_per_hour: Option<u64>,
     /// Response bytes per 24 hours (`None` = unlimited)
     pub bytes_per_day: Option<u64>,
 }
@@ -201,6 +206,18 @@ impl RateLimit {
         self
     }
 
+    /// Allow at most `n` requests per rolling 24 hours (0 is treated as 1)
+    pub fn per_day(mut self, n: u32) -> Self {
+        self.per_day = Some(n);
+        self
+    }
+
+    /// Allow at most `n` response bytes per hour
+    pub fn bytes_per_hour(mut self, n: u64) -> Self {
+        self.bytes_per_hour = Some(n);
+        self
+    }
+
     /// Allow at most `n` response bytes per 24 hours
     pub fn bytes_per_day(mut self, n: u64) -> Self {
         self.bytes_per_day = Some(n);
@@ -214,27 +231,33 @@ const DAY: Duration = Duration::from_secs(86_400);
 
 #[derive(Default)]
 struct LimiterState {
-    /// Start times of requests in the last hour, oldest first
+    /// Start times of requests, oldest first, kept as long as the longest request window
     starts: VecDeque<Instant>,
     /// Response sizes received in the last 24 hours, oldest first
     bytes: VecDeque<(Instant, u64)>,
-    bytes_total: u64,
 }
 
 impl LimiterState {
-    fn prune(&mut self, now: Instant) {
+    fn prune(&mut self, limit: &RateLimit, now: Instant) {
+        let window = if limit.per_day.is_some() {
+            DAY
+        } else if limit.per_hour.is_some() {
+            HOUR
+        } else {
+            SECOND
+        };
         while self
             .starts
             .front()
-            .is_some_and(|t| now.duration_since(*t) >= HOUR)
+            .is_some_and(|t| now.duration_since(*t) >= window)
         {
             self.starts.pop_front();
         }
-        while let Some(&(t, n)) = self.bytes.front() {
-            if now.duration_since(t) < DAY {
-                break;
-            }
-            self.bytes_total -= n;
+        while self
+            .bytes
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) >= DAY)
+        {
             self.bytes.pop_front();
         }
     }
@@ -244,7 +267,11 @@ impl LimiterState {
         let mut wait: Option<Duration> = None;
         let mut need = |d: Duration| wait = Some(wait.map_or(d, |w| w.max(d)));
 
-        for (max, window) in [(limit.per_second, SECOND), (limit.per_hour, HOUR)] {
+        for (max, window) in [
+            (limit.per_second, SECOND),
+            (limit.per_hour, HOUR),
+            (limit.per_day, DAY),
+        ] {
             let Some(max) = max else { continue };
             let max = max.max(1) as usize;
             let in_window: Vec<Instant> = self
@@ -259,13 +286,19 @@ impl LimiterState {
                 need((t + window).saturating_duration_since(now));
             }
         }
-        if let Some(max) = limit.bytes_per_day {
-            if self.bytes_total >= max {
-                let mut left = self.bytes_total;
-                for &(t, n) in &self.bytes {
+        for (max, window) in [(limit.bytes_per_hour, HOUR), (limit.bytes_per_day, DAY)] {
+            let Some(max) = max else { continue };
+            let in_window: Vec<&(Instant, u64)> = self
+                .bytes
+                .iter()
+                .filter(|(t, _)| now.duration_since(*t) < window)
+                .collect();
+            let mut left: u64 = in_window.iter().map(|(_, n)| n).sum();
+            if left >= max {
+                for (t, n) in in_window {
                     left -= n;
                     if left < max {
-                        need((t + DAY).saturating_duration_since(now));
+                        need((*t + window).saturating_duration_since(now));
                         break;
                     }
                 }
@@ -298,7 +331,7 @@ impl Limiter {
         let mut state = self.state.lock().await;
         loop {
             let now = Instant::now();
-            state.prune(now);
+            state.prune(&self.limit, now);
             match state.wait(&self.limit, now) {
                 None => {
                     state.starts.push_back(now);
@@ -309,14 +342,13 @@ impl Limiter {
         }
     }
 
-    /// Count response bytes against the daily ceiling
+    /// Count response bytes against the hourly and daily ceilings
     pub(crate) async fn record_bytes(&self, n: u64) {
-        if self.limit.bytes_per_day.is_none() || n == 0 {
+        if (self.limit.bytes_per_day.is_none() && self.limit.bytes_per_hour.is_none()) || n == 0 {
             return;
         }
         let mut state = self.state.lock().await;
         state.bytes.push_back((Instant::now(), n));
-        state.bytes_total += n;
     }
 }
 
@@ -498,6 +530,27 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(1));
         limiter.acquire().await; // 1200 >= 1000: waits until the first 600 age out
         assert!(t0.elapsed() >= DAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bytes_per_hour_waits_for_old_bytes_to_age_out() {
+        let limiter = Limiter::new(RateLimit::default().bytes_per_hour(1000));
+        let t0 = Instant::now();
+        limiter.acquire().await;
+        limiter.record_bytes(600).await;
+        limiter.acquire().await; // 600 < 1000: no wait
+        limiter.record_bytes(600).await;
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        limiter.acquire().await; // 1200 >= 1000: waits for the first 600 to age out of the hour
+        assert!(t0.elapsed() >= HOUR && t0.elapsed() < DAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn per_day_limit_is_never_exceeded() {
+        let times = start_times(RateLimit::default().per_hour(3).per_day(5), 7).await;
+        assert!(times[2] < HOUR);
+        assert!(times[3] >= HOUR && times[4] >= HOUR && times[4] < DAY);
+        assert!(times[5] >= DAY && times[6] >= DAY);
     }
 
     #[tokio::test(start_paused = true)]
