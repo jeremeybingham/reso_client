@@ -86,27 +86,41 @@ fn commit_waits_until_the_file_is_delivered() {
 }
 
 #[test]
-fn rotation_delivers_each_full_file_and_finish_the_last() {
+fn a_full_file_is_delivered_at_the_page_end_so_the_checkpoint_can_move() {
     let dir = TempDir::new("rotate");
     let sink = Arc::new(MemorySink::default());
     let mut w = writer(&dir, &sink, 150);
-    let records: Vec<_> = (0..6).map(|i| json!({"k": i})).collect();
-    w.write_batch(&records, "2026-11-25T00:00:00Z").unwrap();
+    let page = |from: i32| -> Vec<_> { (from..from + 3).map(|i| json!({"k": i})).collect() };
+    // A page is never split: the file passes the limit, then commit delivers it
+    w.write_batch(&page(0), "2026-11-25T00:00:00Z").unwrap();
+    assert!(sink.files.lock().unwrap().is_empty());
+    assert!(
+        w.commit().unwrap(),
+        "a full file is delivered at the page end"
+    );
+    assert_eq!(sink.files.lock().unwrap().len(), 1);
+    w.write_batch(&page(3), "2026-11-25T00:00:00Z").unwrap();
+    assert!(w.commit().unwrap());
+    // Delete events still rotate at the limit
+    let keys: Vec<_> = (0..6).map(|i| json!(i)).collect();
+    w.write_deletes(&keys, "2026-11-25T00:00:00Z").unwrap();
     let entries = w.finish().unwrap();
-    assert!(entries.len() > 1);
+    assert!(entries.len() > 3, "{entries:?}");
     let delivered: Vec<String> = sink.files.lock().unwrap().keys().cloned().collect();
     assert_eq!(
         delivered,
         entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>()
     );
-    let lines: usize = sink
-        .files
-        .lock()
-        .unwrap()
+    let files = sink.files.lock().unwrap();
+    for (i, name) in delivered.iter().take(2).enumerate() {
+        let body = String::from_utf8_lossy(&files[name]).into_owned();
+        assert_eq!(body.lines().count(), 3, "file {i} holds one whole page");
+    }
+    let lines: usize = files
         .values()
         .map(|b| String::from_utf8_lossy(b).lines().count())
         .sum();
-    assert_eq!(lines, 6);
+    assert_eq!(lines, 12);
 }
 
 #[test]

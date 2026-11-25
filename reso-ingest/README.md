@@ -228,6 +228,10 @@ multipart above; never replaces a name; use it from a multi-threaded runtime).
 `RESO_S3_BUCKET`), `--s3-prefix`, `--s3-endpoint` (R2, MinIO, GCS), `--s3-region`, `--s3-allow-http` (a local test
 server) and `--s3-single-delete` (GCS). State then goes to `<prefix>/state/` and finished data files to `<prefix>/data/`,
 so a killed run resumes from the bucket and workers share feeds through leases. `--s3-bucket` conflicts with `--state`.
+A checkpoint is saved only once the file holding its rows is in the bucket, so NDJSON files are then closed at the first
+page end past `--max-file-mb` (a file can pass the limit by up to one page, as Parquet files do) rather than in the
+middle of a page; a killed run loses at most the open file, whose pages the next run fetches again. A killed process
+leaves its lease behind, so its feeds wait up to 5 minutes before another worker takes them over.
 Credentials are the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`. Run manifests (`manifest.<run>.json`) and
 `sync --media` manifests (`media.<run>.json`) go to `<prefix>/data/` next to the data files they list, and a copy of the
 newest run manifest is kept at `<prefix>/state/runs/last.json`, which `status` reads, so a worker with an empty `--out`
