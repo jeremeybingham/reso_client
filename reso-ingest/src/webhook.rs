@@ -29,6 +29,7 @@ pub fn run_summary(manifest: &RunManifest, manifest_path: Option<&str>) -> Value
         "started_at": manifest.started_at,
         "finished_at": manifest.finished_at,
         "clean": manifest.is_clean(),
+        "interrupted": manifest.interrupted,
         "resources": manifest.resources.len(),
         "records": manifest.resources.iter().map(|r| r.records).sum::<u64>(),
         "deletes": manifest.resources.iter().map(|r| r.deletes).sum::<u64>(),

@@ -31,7 +31,7 @@ cargo run -p reso-ingest -- status --out data/
 - **`status`** shows the saved checkpoints and the last run's manifest.
 
 Progress lines (`##progress step=N/T label=server/resource`) go to stderr and the summary to stdout. Exit code `0` on
-success, `1` if a server or resource failed (the summary names it), `2` for bad usage or configuration. `--help` on
+success, `1` if a server or resource failed (the summary names it), `2` for bad usage or configuration, `3` when a shutdown request ended a `sync` early (see Shutdown). `--help` on
 any command lists every option.
 
 ## Logs
@@ -211,6 +211,15 @@ In `--out` (default `reso-out`):
   warning in the manifest and log (`skipped: another process is syncing this feed`), without failing the run. After a
   crash the lease runs out in at most 5 minutes, then the next run takes the feed over. It works for processes that share
   the state directory on a local disk; `media` does not take leases yet. Shared backends are #85.
+
+## Shutdown
+
+On SIGTERM or Ctrl-C a `sync` stops asking for pages. A page request still in flight is dropped (its records were never
+written, so the next run fetches that page again); everything already written is flushed and checkpointed. Resources
+not yet started are left out, the manifest and the summary say `interrupted`, the webhook summary has `"interrupted":
+true`, and the exit code is `3`. Nothing is lost or repeated: the next `sync` continues from the checkpoints. A second
+signal exits at once with code `130`, with no manifest. In a container, give the stop a grace period longer than one
+page request (`docker stop -t`, Kubernetes `terminationGracePeriodSeconds`). `media` does not handle signals yet.
 
 ## How it syncs
 

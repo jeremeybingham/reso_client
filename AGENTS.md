@@ -83,6 +83,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature)
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/checkpoint.rs CheckpointStore: JSON files for checkpoints, key sets, event sequences
+  src/shutdown.rs   Shutdown: a flag `sync` checks between pages; the binary sets it on SIGTERM/Ctrl-C (cli::watch_signals), exit code 3
   src/lease.rs      Lease: lock file per (server, resource) with expiry and renewal; `sync` skips a feed another process holds
   src/deletes.rs    reconcile_deletes, EventFeed, FlagDeleteWriter: delete events by key diff, EntityEvent or flag field;
                     DeleteLimits holds a mass delete back (`--allow-mass-deletes` releases it)
@@ -96,7 +97,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/error.rs      IngestError
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
   servers.example.toml, tests/ (wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
-                    log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; lease_tests.rs for held feeds)
+                    log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; lease_tests.rs for held feeds; shutdown_tests.rs for a stop in the middle of a run)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),

@@ -2,7 +2,7 @@
 //!
 //! [`run`] takes the arguments and two writers (stdout and stderr in the binary) and returns the exit
 //! code, so tests drive it in-process. Exit codes: `0` success, `1` a server or resource failed,
-//! `2` bad usage or an unreadable configuration. Progress goes to the error writer, results to the
+//! `2` bad usage or an unreadable configuration, `3` a `sync` cut short by SIGTERM or Ctrl-C. Progress goes to the error writer, results to the
 //! output writer. Secrets are read from the environment variables named in the configuration and are
 //! never printed. [`run_main`] also installs the log subscriber (`--log-format`, `RUST_LOG`).
 
@@ -30,6 +30,7 @@ use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
+use crate::shutdown::Shutdown;
 use crate::webhook::{post_summary, run_summary};
 
 const TIMESTAMP_FIELD: &str = "ModificationTimestamp";
@@ -40,7 +41,7 @@ const DEFAULT_MAX_FILE_MB: u64 = 256;
 ///
 /// Secrets are read from the environment variables the configuration names and are never
 /// printed. Exit codes: 0 success, 1 a server or resource failed (named in the summary),
-/// 2 bad usage or configuration.
+/// 2 bad usage or configuration, 3 interrupted by SIGTERM or Ctrl-C.
 #[derive(Debug, Parser)]
 #[command(name = "reso-ingest", version)]
 struct Cli {
@@ -208,8 +209,22 @@ impl Args {
 /// It installs no log subscriber (tests and library users choose their own); the binary calls
 /// [`run_main`].
 pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    run_with_shutdown(args, out, err, Shutdown::new()).await
+}
+
+/// Like [`run`], with a [`Shutdown`] the caller can trigger
+///
+/// A `sync` that sees the request stops after the last page written, saves what is written, marks the
+/// manifest `interrupted` and returns [`EXIT_INTERRUPTED`]. The binary triggers it on SIGTERM or
+/// Ctrl-C; tests trigger it directly.
+pub async fn run_with_shutdown(
+    args: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    shutdown: Shutdown,
+) -> i32 {
     match parse(args, out, err) {
-        Ok(cli) => execute(cli, out, err).await,
+        Ok(cli) => execute(cli, out, err, shutdown).await,
         Err(code) => code,
     }
 }
@@ -241,7 +256,52 @@ pub async fn run_main(args: &[String], out: &mut dyn Write, err: &mut dyn Write)
     if tracing::subscriber::set_global_default(subscriber).is_err() {
         let _ = writeln!(err, "warning: a log subscriber is already installed");
     }
-    execute(cli, out, err).await
+    let shutdown = Shutdown::new();
+    watch_signals(shutdown.clone());
+    execute(cli, out, err, shutdown).await
+}
+
+/// Exit code of a `sync` that a shutdown request (SIGTERM, Ctrl-C) ended early
+pub const EXIT_INTERRUPTED: i32 = 3;
+
+/// Exit code when a second shutdown signal ends the process at once (as after Ctrl-C in a shell)
+const EXIT_FORCED: i32 = 130;
+
+/// Trigger `shutdown` on the first SIGTERM or Ctrl-C; a second one exits the process at once
+fn watch_signals(shutdown: Shutdown) {
+    tokio::spawn(async move {
+        let mut count = 0;
+        loop {
+            if wait_for_signal().await.is_err() {
+                return; // no signal handling here; the run goes on without it
+            }
+            count += 1;
+            if count > 1 {
+                eprintln!("second signal: exiting now");
+                std::process::exit(EXIT_FORCED);
+            }
+            tracing::warn!("shutdown requested: stopping after the last page written");
+            shutdown.trigger();
+        }
+    });
+}
+
+#[cfg(unix)]
+async fn wait_for_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    // Re-created each time: cheap, and keeps the handler installed between calls
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn wait_for_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 /// Parse the arguments; `Err` is the exit code (help and version are printed to `out`)
@@ -260,7 +320,7 @@ fn parse(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<Cl
     }
 }
 
-async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: Shutdown) -> i32 {
     match cli.command {
         Command::Sync {
             config,
@@ -293,7 +353,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                 metrics_file,
                 ..Args::default()
             };
-            sync(args, out, err).await
+            sync(args, out, err, shutdown).await
         }
         Command::Media {
             config,
@@ -419,9 +479,10 @@ struct SyncOptions {
     start_over: bool,
     max_file_bytes: u64,
     format: Format,
+    shutdown: Shutdown,
 }
 
-async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Shutdown) -> i32 {
     let (config, servers) = match load_servers(&args, err) {
         Ok(v) => v,
         Err(code) => return code,
@@ -448,6 +509,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         start_over: args.start_over,
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
+        shutdown,
     });
 
     let (tx, mut rx) = unbounded_channel::<String>();
@@ -471,6 +533,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     };
 
     let mut manifest = RunManifest::new(&options.run_id);
+    manifest.interrupted = options.shutdown.is_triggered();
     let mut media_manifest = MediaManifest::new(&options.run_id);
     for report in reports {
         match report.result {
@@ -528,6 +591,9 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         let _ = writeln!(err, "error: {e}");
         return 1;
     }
+    if manifest.interrupted {
+        return EXIT_INTERRUPTED;
+    }
     i32::from(!clean)
 }
 
@@ -580,6 +646,10 @@ async fn sync_server(
     let store = CheckpointStore::new(&options.state);
     let total = resources.len();
     for (i, resource) in resources.iter().enumerate() {
+        if options.shutdown.is_triggered() {
+            tracing::warn!("shutdown requested: not starting the remaining resources");
+            break;
+        }
         let explicit = !options.resources.is_empty();
         let label = format!("{name}/{resource}");
         // Events inside carry `resource`; the server and run spans add `server` and `run_id`
@@ -678,6 +748,7 @@ async fn sync_server(
                 &store,
                 options.start_over,
                 page_media.as_mut(),
+                &options.shutdown,
             )
             .instrument(span.clone())
             .await;
@@ -693,12 +764,13 @@ async fn sync_server(
                 &store,
                 options.start_over,
                 page_media.as_mut(),
+                &options.shutdown,
             )
             .instrument(span.clone())
             .await
         };
         entry.warnings = checked.warnings();
-        if full_load && entry.error.is_none() {
+        if full_load && entry.error.is_none() && !entry.interrupted {
             // A full load should hold what the server counts (servers without $count are skipped)
             let written = entry.records;
             entry.warnings.extend(
@@ -707,7 +779,11 @@ async fn sync_server(
                     .await,
             );
         }
-        if options.deletes && entry.error.is_none() && server.deletes.flag_field.is_none() {
+        if options.deletes
+            && entry.error.is_none()
+            && !entry.interrupted
+            && server.deletes.flag_field.is_none()
+        {
             let deleted = reconcile_deletes(
                 &client,
                 &name,
@@ -735,6 +811,9 @@ async fn sync_server(
             }
         });
         span.in_scope(|| match &entry.error {
+            None if entry.interrupted => {
+                tracing::warn!(records = entry.records, "resource interrupted")
+            }
             None => tracing::info!(
                 records = entry.records,
                 deletes = entry.deletes,
@@ -853,6 +932,7 @@ fn failed_entry(server: &str, resource: &str, error: &str) -> ResourceEntry {
         stats: ResourceStats::default(),
         warnings: Vec::new(),
         deletes_held: 0,
+        interrupted: false,
     }
 }
 
@@ -866,10 +946,10 @@ fn print_summary(manifest: &RunManifest, path: Option<&Path>, out: &mut dyn Writ
         manifest.resources.len()
     );
     for r in &manifest.resources {
-        let outcome = r
-            .error
-            .as_ref()
-            .map_or("ok".to_string(), |e| format!("FAILED: {e}"));
+        let outcome = r.error.as_ref().map_or(
+            if r.interrupted { "INTERRUPTED" } else { "ok" }.to_string(),
+            |e| format!("FAILED: {e}"),
+        );
         let _ = writeln!(
             out,
             "  {}/{}: {} records, {} deletes, {} files, {outcome}",
@@ -895,6 +975,12 @@ fn print_summary(manifest: &RunManifest, path: Option<&Path>, out: &mut dyn Writ
                 .map(|r| r.server.as_str()),
         )
         .collect();
+    if manifest.interrupted {
+        let _ = writeln!(
+            out,
+            "INTERRUPTED by a shutdown request: output and checkpoints are consistent, the next run continues"
+        );
+    }
     if failed.is_empty() {
         let _ = writeln!(out, "all servers ok");
     } else {
