@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `reso-ingest --deletes` key comparison at millions of keys (#87): key sets are saved as sorted lines
+  (`<server>.<resource>.keys.ndjson`: a header line, then one key per line) instead of one JSON document, pulled keys
+  are sorted in chunks spilled to temporary files and the two sets are diffed by merging, so memory stays flat:
+  24 MiB peak for 1M and for 10M keys, against 363 MiB and 3.3 GiB before. An old `.keys.json` key set is read once
+  and converted. Delete events now come out sorted by key. `DeleteTarget` gains `scratch_dir` and `chunk_keys`
+  (`with_scratch_dir`, `with_chunk_keys`); the command uses `<out>/.scratch`. `StateStore` gains provided methods
+  `get_to_file` and `put_from_file` (overridden to stream by `FileStateStore` and `S3StateStore`, multipart above
+  32 MiB). `CheckpointStore::load_keys` returns keys sorted and without repeats. The load harness has a `deletes`
+  scenario, and its fake server sets `TCP_NODELAY` (small pages had waited ~40 ms each).
+
 ### Added
 - `reso-ingest purge --server NAME` (#93, third part): deletes one server's data files (found by their `source` tag and
   the run manifests), its media directory and its state keys. A dry run unless `--execute`, which requires `--by`.

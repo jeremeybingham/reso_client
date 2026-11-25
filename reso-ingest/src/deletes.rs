@@ -1,12 +1,16 @@
 //! Deletes: finding records that left a server's feed
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
 use reso_client::{Metadata, QueryBuilder, ResoClient};
 use serde_json::Value;
 
-use crate::checkpoint::CheckpointStore;
+use crate::checkpoint::{keys_header, CheckpointStore};
 use crate::error::IngestError;
+use crate::keyset::{diff, ExternalSorter, KeyLines, ScratchDir, CHUNK_KEYS};
 use crate::manifest::FileEntry;
 use crate::manifest::{ResourceEntry, ResourceStats};
 use crate::output::{now_rfc3339, RecordWriter};
@@ -60,6 +64,13 @@ pub struct DeleteTarget<'a> {
     pub filter: Option<&'a str>,
     /// When to hold deletes back instead of writing them
     pub limits: DeleteLimits,
+    /// Where the key comparison keeps its temporary files (sorted runs, the next key set, the
+    /// deleted keys), in a new subdirectory removed after the pass; `None` is the system temporary
+    /// directory. Needs about three times the size of the key set (some 40 MB per million keys).
+    pub scratch_dir: Option<&'a Path>,
+    /// Keys held in memory before they are sorted and spilled to a file (100 000 by default,
+    /// some 10 MB); memory use of the key comparison stays near this whatever the key count
+    pub chunk_keys: usize,
 }
 
 /// When [`reconcile_deletes`] holds deletes back for review instead of writing them
@@ -107,7 +118,21 @@ impl<'a> DeleteTarget<'a> {
             key_field,
             filter: None,
             limits: DeleteLimits::default(),
+            scratch_dir: None,
+            chunk_keys: CHUNK_KEYS,
         }
+    }
+
+    /// Keep the key comparison's temporary files under `dir`
+    pub fn with_scratch_dir(mut self, dir: &'a Path) -> Self {
+        self.scratch_dir = Some(dir);
+        self
+    }
+
+    /// Hold `n` keys in memory before spilling a sorted run (at least 1)
+    pub fn with_chunk_keys(mut self, n: usize) -> Self {
+        self.chunk_keys = n.max(1);
+        self
     }
 
     /// Hold deletes back when they pass `limits`
@@ -156,7 +181,9 @@ impl<'a> DeleteTarget<'a> {
 /// set is not empty is refused as a likely server fault, not taken as "everything was deleted".
 ///
 /// Keys are compared as JSON values; event mode assumes string keys (the event feed carries the
-/// key as text). Memory use grows with the number of keys in the resource.
+/// key as text). The key comparison keeps key sets as sorted files and diffs them by merging,
+/// so memory stays near [`DeleteTarget::chunk_keys`] keys however many the resource holds; its
+/// temporary files go to [`DeleteTarget::scratch_dir`].
 pub async fn reconcile_deletes(
     client: &ResoClient,
     server: &str,
@@ -220,6 +247,9 @@ fn emit(writer: &mut dyn RecordWriter, keys: &[Value]) -> Result<(), String> {
     writer.flush().map_err(text)
 }
 
+/// Delete events go to the writer in batches of this many keys
+const EMIT_BATCH: usize = 10_000;
+
 async fn by_key_diff(
     client: &ResoClient,
     server: &str,
@@ -228,7 +258,15 @@ async fn by_key_diff(
     store: &CheckpointStore,
 ) -> Outcome {
     let (resource, key_field) = (target.resource, target.key_field);
-    let previous = store.load_keys(server, resource).await.map_err(text)?;
+    let base = target
+        .scratch_dir
+        .map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let scratch = ScratchDir::new(&base).map_err(text)?;
+    let previous = store
+        .fetch_keys(server, resource, &scratch.file("previous"))
+        .await
+        .map_err(text)?;
+    let had_previous = previous.is_some();
 
     // Pull every key first; nothing is decided until the whole pull has succeeded.
     let query = target
@@ -236,7 +274,7 @@ async fn by_key_diff(
         .select(&[key_field])
         .build()
         .map_err(text)?;
-    let mut current: BTreeMap<String, Value> = BTreeMap::new();
+    let mut sorter = ExternalSorter::new(&scratch, target.chunk_keys);
     let mut page = client.execute_page(&query).await.map_err(text)?;
     loop {
         for record in &page.records {
@@ -246,42 +284,70 @@ async fn by_key_diff(
                 .ok_or_else(|| {
                     format!("a record has no `{key_field}`; the key pull is not trusted")
                 })?;
-            current.insert(key.to_string(), key.clone());
+            sorter.push(key.to_string()).map_err(text)?;
         }
         match client.next_page(&page).await.map_err(text)? {
             Some(next) => page = next,
             None => break,
         }
     }
+    let mut current = sorter.finish().map_err(text)?;
 
-    let mut deleted: Vec<Value> = Vec::new();
-    if let Some(previous) = &previous {
-        if current.is_empty() && !previous.is_empty() {
+    // One merge pass writes the next key set and the deleted keys, and counts both
+    let (next_path, deleted_path) = (scratch.file("next"), scratch.file("deleted"));
+    let create = |p: &Path| {
+        File::create(p)
+            .map(BufWriter::new)
+            .map_err(|e| e.to_string())
+    };
+    let (mut next, mut deleted_out) = (create(&next_path)?, create(&deleted_path)?);
+    next.write_all(keys_header(server, resource).as_bytes())
+        .map_err(text)?;
+    let counts = diff(
+        previous,
+        &mut current,
+        &mut next,
+        &next_path,
+        &mut deleted_out,
+        &deleted_path,
+    )
+    .map_err(text)?;
+    next.flush().map_err(text)?;
+    deleted_out.flush().map_err(text)?;
+    drop((next, deleted_out, current));
+
+    if had_previous {
+        if counts.current == 0 && counts.previous > 0 {
             return Err(format!(
                 "the key pull returned no keys but {} were known; refusing to delete them all",
-                previous.len()
+                counts.previous
             ));
         }
-        let mut seen = HashSet::new();
-        for key in previous {
-            let id = key.to_string();
-            if seen.insert(id.clone()) && !current.contains_key(&id) {
-                deleted.push(key.clone());
+        if let Some(why) = target
+            .limits
+            .exceeded(counts.deleted, Some(counts.previous))
+        {
+            // The key set is not replaced, so the next run finds the same deletes
+            return Ok(Pass::Held(counts.deleted, why));
+        }
+        let mut lines = KeyLines::open(&deleted_path).map_err(text)?;
+        let mut batch = Vec::with_capacity(EMIT_BATCH.min(counts.deleted as usize));
+        while let Some(line) = lines.next_key().map_err(text)? {
+            batch.push(serde_json::from_str(&line).map_err(text)?);
+            if batch.len() == EMIT_BATCH {
+                emit(writer, &batch)?;
+                batch.clear();
             }
         }
-        let known = Some(previous.len() as u64);
-        if let Some(why) = target.limits.exceeded(deleted.len() as u64, known) {
-            // The key set is not replaced, so the next run finds the same deletes
-            return Ok(Pass::Held(deleted.len() as u64, why));
+        if !batch.is_empty() {
+            emit(writer, &batch)?;
         }
-        emit(writer, &deleted)?;
     }
-    let keys: Vec<Value> = current.into_values().collect();
     store
-        .save_keys(server, resource, &keys)
+        .store_keys(server, resource, &next_path)
         .await
         .map_err(text)?;
-    Ok(Pass::Written(deleted.len() as u64))
+    Ok(Pass::Written(if had_previous { counts.deleted } else { 0 }))
 }
 
 async fn by_events(

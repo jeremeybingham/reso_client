@@ -107,7 +107,7 @@ async fn checkpoint_state_lives_in_any_backend() {
         [
             "mls.Property.events.json",
             "mls.Property.json",
-            "mls.Property.keys.json"
+            "mls.Property.keys.ndjson"
         ]
     );
     let listed = store.list().await.unwrap();
@@ -171,4 +171,28 @@ async fn media_index_round_trips() {
         MediaIndex::load(&memory, "other").await.unwrap(),
         MediaIndex::default()
     );
+}
+
+#[tokio::test]
+async fn values_copy_to_and_from_files_on_every_backend() {
+    let dir = std::env::temp_dir().join(format!("reso-ingest-state-files-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src");
+    std::fs::write(&src, b"line one\nline two\n").unwrap();
+    let file_store = reso_ingest::FileStateStore::new(dir.join("state"));
+    let stores: [&dyn StateStore; 2] = [&Memory::default(), &file_store];
+    for store in stores {
+        let dest = dir.join("dest");
+        assert!(!store.get_to_file("k.keys.ndjson", &dest).await.unwrap());
+        store.put_from_file("k.keys.ndjson", &src).await.unwrap();
+        assert!(store.get_to_file("k.keys.ndjson", &dest).await.unwrap());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"line one\nline two\n");
+        assert_eq!(
+            store.get("k.keys.ndjson").await.unwrap().unwrap().bytes,
+            b"line one\nline two\n"
+        );
+        assert_eq!(store.list().await.unwrap(), ["k.keys.ndjson"]);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

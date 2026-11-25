@@ -1,5 +1,7 @@
 //! Checkpoints: where each server's resource was last pulled up to
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,6 +11,7 @@ use serde_json::Value;
 
 use crate::checks::SchemaSnapshot;
 use crate::error::IngestError;
+use crate::keyset::{io_error, KeyLines};
 use crate::output::now_rfc3339;
 use crate::state::{invalid, FileStateStore, StateStore};
 
@@ -27,6 +30,27 @@ struct KeysFile {
     resource: String,
     updated_at: String,
     keys: Vec<Value>,
+}
+
+/// First line of a key set in the line format; one key's JSON text per line follows, sorted
+#[derive(Serialize, Deserialize)]
+struct KeysHeader {
+    server: String,
+    resource: String,
+    updated_at: String,
+}
+
+/// The header line of a key set for `server`/`resource`, ending in a newline
+pub(crate) fn keys_header(server: &str, resource: &str) -> String {
+    let header = KeysHeader {
+        server: server.to_string(),
+        resource: resource.to_string(),
+        updated_at: now_rfc3339(),
+    };
+    // Plain strings always serialize
+    let mut line = serde_json::to_string(&header).unwrap_or_default();
+    line.push('\n');
+    line
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,7 +82,8 @@ pub struct CheckpointInfo {
 /// and `_` become `_`) and also records the real server and resource names, which are checked on
 /// load. [`save`](Self::save) replaces the value whole, so a crash leaves either the old or the new
 /// checkpoint, never a torn one. The same store holds the state of delete reconciliation
-/// (`{server}.{resource}.keys.json`, the key set last seen, and `{server}.{resource}.events.json`,
+/// (`{server}.{resource}.keys.ndjson`, the key set last seen as a header line and one sorted key
+/// per line, and `{server}.{resource}.events.json`,
 /// the last event-feed sequence handled) and the schema snapshot (`{server}.@schema.json`).
 /// [`new`](Self::new) keeps them as files in a directory ([`FileStateStore`]);
 /// [`with_store`](Self::with_store) takes any other backend.
@@ -195,11 +220,34 @@ impl CheckpointStore {
 
     /// The key set saved by the last reconciliation, or `None` before the first one
     ///
+    /// Keys come back sorted by their JSON text, without repeats. This holds the whole set in
+    /// memory; [`reconcile_deletes`](crate::reconcile_deletes) streams it instead. A key set saved
+    /// in the old single-JSON format (`{server}.{resource}.keys.json`) is read too.
+    ///
     /// # Errors
     ///
     /// [`IngestError::Output`] when the value is unreadable, invalid or belongs to another server
     /// or resource (a bad value is never treated as "no key set").
     pub async fn load_keys(
+        &self,
+        server: &str,
+        resource: &str,
+    ) -> Result<Option<Vec<Value>>, IngestError> {
+        let key = keys_key(server, resource);
+        let Some(found) = self.store.get(&key).await? else {
+            return self.load_old_keys(server, resource).await;
+        };
+        let bad = |m: String| invalid(self.store.as_ref(), &key, m);
+        let text = std::str::from_utf8(&found.bytes).map_err(|e| bad(e.to_string()))?;
+        let mut lines = text.lines();
+        self.check_keys_header(&key, lines.next().unwrap_or_default(), server, resource)?;
+        lines
+            .map(|line| serde_json::from_str(line).map_err(|e| bad(format!("invalid key: {e}"))))
+            .collect::<Result<Vec<Value>, _>>()
+            .map(Some)
+    }
+
+    async fn load_old_keys(
         &self,
         server: &str,
         resource: &str,
@@ -212,7 +260,7 @@ impl CheckpointStore {
         Ok(Some(file.keys))
     }
 
-    /// Save the key set atomically
+    /// Save the key set atomically, sorted by JSON text and without repeats
     ///
     /// # Errors
     ///
@@ -223,14 +271,89 @@ impl CheckpointStore {
         resource: &str,
         keys: &[Value],
     ) -> Result<(), IngestError> {
-        let file = KeysFile {
-            server: server.to_string(),
-            resource: resource.to_string(),
-            updated_at: now_rfc3339(),
-            keys: keys.to_vec(),
-        };
-        self.write(&state_key(server, resource, "keys"), &file)
+        let mut texts: Vec<String> = keys.iter().map(Value::to_string).collect();
+        texts.sort_unstable();
+        texts.dedup();
+        let mut body = keys_header(server, resource);
+        for t in texts {
+            body.push_str(&t);
+            body.push('\n');
+        }
+        self.store
+            .put(&keys_key(server, resource), body.as_bytes())
+            .await?;
+        self.store
+            .delete(&state_key(server, resource, "keys"), None)
             .await
+            .map(|_| ())
+    }
+
+    /// Copy the saved key set into `dest` and open it after the header, or `None` before the first
+    ///
+    /// A key set in the old single-JSON format is converted once: written in the new format,
+    /// saved, and the old value deleted.
+    pub(crate) async fn fetch_keys(
+        &self,
+        server: &str,
+        resource: &str,
+        dest: &Path,
+    ) -> Result<Option<KeyLines>, IngestError> {
+        let key = keys_key(server, resource);
+        if !self.store.get_to_file(&key, dest).await? {
+            let Some(old) = self.load_old_keys(server, resource).await? else {
+                return Ok(None);
+            };
+            let mut texts: Vec<String> = old.iter().map(Value::to_string).collect();
+            drop(old);
+            texts.sort_unstable();
+            texts.dedup();
+            let mut out = BufWriter::new(File::create(dest).map_err(|e| io_error(dest, e))?);
+            out.write_all(keys_header(server, resource).as_bytes())
+                .map_err(|e| io_error(dest, e))?;
+            for t in texts {
+                writeln!(out, "{t}").map_err(|e| io_error(dest, e))?;
+            }
+            out.flush().map_err(|e| io_error(dest, e))?;
+            drop(out);
+            self.store.put_from_file(&key, dest).await?;
+            self.store
+                .delete(&state_key(server, resource, "keys"), None)
+                .await?;
+            tracing::info!(server, resource, "key set converted to the line format");
+        }
+        let mut lines = KeyLines::open(dest)?;
+        let header = lines.next_key()?.unwrap_or_default();
+        self.check_keys_header(&key, &header, server, resource)?;
+        Ok(Some(lines))
+    }
+
+    /// Save the key set in `src` (written by [`keys_header`] then sorted key lines) atomically
+    pub(crate) async fn store_keys(
+        &self,
+        server: &str,
+        resource: &str,
+        src: &Path,
+    ) -> Result<(), IngestError> {
+        self.store
+            .put_from_file(&keys_key(server, resource), src)
+            .await
+    }
+
+    fn check_keys_header(
+        &self,
+        key: &str,
+        line: &str,
+        server: &str,
+        resource: &str,
+    ) -> Result<(), IngestError> {
+        let header: KeysHeader = serde_json::from_str(line).map_err(|e| {
+            invalid(
+                self.store.as_ref(),
+                key,
+                format!("invalid key set header: {e}"),
+            )
+        })?;
+        self.check_owner(key, (&header.server, &header.resource), server, resource)
     }
 
     /// The last event-feed sequence handled for this resource, or `None` before the first run
@@ -347,6 +470,11 @@ fn checkpoint_key(server: &str, resource: &str) -> String {
 }
 
 // `@` cannot appear in a sanitized resource name, so this never collides with a checkpoint
+/// Key sets in the line format (#87); `{server}.{resource}.keys.json` is the old single-JSON one
+fn keys_key(server: &str, resource: &str) -> String {
+    format!("{}.{}.keys.ndjson", sanitize(server), sanitize(resource))
+}
+
 fn schema_key(server: &str) -> String {
     format!("{}.@schema.json", sanitize(server))
 }

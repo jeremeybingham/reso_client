@@ -162,6 +162,39 @@ pub trait StateStore: Send + Sync + Debug {
 
     /// Where `key` lives, for messages (a file path, a URL); never contains a secret
     fn location(&self, key: &str) -> String;
+
+    /// Copy the value under `key` into the local file `dest` (created or replaced); `false` when
+    /// there is no value
+    ///
+    /// For large values such as key sets (#87). The provided version reads the value into memory
+    /// with [`get`](Self::get); backends override it to stream.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the backend cannot be read or `dest` cannot be written.
+    fn get_to_file<'a>(&'a self, key: &'a str, dest: &'a Path) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            let Some(found) = self.get(key).await? else {
+                return Ok(false);
+            };
+            fs::write(dest, &found.bytes).map_err(|e| io_error(dest, e))?;
+            Ok(true)
+        })
+    }
+
+    /// Store the contents of the local file `src` under `key`, as [`put`](Self::put) does
+    ///
+    /// The provided version reads the file into memory; backends override it to stream.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when `src` cannot be read or the backend cannot be written.
+    fn put_from_file<'a>(&'a self, key: &'a str, src: &'a Path) -> StoreFuture<'a, ()> {
+        Box::pin(async move {
+            let bytes = fs::read(src).map_err(|e| io_error(src, e))?;
+            self.put(key, &bytes).await
+        })
+    }
 }
 
 /// A [`StateStore`] in a local directory: one file per key
@@ -230,6 +263,17 @@ impl FileStateStore {
     }
 
     fn write(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+        self.write_with(key, |tmp| {
+            File::create(tmp).and_then(|mut f| f.write_all(bytes))
+        })
+    }
+
+    /// Fill a temporary file with `fill`, sync it and rename it over the value
+    fn write_with(
+        &self,
+        key: &str,
+        fill: impl FnOnce(&Path) -> std::io::Result<()>,
+    ) -> Result<(), IngestError> {
         let path = self.path(key);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
@@ -238,8 +282,9 @@ impl FileStateStore {
         let mut tmp = path.clone().into_os_string();
         tmp.push(format!(".{}-{n}.tmp", std::process::id()));
         let tmp = PathBuf::from(tmp);
-        let written = File::create(&tmp)
-            .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+        let written = fill(&tmp)
+            .and_then(|()| OpenOptions::new().write(true).open(&tmp))
+            .and_then(|f| f.sync_all())
             .and_then(|()| fs::rename(&tmp, &path));
         written.map_err(|e| {
             let _ = fs::remove_file(&tmp);
@@ -342,6 +387,21 @@ impl StateStore for FileStateStore {
 
     fn location(&self, key: &str) -> String {
         self.path(key).display().to_string()
+    }
+
+    fn get_to_file<'a>(&'a self, key: &'a str, dest: &'a Path) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            let path = self.path(key);
+            match fs::copy(&path, dest) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && !path.exists() => Ok(false),
+                Err(e) => Err(io_error(&path, e)),
+            }
+        })
+    }
+
+    fn put_from_file<'a>(&'a self, key: &'a str, src: &'a Path) -> StoreFuture<'a, ()> {
+        Box::pin(async move { self.write_with(key, |tmp| fs::copy(src, tmp).map(|_| ())) })
     }
 }
 

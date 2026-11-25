@@ -91,7 +91,8 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/audit.rs      AccessLog, AccessEntry: append-only `audit/access.ndjson`, one line per resource pull (#93); per-run copy to the sink
   src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93)
   src/runs.rs       run id reservation in the state store, manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
-  src/checkpoint.rs CheckpointStore: checkpoints, key sets, event sequences, schema snapshots as JSON in a StateStore
+  src/checkpoint.rs CheckpointStore: checkpoints, key sets (sorted lines, `.keys.ndjson`), event sequences, schema snapshots in a StateStore
+  src/keyset.rs     ExternalSorter, diff: key sets at millions of keys, sorted in spilled chunks and diffed by merge (#87)
   src/serve.rs      Daemon, ServeOptions: `reso-ingest serve`, one task per feed (interval, jitter, backoff), axum endpoints
                     (/healthz, /readyz, /metrics, /status); each sync is `cli::sync_server_with` for one resource
   src/shutdown.rs   Shutdown: a flag `sync` checks between pages; the binary sets it on SIGTERM/Ctrl-C (cli::watch_signals), exit code 3

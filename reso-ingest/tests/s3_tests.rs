@@ -165,6 +165,24 @@ async fn state_round_trips_over_http() {
     assert!(!s.delete("a.json", Some(&v1.version)).await.unwrap());
     assert!(s.delete("a.json", Some(&v2.version)).await.unwrap());
     assert_eq!(s.get("a.json").await.unwrap(), None);
+
+    // Key sets go through local files (#87)
+    let dir = std::env::temp_dir().join(format!("reso-s3-http-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("src"), "h\n\"K1\"\n").unwrap();
+    s.put_from_file("m.P.keys.ndjson", &dir.join("src"))
+        .await
+        .unwrap();
+    assert!(s
+        .get_to_file("m.P.keys.ndjson", &dir.join("dest"))
+        .await
+        .unwrap());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("dest")).unwrap(),
+        "h\n\"K1\"\n"
+    );
+    assert!(!s.get_to_file("none", &dir.join("dest2")).await.unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

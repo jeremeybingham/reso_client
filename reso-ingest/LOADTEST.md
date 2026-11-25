@@ -19,6 +19,7 @@ are not a whole record.
 | `clean` | One full sync, no faults | every record exactly once |
 | `faults` | `--fault-percent` (default 5) of `/Property` requests get a fault, split evenly: 503, 429 with `Retry-After: 1`, a 300 ms slow page, the connection closed before the response, or the body cut off halfway. A failed sync is run again, as a scheduler would, up to `--max-runs` | no record missing, none repeated |
 | `kill` | The sync gets SIGKILL `--kills` times (default 3) at even points of the pull; each time a new sync resumes | no record missing; at most one page repeated per kill |
+| `deletes` | `sync --deletes` key comparison only (a checkpoint at the last record is seeded, so no records are pulled): a baseline run, a run after every `--gone-every`-th record (default 100, so 1%) left the server, and a run with nothing new. Not in `all` | each gone key exactly once as a delete event, no other key |
 
 `--server-rps N` makes the server answer 429 above N requests a second. The configuration it writes uses
 `max_retries = 6`, `initial_backoff_ms = 100`, `max_backoff_ms = 2000`. Output goes to `target/loadtest/<scenario>`
@@ -39,6 +40,14 @@ machine (and in `faults`, the waits for `Retry-After` and backoff).
 | 2026-11-25 | 25b8145 | i9-9900K, WSL2 | faults | 1000000 | 9 | 27.8 | 36013 | 24 | 1038 | 44 | 0 | 0 | ok |
 | 2026-11-25 | 25b8145 | i9-9900K, WSL2 | kill | 1000000 | 4 | 11.4 | 87638 | 25 | 1004 | 0 | 2000 | 0 | ok |
 | 2026-11-25 | 9d0e62f + #125 fix | i9-9900K, WSL2 | faults | 1000000 | 1 | 28.8 | 34768 | 26 | 1039 | 44 | 0 | 0 | ok |
+| 2026-11-25 | 00cfe45 (before #87) | i9-9900K, WSL2 | deletes | 1000000 | 3 | 7.1 | 422063 | 363 | 3003 | 0 | 0 | 0 | ok |
+| 2026-11-25 | 00cfe45 (before #87) | i9-9900K, WSL2 | deletes | 10000000 | 3 | 78.7 | 380991 | 3360 | 30003 | 0 | 0 | 0 | ok |
+| 2026-11-25 | 00cfe45 + #87 | i9-9900K, WSL2 | deletes | 1000000 | 3 | 4.6 | 652295 | 24 | 3003 | 0 | 0 | 0 | ok |
+| 2026-11-25 | 00cfe45 + #87 | i9-9900K, WSL2 | deletes | 10000000 | 3 | 48.7 | 616283 | 24 | 30003 | 0 | 0 | 0 | ok |
+
+For `deletes` the records column is keys and records/s is keys per second over the three runs. The fake server set
+`TCP_NODELAY` from the `deletes` rows on; earlier rows ran without it (large pages hardly wait, small ones waited
+about 40 ms each).
 
 Defaults: page size 1000, NDJSON on a local disk, no `--deletes`, no Parquet, no bucket.
 
@@ -55,7 +64,15 @@ Defaults: page size 1000, NDJSON on a local disk, no `--deletes`, no Parquet, no
   lines were seen, but these kills landed between writes; a kill in the middle of writing a page could leave a partial
   last line in an NDJSON file (#86 documents the delivery guarantee).
 
+## Findings from the deletes runs (#87)
+
+- **Before:** the key comparison held both key sets in memory: 363 MiB peak at 1M keys and 3.3 GiB at 10M, with an
+  18 MB (1M) or 178 MB (10M) single-JSON key set rewritten on each pass.
+- **After:** 24 MiB peak at 1M and at 10M keys (chunks of 100 000 keys spill to sorted run files, merged; the saved
+  set is streamed). A pass takes 1.5 s per million keys here, down from 1.9 to 2.9 s; the key set is 12.9 MB per
+  million keys. Each gone key came out exactly once.
+
 ## Not covered yet
 
-- `--deletes` at a million keys (#87), Parquet output, the S3 sink, `sync --media` (#89), and several servers at once.
+- Parquet output, the S3 sink, `sync --media` (#89), and several servers at once.
 - A real network: the fake server is on loopback, so the numbers are an upper bound for the client side.

@@ -18,6 +18,10 @@
 //! - `kill`: the sync is killed (SIGKILL) `--kills` times at even points of the pull, each time
 //!   resumed by a new sync. Every record at least once; repeats at most one page per kill
 //!   (checkpoints are saved after each page, README "What it writes").
+//! - `deletes`: `sync --deletes` key comparison (#87). A checkpoint at the last record is seeded so
+//!   the sync pulls no records and the run is the key pull and diff alone: a baseline run, a run
+//!   after every `--gone-every`-th record left the server (exactly those keys must come out as
+//!   delete events, once each), and a run with nothing new. Not in `all`.
 //!
 //! Linux only for the memory figure (`VmHWM` from `/proc/<pid>/status`). Results print as markdown
 //! table rows for `reso-ingest/LOADTEST.md`. Output is deleted after each scenario unless `--keep`.
@@ -78,6 +82,9 @@ struct Args {
     /// Keep each scenario's output instead of deleting it after the check
     #[arg(long)]
     keep: bool,
+    /// In the `deletes` scenario, every Nth record leaves the server after the baseline
+    #[arg(long, default_value_t = 100)]
+    gone_every: u64,
     /// Seed of the fault sequence
     #[arg(long, default_value_t = 7)]
     seed: u64,
@@ -99,7 +106,7 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let scenarios: Vec<&str> = match args.scenario.as_str() {
         "all" => vec!["clean", "faults", "kill"],
-        s @ ("clean" | "faults" | "kill") => vec![s],
+        s @ ("clean" | "faults" | "kill" | "deletes") => vec![s],
         other => {
             eprintln!("unknown scenario {other}");
             std::process::exit(2);
@@ -199,6 +206,15 @@ struct Fake {
     rng: AtomicU64,
     window: Mutex<(u64, u64)>,
     counters: Counters,
+    /// Records with an index divisible by this are gone (0: none)
+    gone_every: AtomicU64,
+}
+
+impl Fake {
+    fn gone(&self, i: u64) -> bool {
+        let every = self.gone_every.load(Ordering::Relaxed);
+        every > 0 && i.is_multiple_of(every)
+    }
 }
 
 impl Fake {
@@ -386,7 +402,17 @@ fn respond(fake: &Fake, target: &str, host: &str) -> Reply {
         .unwrap_or(fake.cap);
     let from = (start + skip).min(fake.n);
     let to = (from + top.min(fake.cap)).min(fake.n);
-    let value: Vec<Value> = (from..to).map(|i| fake.record(i)).collect();
+    let keys_only = q.get("$select").map(String::as_str) == Some("ListingKey");
+    let value: Vec<Value> = (from..to)
+        .filter(|i| !fake.gone(*i))
+        .map(|i| {
+            if keys_only {
+                json!({"ListingKey": format!("L{i:09}")})
+            } else {
+                fake.record(i)
+            }
+        })
+        .collect();
     let mut body = json!({ "value": value });
     if to < fake.n {
         let raw = target.split("&$skip=").next().unwrap_or(target);
@@ -486,6 +512,9 @@ async fn start_server(fake: Arc<Fake>) -> String {
             let Ok((stream, _)) = listener.accept().await else {
                 continue;
             };
+            // Head and body go out in two writes; without this, small replies (key pages) wait
+            // about 40 ms each for the client's delayed ACK (Nagle)
+            let _ = stream.set_nodelay(true);
             tokio::spawn(serve_conn(fake.clone(), stream));
         }
     });
@@ -555,7 +584,7 @@ fn vm_hwm_kib(pid: u32) -> Option<u64> {
         .ok()
 }
 
-fn spawn_sync(config: &Path, out: &Path, log: &Path) -> Child {
+fn spawn_sync(config: &Path, out: &Path, log: &Path, extra: &[&str]) -> Child {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -567,6 +596,7 @@ fn spawn_sync(config: &Path, out: &Path, log: &Path) -> Child {
         .arg(config)
         .arg("--out")
         .arg(out)
+        .args(extra)
         .env(TOKEN_ENV, "loadtest-token")
         .env("RUST_LOG", "warn")
         .stdout(Stdio::from(log.try_clone().unwrap()))
@@ -576,11 +606,12 @@ fn spawn_sync(config: &Path, out: &Path, log: &Path) -> Child {
 }
 
 /// Run one sync; kill it once the server has sent `kill_at` records (cumulative), if given
-async fn run_sync(dir: &Path, fake: &Fake, kill_at: Option<u64>) -> RunResult {
+async fn run_sync(dir: &Path, fake: &Fake, kill_at: Option<u64>, extra: &[&str]) -> RunResult {
     let mut child = spawn_sync(
         &dir.join("servers.toml"),
         &dir.join("out"),
         &dir.join("sync.log"),
+        extra,
     );
     let pid = child.id();
     let mut peak = 0;
@@ -721,12 +752,16 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
         rng: AtomicU64::new(args.seed),
         window: Mutex::new((0, 0)),
         counters: Counters::default(),
+        gone_every: AtomicU64::new(0),
     });
     let url = start_server(fake.clone()).await;
     let dir = args.workdir.join(scenario);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     write_config(&dir, &url, args);
+    if scenario == "deletes" {
+        return run_deletes(args, &fake, &dir).await;
+    }
     eprintln!(
         "== {scenario}: {} records from {url}, output in {}",
         args.records,
@@ -750,7 +785,7 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
     while runs < args.max_runs {
         runs += 1;
         let kill_at = kill_points.get(kills as usize).copied();
-        let r = run_sync(&dir, &fake, kill_at).await;
+        let r = run_sync(&dir, &fake, kill_at, &[]).await;
         peak = peak.max(r.peak_kib);
         if r.killed {
             kills += 1;
@@ -829,6 +864,118 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
         let _ = std::fs::remove_dir_all(&dir);
     }
     let _ = std::io::stderr().flush();
+    Report { ok, row, json }
+}
+
+fn today() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    format_ts(now).get(..10).unwrap_or("").to_string()
+}
+
+/// Delete events in the output: (lines, keys that should not be there, repeated keys)
+fn check_deletes(out: &Path, fake: &Fake) -> (u64, u64, u64) {
+    let mut seen = std::collections::HashSet::new();
+    let (mut lines, mut wrong, mut repeats) = (0, 0, 0);
+    let paths: Vec<PathBuf> = std::fs::read_dir(out)
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    for path in paths
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "ndjson"))
+    {
+        for line in BufReader::new(std::fs::File::open(path).unwrap()).lines() {
+            let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if v["event"] != "delete" {
+                continue;
+            }
+            lines += 1;
+            let i: Option<u64> = v["key"]
+                .as_str()
+                .and_then(|k| k.trim_start_matches('L').parse().ok());
+            match i {
+                Some(i) if i < fake.n && fake.gone(i) => {
+                    if !seen.insert(i) {
+                        repeats += 1;
+                    }
+                }
+                _ => wrong += 1,
+            }
+        }
+    }
+    (lines, wrong, repeats)
+}
+
+/// The `deletes` scenario: baseline, a pass that finds the gone records, a pass with nothing new
+async fn run_deletes(args: &Args, fake: &Fake, dir: &Path) -> Report {
+    // A checkpoint at the last record, so each sync pulls no records and only the key pull runs
+    let state = dir.join("out").join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let last = args.records.saturating_sub(1);
+    let checkpoint = json!({"server": "load", "resource": "Property",
+        "timestamp": fake.timestamp(last), "key": format!("L{last:09}"),
+        "updated_at": "2026-01-01T00:00:00Z"});
+    std::fs::write(state.join("load.Property.json"), checkpoint.to_string()).unwrap();
+    eprintln!(
+        "== deletes: {} keys, output in {}",
+        args.records,
+        dir.display()
+    );
+
+    let every = args.gone_every.max(1);
+    let expected = args.records.div_ceil(every);
+    let mut steps = Vec::new();
+    let mut ok = true;
+    let started = Instant::now();
+    for step in ["baseline", "deletes", "repeat"] {
+        if step == "deletes" {
+            fake.gone_every.store(every, Ordering::Relaxed);
+        }
+        let t = Instant::now();
+        let r = run_sync(dir, fake, None, &["--deletes"]).await;
+        let secs = t.elapsed().as_secs_f64();
+        let (lines, wrong, repeats) = check_deletes(&dir.join("out"), fake);
+        let want = if step == "baseline" { 0 } else { expected };
+        let step_ok = r.code == Some(0) && lines == want && wrong == 0 && repeats == 0;
+        ok &= step_ok;
+        eprintln!(
+            "   {step}: exit {:?}, {secs:.1} s, peak {} MiB, {lines} delete lines in total",
+            r.code,
+            r.peak_kib / 1024
+        );
+        steps.push(
+            json!({"step": step, "exit": r.code, "seconds": (secs * 10.0).round() / 10.0,
+            "peak_rss_mib": r.peak_kib / 1024, "delete_lines_total": lines,
+            "wrong_keys": wrong, "repeats": repeats, "ok": step_ok}),
+        );
+    }
+    let wall = started.elapsed().as_secs_f64();
+    let peak = steps
+        .iter()
+        .filter_map(|s| s["peak_rss_mib"].as_u64())
+        .max()
+        .unwrap_or(0);
+    let keyset_bytes = std::fs::metadata(state.join("load.Property.keys.ndjson"))
+        .or_else(|_| std::fs::metadata(state.join("load.Property.keys.json")))
+        .map_or(0, |m| m.len());
+    let json = json!({"scenario": "deletes", "keys": args.records, "gone_every": every,
+        "expected_deletes": expected, "steps": steps, "wall_seconds": (wall * 10.0).round() / 10.0,
+        "peak_rss_mib": peak, "keyset_bytes": keyset_bytes,
+        "server": fake.counters.json(), "ok": ok});
+    let row = format!(
+        "| {} | {} | deletes | {} | 3 | {wall:.1} | {:.0} | {peak} | {} | 0 | 0 | 0 | {} |",
+        today(),
+        commit(),
+        args.records,
+        3.0 * args.records as f64 / wall,
+        fake.counters.requests.load(Ordering::Relaxed),
+        if ok { "ok" } else { "FAILED" }
+    );
+    if !args.keep {
+        let _ = std::fs::remove_dir_all(dir);
+    }
     Report { ok, row, json }
 }
 

@@ -555,3 +555,125 @@ async fn mass_event_deletes_are_held_and_found_again() {
     let e = run_limited(&srv, &store, &out, "r3", Some(&feed), allowed).await;
     assert_eq!((e.deletes, e.deletes_held), (2, 0));
 }
+
+async fn run_target(
+    srv: &MockServer,
+    store: &CheckpointStore,
+    out: &std::path::Path,
+    run_id: &str,
+    target: &DeleteTarget<'_>,
+) -> reso_ingest::ResourceEntry {
+    let mut w = NdjsonWriter::new(out, "mls", "Property", run_id, 1 << 20).unwrap();
+    reconcile_deletes(&client(srv), "mls", target, None, &mut w, store).await
+}
+
+#[tokio::test]
+async fn old_json_key_set_is_converted_once() {
+    let state = Arc::new(State::default());
+    set_keys(&state, &["K1", "K2"]);
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("convert");
+    let cp = dir.0.join("cp");
+    std::fs::create_dir_all(&cp).unwrap();
+    let old = json!({"server": "mls", "resource": "Property", "updated_at": "2026-01-01T00:00:00Z",
+        "keys": ["K3", "K1", "K1", "K2"]});
+    std::fs::write(cp.join("mls.Property.keys.json"), old.to_string()).unwrap();
+    let store = CheckpointStore::new(&cp);
+    let out = dir.0.join("out");
+
+    let e = run(&srv, &store, &out, "r1", None).await;
+    assert_eq!((e.error, e.deletes), (None, 1));
+    assert_eq!(lines(&out)[0]["key"], "K3");
+    assert!(
+        !cp.join("mls.Property.keys.json").exists(),
+        "old file removed"
+    );
+    let text = std::fs::read_to_string(cp.join("mls.Property.keys.ndjson")).unwrap();
+    let mut rows = text.lines();
+    let header: Value = serde_json::from_str(rows.next().unwrap()).unwrap();
+    assert_eq!(
+        (header["server"].as_str(), header["resource"].as_str()),
+        (Some("mls"), Some("Property"))
+    );
+    assert_eq!(rows.collect::<Vec<_>>(), ["\"K1\"", "\"K2\""]);
+}
+
+#[tokio::test]
+async fn chunked_diff_matches_an_in_memory_diff() {
+    use std::collections::BTreeSet;
+    let before: Vec<String> = (0..120)
+        .map(|i| format!("K{:03}", (i * 37) % 120))
+        .collect();
+    let after: Vec<String> = before
+        .iter()
+        .filter(|k| k[1..].parse::<u32>().unwrap() % 7 != 3)
+        .cloned()
+        .chain((200..215).map(|i| format!("K{i}")))
+        .collect();
+    let state = Arc::new(State::default());
+    *state.keys.lock().unwrap() = before.clone();
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("chunked");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let (out, scratch) = (dir.0.join("out"), dir.0.join("scratch"));
+    let target = DeleteTarget::new("Property", "ListingKey")
+        .with_scratch_dir(&scratch)
+        .with_chunk_keys(7);
+
+    let e = run_target(&srv, &store, &out, "r1", &target).await;
+    assert_eq!((e.error, e.deletes), (None, 0));
+    *state.keys.lock().unwrap() = after.clone();
+    let e = run_target(&srv, &store, &out, "r2", &target).await;
+
+    let gone: BTreeSet<&String> = before.iter().filter(|k| !after.contains(k)).collect();
+    let found: Vec<String> = lines(&out)
+        .iter()
+        .map(|l| l["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!((e.error, e.deletes), (None, gone.len() as u64));
+    assert_eq!(
+        found,
+        gone.into_iter().cloned().collect::<Vec<_>>(),
+        "sorted, once each"
+    );
+    let saved = store.load_keys("mls", "Property").await.unwrap().unwrap();
+    let expected: BTreeSet<&String> = after.iter().collect();
+    assert_eq!(
+        saved,
+        expected.into_iter().map(|k| json!(k)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        std::fs::read_dir(&scratch).unwrap().count(),
+        0,
+        "scratch cleaned up"
+    );
+}
+
+#[tokio::test]
+async fn damaged_line_key_set_is_an_error() {
+    let state = Arc::new(State::default());
+    set_keys(&state, &["K1"]);
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("damaged");
+    let cp = dir.0.join("cp");
+    std::fs::create_dir_all(&cp).unwrap();
+    let store = CheckpointStore::new(&cp);
+    let out = dir.0.join("out");
+    let file = cp.join("mls.Property.keys.ndjson");
+    let header =
+        |server: &str| json!({"server": server, "resource": "Property", "updated_at": "x"});
+
+    std::fs::write(&file, format!("{}\n\"K1\"\n", header("other"))).unwrap();
+    let e = run(&srv, &store, &out, "r1", None).await;
+    assert!(e.error.unwrap().contains("belongs to"));
+    assert!(store.load_keys("mls", "Property").await.is_err());
+
+    std::fs::write(&file, format!("{}\n\"K2\"\n\"K1\"\n", header("mls"))).unwrap();
+    let e = run(&srv, &store, &out, "r2", None).await;
+    assert!(e.error.unwrap().contains("not sorted"));
+
+    std::fs::write(&file, "{").unwrap();
+    let e = run(&srv, &store, &out, "r3", None).await;
+    assert!(e.error.unwrap().contains("header"));
+    assert!(lines(&out).is_empty());
+}
