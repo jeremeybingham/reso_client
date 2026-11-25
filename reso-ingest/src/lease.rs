@@ -97,6 +97,25 @@ fn parse(v: &Versioned) -> Option<LeaseFile> {
     serde_json::from_slice(&v.bytes).ok()
 }
 
+/// The live holder of the lease stored under `key`, without changing it; `None` when there is no
+/// lease, it has expired or the value is not a lease
+pub(crate) async fn live_holder(
+    store: &dyn StateStore,
+    key: &str,
+) -> Result<Option<LeaseHolder>, IngestError> {
+    Ok(store
+        .get(key)
+        .await?
+        .as_ref()
+        .and_then(parse)
+        .filter(|f| f.expires_at > now_secs())
+        .map(|f| LeaseHolder {
+            pid: f.pid,
+            host: f.host,
+            expires_at: f.expires_at,
+        }))
+}
+
 fn encode(store: &dyn StateStore, key: &str, lease: &LeaseFile) -> Result<Vec<u8>, IngestError> {
     serde_json::to_vec(lease).map_err(|e| invalid(store, key, e.to_string()))
 }

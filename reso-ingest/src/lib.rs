@@ -71,6 +71,7 @@ mod metrics;
 mod output;
 #[cfg(feature = "parquet")]
 mod parquet_out;
+mod purge;
 mod runner;
 mod runs;
 #[cfg(feature = "s3")]
@@ -82,7 +83,7 @@ mod sink;
 mod state;
 mod webhook;
 
-pub use audit::{credential_id, AccessEntry, AccessLog, ACCESS_LOG};
+pub use audit::{credential_id, AccessEntry, AccessLog, PurgeNote, ACCESS_LOG};
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
 pub use checks::{count_warning, CheckingWriter, SchemaSnapshot};
 pub use config::{
@@ -105,6 +106,10 @@ pub use metrics::{parse_rfc3339, render_prometheus, render_prometheus_at, write_
 pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
+pub use purge::{
+    execute_purge, plan_purge, sha256_hex, PurgeOutcome, PurgePlan, PurgeRecord, PurgedFile,
+    AUDIT_DIR,
+};
 pub use runner::{run_servers, ServerReport};
 #[cfg(feature = "s3")]
 pub use s3::{S3FileSink, S3Options, S3StateStore};
