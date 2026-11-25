@@ -1,9 +1,12 @@
-//! Checks of the S3 backends against a real S3-compatible server
+//! Checks of the S3 backends against a real S3-compatible server or AWS S3
 //!
-//! Skipped unless `RESO_S3_TEST_ENDPOINT` and `RESO_S3_TEST_BUCKET` are set (credentials from
-//! `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`; the bucket must exist). Run with
-//! `--features s3`. Written against MinIO-style servers; developed against RustFS because MinIO
-//! no longer publishes binaries or images.
+//! Skipped unless `RESO_S3_TEST_BUCKET` is set together with `RESO_S3_TEST_ENDPOINT` (a non-AWS
+//! server such as RustFS, MinIO, R2 or GCS interoperability) or `RESO_S3_TEST_REGION` (AWS S3, no
+//! endpoint). Both may be set; the region defaults to `us-east-1` with an endpoint. Set
+//! `RESO_S3_TEST_SINGLE_DELETE=1` for GCS, which has no multi-object delete. Credentials come from
+//! `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN`); the bucket must exist.
+//! Run with `--features s3`. Written against MinIO-style servers; developed against RustFS because
+//! MinIO no longer publishes binaries or images.
 #![cfg(feature = "s3")]
 
 use std::sync::Arc;
@@ -11,8 +14,14 @@ use std::sync::Arc;
 use reso_ingest::{FileSink, S3FileSink, S3Options, S3StateStore, StateStore};
 
 fn options(tag: &str) -> Option<S3Options> {
-    let endpoint = std::env::var("RESO_S3_TEST_ENDPOINT").ok()?;
-    let bucket = std::env::var("RESO_S3_TEST_BUCKET").ok()?;
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let bucket = var("RESO_S3_TEST_BUCKET")?;
+    let endpoint = var("RESO_S3_TEST_ENDPOINT");
+    let region = match (&endpoint, var("RESO_S3_TEST_REGION")) {
+        (_, Some(region)) => region,
+        (Some(_), None) => "us-east-1".into(),
+        (None, None) => return None,
+    };
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -20,10 +29,12 @@ fn options(tag: &str) -> Option<S3Options> {
     Some(S3Options {
         bucket,
         prefix: format!("live/{tag}-{nanos}"),
-        endpoint: Some(endpoint),
-        region: Some("us-east-1".into()),
-        allow_http: true,
-        single_delete: false,
+        allow_http: endpoint
+            .as_deref()
+            .is_some_and(|e| e.starts_with("http://")),
+        endpoint,
+        region: Some(region),
+        single_delete: var("RESO_S3_TEST_SINGLE_DELETE").is_some_and(|v| v != "0"),
     })
 }
 
