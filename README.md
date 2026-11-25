@@ -30,7 +30,7 @@ field names are plain strings and records are raw JSON, so any server schema wor
   and delete feeds behave as the standard says, but are unconfirmed in practice until
   [#32](https://github.com/jeremeybingham/reso_client/issues/32).
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
-- `reso-ingest sync --format parquet` writes one Parquet file per page.
+- `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is finished.
 - Media files are not downloaded ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
 - Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md).
 
@@ -187,7 +187,6 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 - Run against a vendor server and fix what it shows ([#32](https://github.com/jeremeybingham/reso_client/issues/32)),
   then publish `reso-ingest`.
-- Size-based Parquet files in `sync`.
 - Finish the reference-server checks ([#35](https://github.com/jeremeybingham/reso_client/issues/35)) and the
   Data Dictionary 2.1 notes ([#17](https://github.com/jeremeybingham/reso_client/issues/17)).
 - Optional: media download ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).

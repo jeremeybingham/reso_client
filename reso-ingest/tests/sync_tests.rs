@@ -334,3 +334,212 @@ fn store_is_per_server_and_resource_and_leaves_no_temp_file() {
     store.clear("a", "Property").unwrap();
     assert!(store.load("a", "Property").unwrap().is_none());
 }
+
+/// Parquet keeps one file open across pages, so checkpoints wait for the file to finish
+#[cfg(feature = "parquet")]
+mod parquet_sync {
+    use super::*;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use reso_client::Metadata;
+    use reso_ingest::ParquetWriter;
+
+    const METADATA: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
+<Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="org.reso.metadata">
+<EntityType Name="Property"><Key><PropertyRef Name="ListingKey"/></Key>
+<Property Name="ListingKey" Type="Edm.String" Nullable="false"/>
+<Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>
+<EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/></EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#;
+
+    fn writer(out: &std::path::Path, run: &str, max_bytes: u64) -> ParquetWriter {
+        let metadata = Metadata::parse(METADATA).unwrap();
+        let entity = metadata.resource("Property").unwrap();
+        ParquetWriter::new(out, "mls", "Property", run, max_bytes, entity).unwrap()
+    }
+
+    /// Rows per finished file, in name order; `.part` files are not counted
+    fn rows_per_file(out: &std::path::Path) -> Vec<i64> {
+        let mut names: Vec<_> = std::fs::read_dir(out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".parquet"))
+            .collect();
+        names.sort();
+        names
+            .iter()
+            .map(|n| {
+                let f = std::fs::File::open(out.join(n)).unwrap();
+                ParquetRecordBatchReaderBuilder::try_new(f)
+                    .unwrap()
+                    .metadata()
+                    .file_metadata()
+                    .num_rows()
+            })
+            .collect()
+    }
+
+    fn part_files(out: &std::path::Path) -> usize {
+        std::fs::read_dir(out)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".part")
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn pages_under_the_limit_make_one_file_and_the_checkpoint_follows_it() {
+        let srv = server(data(5)).await; // pages: K1-K2, K3-K4, K5
+        let dir = TempDir::new("pq-one");
+        let store = CheckpointStore::new(dir.0.join("cp"));
+        let out = dir.0.join("out");
+
+        let mut w = writer(&out, "r1", 1 << 30);
+        let e = sync_resource(
+            &client(&srv),
+            "mls",
+            "Property",
+            spec(),
+            &mut w,
+            &store,
+            false,
+        )
+        .await;
+        assert_eq!(e.error, None);
+        assert_eq!(e.records, 5);
+        assert_eq!(rows_per_file(&out), [5]);
+        let cp = store.load("mls", "Property").unwrap().unwrap();
+        assert_eq!(cp.key, Some(json!("K5")));
+    }
+
+    #[tokio::test]
+    async fn a_small_limit_rotates_and_the_checkpoint_advances_with_each_finished_file() {
+        let srv = server(data(5)).await;
+        let dir = TempDir::new("pq-rotate");
+        let store = CheckpointStore::new(dir.0.join("cp"));
+        let out = dir.0.join("out");
+
+        let mut w = writer(&out, "r1", 1);
+        let e = sync_resource(
+            &client(&srv),
+            "mls",
+            "Property",
+            spec(),
+            &mut w,
+            &store,
+            false,
+        )
+        .await;
+        assert_eq!(e.error, None);
+        assert_eq!(rows_per_file(&out), [2, 2, 1]);
+        assert_eq!(
+            store.load("mls", "Property").unwrap().unwrap().key,
+            Some(json!("K5"))
+        );
+    }
+
+    /// Fails the Nth `write_batch` and, like a crash, never lets `finish` run
+    struct Crashing {
+        inner: ParquetWriter,
+        fail_on: usize,
+        calls: usize,
+    }
+
+    impl RecordWriter for Crashing {
+        fn write_batch(&mut self, records: &[Value], at: &str) -> Result<(), IngestError> {
+            self.calls += 1;
+            if self.calls == self.fail_on {
+                return Err(IngestError::Output {
+                    path: "x".into(),
+                    message: "disk full".into(),
+                });
+            }
+            self.inner.write_batch(records, at)
+        }
+        fn write_deletes(&mut self, keys: &[Value], at: &str) -> Result<(), IngestError> {
+            self.inner.write_deletes(keys, at)
+        }
+        fn flush(&mut self) -> Result<(), IngestError> {
+            self.inner.flush()
+        }
+        fn commit(&mut self) -> Result<bool, IngestError> {
+            self.inner.commit()
+        }
+        fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {
+            self.inner.finish()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_error_keeps_the_finished_pages_and_the_rerun_loses_nothing() {
+        let srv = server(data(5)).await;
+        let dir = TempDir::new("pq-fail");
+        let store = CheckpointStore::new(dir.0.join("cp"));
+        let out = dir.0.join("out");
+
+        // The second page fails: the first page's file is finished, so the checkpoint is at K2
+        let mut w = Crashing {
+            inner: writer(&out, "r1", 1 << 30),
+            fail_on: 2,
+            calls: 0,
+        };
+        let e = sync_resource(
+            &client(&srv),
+            "mls",
+            "Property",
+            spec(),
+            &mut w,
+            &store,
+            false,
+        )
+        .await;
+        assert!(e.error.unwrap().contains("disk full"));
+        assert_eq!(rows_per_file(&out), [2]);
+        assert_eq!(part_files(&out), 0);
+        assert_eq!(
+            store.load("mls", "Property").unwrap().unwrap().key,
+            Some(json!("K2"))
+        );
+
+        let mut w = writer(&out, "r2", 1 << 30);
+        let e = sync_resource(
+            &client(&srv),
+            "mls",
+            "Property",
+            spec(),
+            &mut w,
+            &store,
+            false,
+        )
+        .await;
+        assert_eq!(e.error, None);
+        assert_eq!(rows_per_file(&out), [2, 3]);
+    }
+
+    #[tokio::test]
+    async fn a_process_that_dies_mid_file_leaves_no_checkpoint_past_a_finished_file() {
+        let srv = server(data(5)).await;
+        let dir = TempDir::new("pq-die");
+        let store = CheckpointStore::new(dir.0.join("cp"));
+        let out = dir.0.join("out");
+
+        // Pages 1 and 2 are written into one open file, then the writer is dropped without finish
+        let mut w = writer(&out, "r1", 1 << 30);
+        let c = client(&srv);
+        let mut run = c.replicate(spec());
+        for _ in 0..2 {
+            let batch = run.next_batch().await.unwrap().unwrap();
+            w.write_batch(&batch, "2026-11-24T10:00:00Z").unwrap();
+            assert!(!w.commit().unwrap(), "the file is still open");
+        }
+        drop(w);
+        assert_eq!(rows_per_file(&out), Vec::<i64>::new());
+        assert_eq!(part_files(&out), 1);
+        assert!(store.load("mls", "Property").unwrap().is_none());
+    }
+}
