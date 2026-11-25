@@ -4,6 +4,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
+use tokio::task::AbortHandle;
 use tracing::Instrument;
 
 use crate::config::ServerConfig;
@@ -22,6 +23,7 @@ pub struct ServerReport<T> {
 /// Servers are independent: an error or panic in one is recorded in its [`ServerReport`] and the
 /// others carry on. Reports come back in the order of `servers`. Each task runs inside a `server`
 /// span (field `server`), a child of the caller's current span, so its log events name the server.
+/// Dropping the returned future before it completes aborts every server task it started.
 ///
 /// # Examples
 ///
@@ -48,6 +50,7 @@ where
 {
     let permits = Arc::new(Semaphore::new(max_concurrent.max(1)));
     let mut handles = Vec::with_capacity(servers.len());
+    let mut guard = AbortOnDrop(Vec::with_capacity(servers.len()));
     for server in servers {
         let name = server.name.clone();
         let permits = Arc::clone(&permits);
@@ -62,6 +65,7 @@ where
             }
             .instrument(span),
         );
+        guard.0.push(handle.abort_handle());
         handles.push((name, handle));
     }
 
@@ -76,5 +80,19 @@ where
         }
         reports.push(ServerReport { name, result });
     }
+    // Every task has finished; nothing is left to abort
+    guard.0.clear();
     reports
+}
+
+/// Aborts the server tasks when `run_servers` is dropped part-way (spawned tasks are otherwise
+/// detached and would keep running)
+struct AbortOnDrop(Vec<AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
 }
