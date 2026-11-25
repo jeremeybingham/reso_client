@@ -121,7 +121,7 @@ What else the client does:
 - Paging by `@odata.nextLink` in the body or by `next` and `Link` headers; relative links are resolved, and a link to
   another host is refused so the token is never sent elsewhere.
 - OAuth2 client credentials: the token is fetched on first use, renewed at 90% of its lifetime and once after a 401.
-- Retries with backoff and `Retry-After` for network errors and 429/502/503/504; client-side limits on requests per
+- Retries with backoff and `Retry-After` for network errors (also a response body cut off partway) and 429/502/503/504; client-side limits on requests per
   second, hour and day and on response bytes per hour and day; request counters (`ResoClient::stats`). Off by default.
 - `StandardReplication`: keyset paging on `ModificationTimestamp` and key, checkpoints to resume, and `expand` for servers
   that serve related records only inline.

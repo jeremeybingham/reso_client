@@ -27,6 +27,9 @@ use tokio::time::Instant;
 
 /// How a failed request is repeated
 ///
+/// Retried: network errors (including a response body cut off partway, #125) and the statuses
+/// 429, 502, 503 and 504. A complete body that is not valid JSON is not retried.
+///
 /// The wait before retry number `n` (counting from 0) is `initial_backoff * 2^n`, capped at
 /// `max_backoff`, then reduced by up to half at random so that many clients do not retry in step.
 /// When the server sends `Retry-After`, that wait is used instead, unless it is longer than

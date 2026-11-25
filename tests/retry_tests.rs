@@ -209,3 +209,70 @@ async fn responses_are_counted_by_status_class() {
     let delta = c.stats().since(&before);
     assert_eq!((delta.requests, delta.client_errors, delta.ok), (1, 1, 0));
 }
+
+/// A raw HTTP server whose first `cut` responses send a `Content-Length` and then close the
+/// connection halfway through the body; later responses are whole. Returns its base URL.
+fn cut_body_server(cut: usize, body: &'static str) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for (n, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { return };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let sent = if n < cut {
+                &body[..body.len() / 2]
+            } else {
+                body
+            };
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(sent.as_bytes());
+            let _ = stream.flush();
+            // Dropping the stream closes the connection, short of the promised length when cut.
+        }
+    });
+    format!("http://{addr}")
+}
+
+fn raw_client(base: String, retry: RetryPolicy) -> ResoClient {
+    ResoClient::with_config(ClientConfig::new(base, "t").with_retry(retry)).unwrap()
+}
+
+const PAGE: &str = r#"{"value":[{"ListingKey":"1"},{"ListingKey":"2"},{"ListingKey":"3"}]}"#;
+
+#[tokio::test]
+async fn body_cut_off_halfway_is_retried() {
+    // Regression for #125: a truncated body was a Parse error and failed the resource.
+    let base = cut_body_server(2, PAGE);
+    let c = raw_client(base.clone(), fast(3));
+    let page = c.fetch_page(&format!("{base}/Property")).await.unwrap();
+    assert_eq!(page.records.len(), 3);
+    let stats = c.stats();
+    assert_eq!((stats.requests, stats.retries), (3, 2));
+}
+
+#[tokio::test]
+async fn body_cut_off_every_time_surfaces_as_a_network_error() {
+    let c = raw_client(cut_body_server(usize::MAX, PAGE), fast(2));
+    match c.execute(&query()).await {
+        Err(ResoError::Network(msg)) => assert!(msg.contains("body"), "{msg}"),
+        other => panic!("expected Network, got {other:?}"),
+    }
+    assert_eq!(c.stats().requests, 3);
+}
+
+#[tokio::test]
+async fn complete_but_invalid_json_is_not_retried() {
+    let c = raw_client(cut_body_server(0, r#"{"value": [oops"#), fast(3));
+    match c.execute(&query()).await {
+        Err(ResoError::Parse(_)) => {}
+        other => panic!("expected Parse, got {other:?}"),
+    }
+    let stats = c.stats();
+    assert_eq!((stats.requests, stats.retries), (1, 0));
+}
