@@ -132,15 +132,14 @@ impl Query {
             return parts.concat();
         }
 
-        // For count-only queries, append /$count and only use filter
-        // Returns a plain text count instead of JSON (e.g., "42")
+        // Count-only queries use the portable form: the resource path with only the filter,
+        // `$count=true` and `$top=0`; the count comes back as `@odata.count`.
         if self.count_only {
-            parts.push("/$count".to_string());
-
+            parts.push("?".to_string());
             if let Some(filter) = &self.filter {
-                parts.push("?".to_string());
-                parts.push(format!("$filter={}", urlencoding::encode(filter)));
+                parts.push(format!("$filter={}&", urlencoding::encode(filter)));
             }
+            parts.push("$count=true&$top=0".to_string());
 
             return parts.concat();
         }

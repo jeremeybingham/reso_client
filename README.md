@@ -29,8 +29,6 @@ field names are plain strings and records are raw JSON, so any server schema wor
 - **Not yet tested against a vendor server** (Bridge, MLS Grid, Trestle and others): OAuth2, rate limits, replication
   and delete feeds behave as the standard says, but are unconfirmed in practice until
   [#32](https://github.com/jeremeybingham/reso_client/issues/32).
-- `execute_count` uses the `/Resource/$count` path, which some servers (including the reference server) do not have;
-  `QueryBuilder::with_count().top(0)` with `execute` works on more servers.
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
 - `reso-ingest sync --format parquet` writes one Parquet file per page.
 - Media files are not downloaded ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
@@ -167,7 +165,7 @@ written against Bridge Interactive's `actris_ref` dataset, and the project has n
 | `test_metadata` | Fetching `$metadata` |
 | `analyze_property_fields`, `analyze_active_listings` | Field fill rates and summary statistics over 200 active listings |
 | `test_actris_ref` | A tour of Bridge's reference dataset |
-| `test_count_only`, `test_apply`, `test_expand` | `/$count`, `$apply` and `$expand`, which need server support |
+| `test_count_only`, `test_apply`, `test_expand` | `execute_count` (`$count=true&$top=0`), `$apply` and `$expand`, which need server support |
 | `test_replication`, `test_pagination_nextlink` | Bridge's `/replication` endpoint (vendor mode) |
 
 To run against RESO's reference server started locally (see
@@ -189,7 +187,7 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 - Run against a vendor server and fix what it shows ([#32](https://github.com/jeremeybingham/reso_client/issues/32)),
   then publish `reso-ingest`.
-- Count with `$count=true&$top=0`, and size-based Parquet files in `sync`.
+- Size-based Parquet files in `sync`.
 - Finish the reference-server checks ([#35](https://github.com/jeremeybingham/reso_client/issues/35)) and the
   Data Dictionary 2.1 notes ([#17](https://github.com/jeremeybingham/reso_client/issues/17)).
 - Optional: media download ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).

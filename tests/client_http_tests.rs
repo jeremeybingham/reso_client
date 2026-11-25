@@ -1,7 +1,7 @@
 // Integration tests for ResoClient HTTP operations
 
 use reso_client::{ClientConfig, QueryBuilder, ReplicationQueryBuilder, ResoClient, ResoError};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -68,10 +68,15 @@ async fn test_execute_count_success() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/Property/$count"))
+        .and(path("/Property"))
+        .and(query_param("$count", "true"))
+        .and(query_param("$top", "0"))
         .and(header("Authorization", "Bearer test-token"))
-        .and(header("Accept", "text/plain"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("42"))
+        .and(header("Accept", "application/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.count": 42,
+            "value": []
+        })))
         .mount(&mock_server)
         .await;
 
@@ -79,19 +84,45 @@ async fn test_execute_count_success() {
     let client = ResoClient::with_config(config).unwrap();
     let query = QueryBuilder::new("Property").count().build().unwrap();
 
-    let result = client.execute_count(&query).await;
-
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), 42);
+    assert_eq!(client.execute_count(&query).await.unwrap(), 42);
 }
 
 #[tokio::test]
-async fn test_execute_count_invalid_response() {
+async fn test_execute_count_keeps_filter() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
-        .and(path("/Property/$count"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("not-a-number"))
+        .and(path("/Property"))
+        .and(query_param("$filter", "City eq 'Austin'"))
+        .and(query_param("$count", "true"))
+        .and(query_param("$top", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "@odata.count": 7,
+            "value": []
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let config = ClientConfig::new(mock_server.uri(), "test-token");
+    let client = ResoClient::with_config(config).unwrap();
+    let query = QueryBuilder::new("Property")
+        .filter("City eq 'Austin'")
+        .count()
+        .build()
+        .unwrap();
+
+    assert_eq!(client.execute_count(&query).await.unwrap(), 7);
+}
+
+#[tokio::test]
+async fn test_execute_count_missing_odata_count() {
+    // A server that ignores $count=true returns records and no @odata.count.
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": [] })))
         .mount(&mock_server)
         .await;
 
@@ -99,14 +130,9 @@ async fn test_execute_count_invalid_response() {
     let client = ResoClient::with_config(config).unwrap();
     let query = QueryBuilder::new("Property").count().build().unwrap();
 
-    let result = client.execute_count(&query).await;
-
-    assert!(result.is_err());
-    match result {
-        Err(ResoError::Parse(msg)) => {
-            assert!(msg.contains("Failed to parse count"));
-        }
-        _ => panic!("Expected Parse error"),
+    match client.execute_count(&query).await {
+        Err(ResoError::Parse(msg)) => assert!(msg.contains("Failed to parse count")),
+        other => panic!("Expected Parse error, got {other:?}"),
     }
 }
 

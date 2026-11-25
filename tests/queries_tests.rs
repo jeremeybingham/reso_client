@@ -431,7 +431,7 @@ fn test_key_access_rejects_count_only() {
 fn test_count_only_query_basic() {
     let query = QueryBuilder::new("Property").count().build().unwrap();
 
-    assert_eq!(query.to_odata_string(), "Property/$count");
+    assert_eq!(query.to_odata_string(), "Property?$count=true&$top=0");
 }
 
 #[test]
@@ -443,7 +443,8 @@ fn test_count_only_query_with_filter() {
         .unwrap();
 
     let url = query.to_odata_string();
-    assert!(url.starts_with("Property/$count?"));
+    assert!(url.starts_with("Property?$filter="));
+    assert!(url.ends_with("&$count=true&$top=0"));
     assert!(url.contains("$filter=City%20eq%20%27Austin%27"));
 }
 
