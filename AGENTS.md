@@ -23,6 +23,7 @@ under "What's next" in `README.md`.
 | What the crates do, limits, quick start, configuration, what's next | `README.md` |
 | The ingest command: configuration, output format, deletes, media files, Parquet | `reso-ingest/README.md` |
 | The full plan, gap list with code references, open owner decisions | GitHub issue #18 and its children |
+| What to check on a real server, and what may change | GitHub issue #76 (access: #32) |
 | API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |
 | Version history | `CHANGELOG.md` |

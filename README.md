@@ -28,7 +28,8 @@ field names are plain strings and records are raw JSON, so any server schema wor
   interrupted run resumed, a changed record and a deleted record all came out right.
 - **Not yet tested against a vendor server** (Bridge, MLS Grid, Trestle and others): OAuth2, rate limits, replication
   and delete feeds behave as the standard says, but are unconfirmed in practice until
-  [#32](https://github.com/jeremeybingham/reso_client/issues/32).
+  a vendor server is available ([#32](https://github.com/jeremeybingham/reso_client/issues/32)); the checks are listed
+  in [#76](https://github.com/jeremeybingham/reso_client/issues/76).
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
 - `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is finished.
 - Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output), and
@@ -221,11 +222,12 @@ The vendor differences known from public documentation are all handled
 ([#65](https://github.com/jeremeybingham/reso_client/issues/65)-[#69](https://github.com/jeremeybingham/reso_client/issues/69));
 what is left needs a real server or someone else:
 
+- **A vendor server** ([#32](https://github.com/jeremeybingham/reso_client/issues/32)), then the verification pass
+  in [#76](https://github.com/jeremeybingham/reso_client/issues/76): what to check against it (auth, paging, replication
+  order, limits, `$metadata`, deletes, media) and what code may change with the answers.
 - **Release 0.4.0** of `reso-client` (rate limits per day and bytes per hour, `StandardReplication::expand`,
-  `execute_count` by `$count=true`, metadata fixes; see the [changelog](CHANGELOG.md)) when the owner decides.
-- **A vendor server** ([#32](https://github.com/jeremeybingham/reso_client/issues/32)): run against it, fix what it
-  shows (first check whether MLS Grid accepts `$orderby=ModificationTimestamp,<Key>`), check flag deletes, media
-  download against its file host and its published limits, then publish `reso-ingest`.
+  `execute_count` by `$count=true`, metadata fixes; see the [changelog](CHANGELOG.md)) and publishing `reso-ingest`,
+  after #76.
 - Moving off `chrono` ([#51](https://github.com/jeremeybingham/reso_client/issues/51)) waits on an arrow/parquet release.
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
 
