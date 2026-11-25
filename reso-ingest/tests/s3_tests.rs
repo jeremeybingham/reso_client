@@ -675,3 +675,104 @@ const SERVE_METADATA: &str = r#"<?xml version="1.0"?>
 <EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/>
 <EntitySet Name="Member" EntityType="org.reso.metadata.Member"/></EntityContainer>
 </Schema></edmx:DataServices></edmx:Edmx>"#;
+
+/// A bucket that refuses every request with `403 Forbidden`; `HEAD` answers `head_status` (with
+/// object headers, so a 200 reads as a found object)
+async fn forbidden_s3(head_status: Arc<std::sync::atomic::AtomicU16>) -> String {
+    let app = Router::new().fallback(move |method: axum::http::Method| {
+        let head = head_status.load(std::sync::atomic::Ordering::SeqCst);
+        async move {
+            if method != axum::http::Method::HEAD {
+                let body = "<Error><Code>AccessDenied</Code></Error>";
+                return (StatusCode::FORBIDDEN, body).into_response();
+            }
+            let mut headers = HeaderMap::new();
+            headers.insert("etag", etag(1));
+            headers.insert(
+                "last-modified",
+                HeaderValue::from_static("Wed, 25 Nov 2026 12:00:00 GMT"),
+            );
+            headers.insert("content-length", HeaderValue::from_static("0"));
+            (StatusCode::from_u16(head).unwrap(), headers).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+/// Every store error that is not a failed condition comes back as an error naming the object
+/// (403 is not retried, so each call fails at once)
+#[tokio::test(flavor = "multi_thread")]
+async fn bucket_errors_name_the_object() {
+    use reso_ingest::{FileSink, S3FileSink};
+    use std::sync::atomic::{AtomicU16, Ordering};
+
+    set_credentials();
+    let head = Arc::new(AtomicU16::new(403));
+    let endpoint = forbidden_s3(Arc::clone(&head)).await;
+    let s = S3StateStore::new(&options(&endpoint, "p/state")).unwrap();
+    let check = |what: &str, r: Result<String, reso_ingest::IngestError>| {
+        let message = r.expect_err(what).to_string();
+        assert!(message.contains("s3://bkt/p/"), "{what}: {message}");
+    };
+    check("get", s.get("a.json").await.map(|_| String::new()));
+    check("put", s.put("a.json", b"x").await.map(|_| String::new()));
+    check(
+        "create",
+        s.create("a.json", b"x").await.map(|_| String::new()),
+    );
+    check(
+        "replace",
+        s.replace("a.json", b"x", "v").await.map(|_| String::new()),
+    );
+    check(
+        "delete with a version",
+        s.delete("a.json", Some("v")).await.map(|_| String::new()),
+    );
+    check(
+        "delete",
+        s.delete("a.json", None).await.map(|_| String::new()),
+    );
+    check("list", s.list().await.map(|_| String::new()));
+    check(
+        "a key that is not a path",
+        s.get("a//b").await.map(|_| String::new()),
+    );
+
+    let sink = S3FileSink::new(&options(&endpoint, "p/data")).unwrap();
+    let dir = std::env::temp_dir().join(format!("reso-s3-forbidden-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("small.ndjson");
+    std::fs::write(&small, b"{}\n").unwrap();
+    check("exists", sink.exists("small.ndjson").map(|_| String::new()));
+    check(
+        "put_file",
+        sink.put_file("small.ndjson", &small).map(|_| String::new()),
+    );
+    check(
+        "a name that is not a path",
+        sink.exists("a//b").map(|_| String::new()),
+    );
+
+    // Past the single-PUT size the upload is multipart: an absent object, then a refused start
+    head.store(404, Ordering::SeqCst);
+    let big = dir.join("big.ndjson");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(33 * 1024 * 1024)
+        .unwrap();
+    check(
+        "multipart",
+        sink.put_file("big.ndjson", &big).map(|_| String::new()),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // An object that is there but cannot be deleted
+    head.store(200, Ordering::SeqCst);
+    check(
+        "delete a found object",
+        s.delete("a.json", None).await.map(|_| String::new()),
+    );
+}
