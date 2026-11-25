@@ -64,7 +64,7 @@ pub use media::{
     encode_name, sync_media, MediaEntry, MediaFailure, MediaIndex, MediaManifest, MediaOptions,
     MediaReport, PageMedia, DEFAULT_NESTED_FIELD, MEDIA_RESOURCE,
 };
-pub use output::{new_run_id, now_rfc3339, NdjsonWriter, RecordWriter};
+pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};

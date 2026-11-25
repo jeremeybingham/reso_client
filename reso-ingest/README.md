@@ -107,6 +107,9 @@ In `--out` (default `reso-out`):
 
   A delete event has the same tags, then `"event":"delete"` and the record's `key` instead of `record`.
 - `manifest.<run>.json`: counts, files, checkpoints and errors for the run.
+- `.run.<run>`: an empty marker that reserves the run id. Ids are the start time (`20261124T173005Z`); a run started in
+  the same second as another in the same `--out` gets `-02`, `-03`, … added. A writer never overwrites an existing file:
+  it stops with an error instead.
 - `state/` (or `--state`): one JSON checkpoint per server and resource, saved after each batch is written, so a rerun
   after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times.
 

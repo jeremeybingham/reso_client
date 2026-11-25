@@ -21,7 +21,7 @@ use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 use crate::manifest::{sync_resource_media, ResourceEntry, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
-use crate::output::{new_run_id, NdjsonWriter, RecordWriter};
+use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
@@ -351,10 +351,17 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         Ok(v) => v,
         Err(code) => return code,
     };
+    let run_id = match reserve_run_id(args.out()) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return 1;
+        }
+    };
     let options = Arc::new(SyncOptions {
         out: args.out(),
         state: args.state(),
-        run_id: new_run_id(),
+        run_id,
         resources: args.resources.clone(),
         deletes: args.deletes,
         media: args.media.then(|| {
@@ -714,7 +721,14 @@ async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             .unwrap_or_else(|| args.out().join("media")),
         limit: args.limit,
     });
-    let mut manifest = MediaManifest::new(new_run_id());
+    let run_id = match reserve_run_id(args.out()) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return 1;
+        }
+    };
+    let mut manifest = MediaManifest::new(run_id);
 
     let (tx, mut rx) = unbounded_channel::<String>();
     let task_options = Arc::clone(&options);

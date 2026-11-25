@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::error::IngestError;
 use crate::manifest::FileEntry;
-use crate::output::{output_error, sanitize, RecordWriter};
+use crate::output::{create_new_file, output_error, sanitize, RecordWriter};
 
 /// Rows handed to the Arrow decoder at a time
 const DECODE_BATCH_ROWS: usize = 8192;
@@ -226,7 +226,10 @@ impl ParquetWriter {
         );
         let final_path = self.dir.join(&name);
         let part_path = self.dir.join(format!("{name}.part"));
-        let file = File::create(&part_path).map_err(|e| output_error(&part_path, e))?;
+        if final_path.exists() {
+            return Err(self.fail("file already exists; another run may share this run id"));
+        }
+        let file = create_new_file(&part_path)?;
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .build();
