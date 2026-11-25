@@ -212,8 +212,6 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 #32). Read in November 2026, MLS Grid and Trestle differ from the standard in ways `reso-ingest` cannot yet handle (a
 filter on every request and inline `$expand` are now supported, [#65](https://github.com/jeremeybingham/reso_client/issues/65)):
 
-- **Deletes signalled by a field** ([#66](https://github.com/jeremeybingham/reso_client/issues/66)). MLS Grid marks removed records with `MlgCanView` false and drops them from the feed
-  after 7 days; it has no `EntityEvent`. Expanded child records carry no flag and replace the earlier set.
 - **Media from expanded records** ([#67](https://github.com/jeremeybingham/reso_client/issues/67)), downloaded during sync. `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
   are signed, single-use and expire after an hour, so files must be fetched soon after the sync that saw them.
 - **More rate limits** ([#68](https://github.com/jeremeybingham/reso_client/issues/68)). MLS Grid also caps requests per day (40,000) and download volume per hour (4 GB); `RateLimit`

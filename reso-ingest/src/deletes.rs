@@ -6,6 +6,8 @@ use reso_client::{Metadata, QueryBuilder, ResoClient};
 use serde_json::Value;
 
 use crate::checkpoint::CheckpointStore;
+use crate::error::IngestError;
+use crate::manifest::FileEntry;
 use crate::manifest::ResourceEntry;
 use crate::output::{now_rfc3339, RecordWriter};
 
@@ -297,6 +299,90 @@ async fn exists(client: &ResoClient, target: &DeleteTarget<'_>, key: &str) -> Re
 
 fn odata_string(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
+}
+
+/// A writer that turns a flag field into delete events (vendor mode: MLS Grid's `MlgCanView`)
+///
+/// Some servers have no event resource: a removed record stays in the feed for a while with a
+/// field set to `false` (MLS Grid: `MlgCanView`). Wrap the real writer in this one and pass it to
+/// [`sync_resource`](crate::sync_resource): every record is still written raw, and each record
+/// whose `flag_field` is the JSON value `false` also gets a delete event for its `key_field`
+/// right after its batch. A missing, null or any other value means the record is live. Nothing
+/// is changed in the records, and checkpoints are not affected. Expanded children carry no flag
+/// and get no events.
+///
+/// A flagged record without its key fails the write (the pull stops and records the error), as
+/// a delete that cannot name its record must not be dropped silently.
+pub struct FlagDeleteWriter<'a> {
+    inner: &'a mut dyn RecordWriter,
+    flag_field: String,
+    key_field: String,
+    deletes: u64,
+}
+
+impl<'a> FlagDeleteWriter<'a> {
+    /// Wrap `inner`; `flag_field` is false on deleted records, `key_field` names the record
+    pub fn new(
+        inner: &'a mut dyn RecordWriter,
+        flag_field: impl Into<String>,
+        key_field: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            flag_field: flag_field.into(),
+            key_field: key_field.into(),
+            deletes: 0,
+        }
+    }
+
+    /// Delete events written so far
+    pub fn deletes(&self) -> u64 {
+        self.deletes
+    }
+}
+
+impl RecordWriter for FlagDeleteWriter<'_> {
+    fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
+        self.inner.write_batch(records, fetched_at)?;
+        let mut keys = Vec::new();
+        for record in records {
+            if record.get(&self.flag_field) == Some(&Value::Bool(false)) {
+                match record.get(&self.key_field).filter(|k| !k.is_null()) {
+                    Some(key) => keys.push(key.clone()),
+                    None => {
+                        return Err(IngestError::Output {
+                            path: String::new(),
+                            message: format!(
+                            "a record with `{}` false has no `{}`; its delete cannot be written",
+                            self.flag_field, self.key_field
+                        ),
+                        })
+                    }
+                }
+            }
+        }
+        if !keys.is_empty() {
+            self.inner.write_deletes(&keys, fetched_at)?;
+            self.deletes += keys.len() as u64;
+        }
+        Ok(())
+    }
+
+    fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {
+        self.inner.write_deletes(keys, fetched_at)
+    }
+
+    fn flush(&mut self) -> Result<(), IngestError> {
+        self.inner.flush()
+    }
+
+    fn commit(&mut self) -> Result<bool, IngestError> {
+        self.inner.commit()
+    }
+
+    fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {
+        self.inner.finish()
+    }
 }
 
 #[cfg(test)]

@@ -338,3 +338,29 @@ fn bad_filter_and_resource_settings_name_the_server() {
         assert!(message.contains(expected), "{message}");
     }
 }
+
+#[test]
+fn flag_field_deletes_parse_and_an_empty_one_is_rejected() {
+    let one = "[[server]]\nname = \"a\"\nbase_url = \"https://a.example\"\nDELETES\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"T\"\n";
+    let config =
+        Config::parse(&one.replace("DELETES", "deletes = { flag_field = \"MlgCanView\" }"))
+            .unwrap();
+    assert_eq!(
+        config.servers[0].deletes.flag_field.as_deref(),
+        Some("MlgCanView")
+    );
+    assert_eq!(
+        Config::parse(&one.replace("DELETES", "")).unwrap().servers[0]
+            .deletes
+            .flag_field,
+        None
+    );
+
+    let (server, message) =
+        server_error(&one.replace("DELETES", "deletes = { flag_field = \" \" }"));
+    assert_eq!(server, "a");
+    assert!(message.contains("deletes.flag_field"), "{message}");
+    // A misspelt key is refused rather than ignored
+    let (_, message) = server_error(&one.replace("DELETES", "deletes = { flag = \"MlgCanView\" }"));
+    assert!(message.contains("flag"), "{message}");
+}
