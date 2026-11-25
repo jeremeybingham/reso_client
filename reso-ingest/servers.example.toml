@@ -35,6 +35,8 @@ initial_backoff_ms = 500
 max_backoff_ms = 30000
 per_second = 2
 per_hour = 5000
+per_day = 40000
+bytes_per_hour = 4000000000
 bytes_per_day = 5000000000
 
 # A server with a static bearer token and a dataset id

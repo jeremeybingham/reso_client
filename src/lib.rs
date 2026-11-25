@@ -42,7 +42,8 @@
 //! [`ResoClient::from_env`] reads `RESO_BASE_URL`, then `RESO_TOKEN` or the OAuth2 variables
 //! (`RESO_CLIENT_ID`, `RESO_CLIENT_SECRET`, `RESO_TOKEN_URI`, optional `RESO_SCOPE` and
 //! `RESO_CREDENTIAL_TRANSPORT`), and the optional `RESO_TIMEOUT`, `RESO_MAX_RETRIES`,
-//! `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` and `RESO_DATASET_ID`
+//! `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_RATE_PER_DAY`, `RESO_BYTES_PER_HOUR`,
+//! `RESO_BYTES_PER_DAY` and `RESO_DATASET_ID`
 //! (Bridge Interactive only). The same settings in code:
 //!
 //! ```no_run

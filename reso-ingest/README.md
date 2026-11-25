@@ -55,7 +55,7 @@ client_secret_env = "MLS_ONE_CLIENT_SECRET"
 per_second = 2
 
 [server.media]                      # optional; file downloads, separate from the API limits
-per_second = 4                      # also per_hour, bytes_per_day, max_retries, *_backoff_ms
+per_second = 4                      # also per_hour, per_day, bytes_per_hour, bytes_per_day, max_retries, *_backoff_ms
 timeout_secs = 300                  # per file; default 120
 send_token = "same_host"            # never, same_host (default) or always
 ```

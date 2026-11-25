@@ -100,7 +100,8 @@ impl ClientConfig {
     /// - `RESO_DATASET_ID` (optional) - Dataset ID inserted in URL path
     /// - `RESO_TIMEOUT` (optional) - Timeout in seconds (default: 30)
     /// - `RESO_MAX_RETRIES` (optional) - Retries for 429/502/503/504 and network errors (default: 0)
-    /// - `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` (optional) - client-side
+    /// - `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_RATE_PER_DAY`, `RESO_BYTES_PER_HOUR`,
+    ///   `RESO_BYTES_PER_DAY` (optional) - client-side
     ///   [`RateLimit`] (default: none)
     ///
     /// # Examples
@@ -131,6 +132,12 @@ impl ClientConfig {
         }
         if let Some(n) = number("RESO_RATE_PER_HOUR") {
             rate_limit = rate_limit.per_hour(n.min(u32::MAX as u64) as u32);
+        }
+        if let Some(n) = number("RESO_RATE_PER_DAY") {
+            rate_limit = rate_limit.per_day(n.min(u32::MAX as u64) as u32);
+        }
+        if let Some(n) = number("RESO_BYTES_PER_HOUR") {
+            rate_limit = rate_limit.bytes_per_hour(n);
         }
         if let Some(n) = number("RESO_BYTES_PER_DAY") {
             rate_limit = rate_limit.bytes_per_day(n);

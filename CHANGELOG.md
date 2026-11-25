@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `RateLimit::per_day` (requests per rolling 24 hours) and `RateLimit::bytes_per_hour` (#68), with `RESO_RATE_PER_DAY` and
+  `RESO_BYTES_PER_HOUR` in `from_env` and `per_day`, `bytes_per_hour` in `[server.limits]` and `[server.media]`.
+  MLS Grid's published limits (2/s, 7,200/h, 40,000/day, 4 GB/h) can now all be set; unconfirmed against it (#32).
 - `reso-ingest sync --media` (#67): downloads the files of each page's media records right after the page is written,
   so signed single-use URLs are fresh. Takes top-level `Media` records or the `Media` arrays nested in other records
   (`[server.media] nested_field`); library API `PageMedia`, `sync_resource_media`, `MediaIndex::add_nested`.
