@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
+  command.
+
 ## [0.3.0] - 2026-11-24
 
 The low-level client now follows the RESO standard (paging, replication, OAuth2, retries, `$metadata` model). The

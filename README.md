@@ -6,115 +6,105 @@
 [![Crates.io](https://img.shields.io/crates/v/reso-client.svg)](https://crates.io/crates/reso-client)
 [![Documentation](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
 
-A Rust library for reading real estate data from [RESO Web API](https://www.reso.org/reso-web-api/) servers
-(OData 4.0), on its way to becoming an **ingest layer** for many RESO servers at once.
+Rust tools for pulling real estate data from [RESO Web API](https://www.reso.org/reso-web-api/) servers (OData 4.0).
 
-## Goal
+This repository holds two crates:
 
-reso-client is meant to sit between one or more RESO Web API servers and the applications that use their data.
-It should:
+| Crate | What it is | Status |
+|---|---|---|
+| [`reso-client`](https://crates.io/crates/reso-client) | Async client for one server: queries, standard paging and replication, OAuth2, retries and rate limits, a parsed `$metadata` model | v0.3.0 on crates.io |
+| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection | In this repository only, not published |
 
-- connect to many RESO-compliant servers, each with its own credentials and limits;
-- discover the resources each server offers and pull every one the account is licensed for;
-- follow the API's rules: OAuth2, server-driven paging, RESO-standard replication, rate limits and retries;
-- keep each server's data current with incremental, resumable syncs, including deletes;
-- hand the records over **raw**, tagged with where they came from, in a few file formats (NDJSON first, then Parquet).
+Together they form an **ingest layer**: they connect to many servers, follow the API's rules, keep each copy current,
+and hand the records over **raw**, tagged with where they came from. Mapping fields, de-duplicating across MLSs,
+enforcing data-licence rules and choosing a database are left to the application that uses the data. Resource and
+field names are plain strings and records are raw JSON, so any server schema works, including
+[Data Dictionary 2.1](https://dd.reso.org/DD2.1/).
 
-A typical user is an aggregator pulling from many MLS vendors into its own store. Transforming records,
-de-duplicating across MLSs, mapping local fields and enforcing data-licence rules are the consuming application's
-job, not this crate's. The crate stays resource-agnostic: resource and field names are strings and records are raw
-JSON, so it works with any server's schema, including [Data Dictionary 2.1](https://dd.reso.org/DD2.1/).
+## Status and limits
 
-The plan is tracked in [#18](https://github.com/jeremeybingham/reso_client/issues/18) and the
-[Ingest layer milestone](https://github.com/jeremeybingham/reso_client/milestone/1).
-
-## Current state (v0.3.0)
-
-The repository holds two crates:
-
-- **`reso-client`** (published): an OData query client for one server, authenticated with a fixed bearer token or
-  OAuth2 client credentials, that follows the RESO standard for paging and replication.
-- **`reso-ingest`** (in this repository, not published): a library and the `reso-ingest` command that pull every
-  resource from several servers into tagged NDJSON or Parquet files, incrementally (see [Ingest CLI](#ingest-cli)).
-
-What works in `reso-client`:
-
-- Fluent `QueryBuilder`: `$filter`, `$select`, `$orderby`, `$top`/`$skip`, `$count`, `$expand`, `$apply`, lookup
-  by key.
-- Standard server-driven paging (`@odata.nextLink` in the body, `next` and `Link` headers) and RESO-standard
-  replication on `ModificationTimestamp` with a resumable checkpoint (`StandardReplication`); Bridge's
-  `/replication` as a vendor mode.
-- Count-only queries (`/$count`) and `$metadata` as a raw XML string (`fetch_metadata`) or a parsed model (`fetch_metadata_model`: entity sets, keys,
-  properties, navigation properties, enum types).
-- OAuth2 client credentials: the token is fetched, cached, renewed at 90% of its lifetime and once after a 401.
-- Retry with backoff and `Retry-After`, client-side rate limits, and request counters (off by default).
-- Typed errors (`ResoError`) mapped from HTTP status codes and OData error bodies.
-- Configuration from environment variables or code; several clients can run side by side.
-- Async on tokio; tested offline with wiremock mock servers.
-
-Checked against a real server: only RESO's reference server, run locally (issue
-[#35](https://github.com/jeremeybingham/reso_client/issues/35)). A full `reso-ingest sync` of it, a repeat run, an
-interrupted run resumed, a changed record and a deleted record all came out right. Vendor servers are unconfirmed
-until [#32](https://github.com/jeremeybingham/reso_client/issues/32).
-
-## Roadmap
-
-The milestone is split into phases. Phases A and B make the low-level client correct against real servers; phase C
-builds the ingest layer on top of it, most likely as a second crate (`reso-ingest`) with a CLI.
-
-**Phase A: correct against real servers**
-
-1. [#19](https://github.com/jeremeybingham/reso_client/issues/19) Standard paging: follow `@odata.nextLink` and add a
-   page iterator. Done: `Page`, `execute_page`, `next_page`, `fetch_page`.
-2. [#20](https://github.com/jeremeybingham/reso_client/issues/20) RESO-standard replication (`ModificationTimestamp`
-   plus nextLink): done, `StandardReplication`; Bridge's `/replication` stays as a vendor mode.
-3. [#21](https://github.com/jeremeybingham/reso_client/issues/21) OAuth2 client credentials with token caching and
-   refresh. Done: `Auth::ClientCredentials`.
-4. [#22](https://github.com/jeremeybingham/reso_client/issues/22) Retry, backoff and client-side rate limiting: done,
-   `RetryPolicy`, `RateLimit` and `ResoClient::stats` (off by default).
-
-**Phase B: knowing what a server has**
-
-5. [#23](https://github.com/jeremeybingham/reso_client/issues/23) Parse `$metadata` into a model: done,
-   `Metadata` and `ResoClient::fetch_metadata_model`.
-
-**Phase C: the ingest layer**
-
-6. [#24](https://github.com/jeremeybingham/reso_client/issues/24) Multi-server TOML configuration (secrets from
-   environment variables). Done: `reso-ingest` crate (`Config`, `run_servers`, `reso-ingest/servers.example.toml`).
-7. [#25](https://github.com/jeremeybingham/reso_client/issues/25) NDJSON output with source tags and a run manifest.
-   Done: `NdjsonWriter`, `RunManifest` and `pull_resource` in `reso-ingest`.
-8. [#26](https://github.com/jeremeybingham/reso_client/issues/26) Incremental sync with checkpoints and resume.
-   Done: `sync_resource` and `CheckpointStore` in `reso-ingest` (JSON file per server and resource, at-least-once;
-   `reso-ingest` retries default to 5).
-9. [#27](https://github.com/jeremeybingham/reso_client/issues/27) Deletes and reconciliation. Done:
-   `reconcile_deletes` in `reso-ingest` writes delete events, from the server's `EntityEvent` feed when `$metadata`
-   declares it (`EventFeed::detect`), otherwise by comparing key sets between runs (first run = baseline, no deletes).
-10. [#28](https://github.com/jeremeybingham/reso_client/issues/28) Ingest CLI: `sync`, `discover`, `status`. Done:
-    the `reso-ingest` binary (see [Ingest CLI](#ingest-cli)).
-11. [#29](https://github.com/jeremeybingham/reso_client/issues/29) Parquet output with a schema from `$metadata`.
-    Done: `ParquetWriter` and `sync --format parquet` behind the `parquet` feature of `reso-ingest`.
-
-**Later or optional**
-
-- [#30](https://github.com/jeremeybingham/reso_client/issues/30) Media file download.
-
-**Test server.** Mock servers cover most of the work, but checking real-server behaviour needs read-only access to a
-RESO Web API server certified for Data Dictionary 2.1
-([#32](https://github.com/jeremeybingham/reso_client/issues/32), help wanted). Without one, #23 and the DD 2.1 plan
-([#17](https://github.com/jeremeybingham/reso_client/issues/17)) are blocked, and #19-#21, #26, #27, #29 and #30 can
-be built but not confirmed against a live server.
-
-Phases A to C shipped in v0.3.0 (`reso-ingest` is not published yet). Expect breaking changes before 1.0; they are recorded in the [changelog](CHANGELOG.md).
+- **Tested against:** mock servers (every test, offline) and RESO's reference server run locally
+  ([#35](https://github.com/jeremeybingham/reso_client/issues/35)): a full `reso-ingest sync`, a repeat run, an
+  interrupted run resumed, a changed record and a deleted record all came out right.
+- **Not yet tested against a vendor server** (Bridge, MLS Grid, Trestle and others): OAuth2, rate limits, replication
+  and delete feeds behave as the standard says, but are unconfirmed in practice until
+  [#32](https://github.com/jeremeybingham/reso_client/issues/32).
+- `execute_count` uses the `/Resource/$count` path, which some servers (including the reference server) do not have;
+  `QueryBuilder::with_count().top(0)` with `execute` works on more servers.
+- `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
+- `reso-ingest sync --format parquet` writes one Parquet file per page.
+- Media files are not downloaded ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
+- Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md).
 
 ## Installation
 
 ```toml
 [dependencies]
-reso-client = "0.3.0"
+reso-client = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Requires Rust 1.87 or later.
+Rust 1.87 or later.
+
+## Quick start
+
+```rust
+use reso_client::{QueryBuilder, ResoClient, StandardReplication};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = ResoClient::from_env()?;
+
+    // One query; the response is the raw OData JSON: { "value": [...], "@odata.nextLink": "..." }
+    let query = QueryBuilder::new("Property")
+        .filter("City eq 'Austin' and ListPrice gt 500000")
+        .select(&["ListingKey", "City", "ListPrice"])
+        .order_by("ListPrice", "desc")
+        .top(10)
+        .build()?;
+    let results = client.execute(&query).await?;
+    println!("{} records", results["value"].as_array().map_or(0, Vec::len));
+
+    // A whole result set: the server picks the page size and sends a next link
+    let mut page = client.execute_page(&QueryBuilder::new("Member").build()?).await?;
+    let mut total = page.records.len();
+    while let Some(next) = client.next_page(&page).await? {
+        total += next.records.len();
+        page = next;
+    }
+    println!("{total} members");
+
+    // RESO-standard replication on ModificationTimestamp; save run.checkpoint() to resume later
+    let mut run = client.replicate(StandardReplication::new("Property", "ListingKey").page_size(1000));
+    while let Some(batch) = run.next_batch().await? {
+        println!("{} records, up to {:?}", batch.len(), run.checkpoint());
+    }
+
+    // What the server offers, from $metadata
+    let model = client.fetch_metadata_model().await?;
+    for name in model.resource_names() {
+        println!("{name}");
+    }
+
+    Ok(())
+}
+```
+
+What else the client does:
+
+- `QueryBuilder`: `$filter`, `$select`, `$orderby`, `$top`, `$skip`, `$count`, `$expand`, `$apply`, lookup by key.
+- Paging by `@odata.nextLink` in the body or by `next` and `Link` headers; relative links are resolved, and a link to
+  another host is refused so the token is never sent elsewhere.
+- OAuth2 client credentials: the token is fetched on first use, renewed at 90% of its lifetime and once after a 401.
+- Retries with backoff and `Retry-After` for network errors and 429/502/503/504; client-side limits per second, per
+  hour and bytes per day; request counters (`ResoClient::stats`). Off by default.
+- `$metadata` as raw XML (`fetch_metadata`) or a model (`fetch_metadata_model`): entity sets, keys, properties,
+  navigation properties, enum types.
+- Bridge Interactive's `/replication` endpoint and `dataset_id` path segment, as a vendor mode.
+- Typed errors (`ResoError`: `Unauthorized`, `RateLimited`, `ODataError`, `Network` and others); secrets are never
+  logged and are redacted from `Debug` output.
+
+The full API, with examples, is the rustdoc: [docs.rs/reso-client](https://docs.rs/reso-client) or `cargo doc --open`.
 
 ## Configuration
 
@@ -129,150 +119,82 @@ Requires Rust 1.87 or later.
 | `RESO_TOKEN_URI` | With `RESO_CLIENT_ID` | Token endpoint URL |
 | `RESO_SCOPE` | No | Scope sent with the token request |
 | `RESO_CREDENTIAL_TRANSPORT` | No | How the id and secret are sent: `body` (form fields, default), `header` (HTTP Basic) or `query` |
-| `RESO_DATASET_ID` | No | Bridge Interactive-specific dataset segment inserted after the base URL; leave unset for other servers |
+| `RESO_DATASET_ID` | No | Bridge Interactive's dataset path segment; leave unset for other servers |
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
-| `RESO_MAX_RETRIES` | No | Retries for network errors and 429/502/503/504 (default 0: never retry) |
+| `RESO_MAX_RETRIES` | No | Retries for network errors and 429/502/503/504 (default 0) |
 | `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_BYTES_PER_DAY` | No | Client-side ceilings (default none) |
 
-Or configure in code:
+Or in code:
 
 ```rust
 use std::time::Duration;
-use reso_client::{ClientConfig, ResoClient};
+use reso_client::{ClientConfig, ClientCredentials, CredentialTransport, RateLimit, ResoClient, RetryPolicy};
 
-let config = ClientConfig::new("https://api.mls.example/OData", "token")
-    .with_dataset_id("actris_ref") // Bridge-specific; only for servers that use a dataset path segment
-    .with_timeout(Duration::from_secs(60));
-let client = ResoClient::with_config(config)?;
-
-// OAuth2 client credentials instead of a fixed token
-use reso_client::{ClientCredentials, CredentialTransport};
 let credentials = ClientCredentials::new("https://auth.mls.example/token", "client-id", "client-secret")
     .with_scope("api")
     .with_transport(CredentialTransport::BasicHeader);
-let client = ResoClient::with_config(ClientConfig::with_auth("https://api.mls.example/OData", credentials))?;
+let config = ClientConfig::with_auth("https://api.mls.example/odata", credentials)
+    .with_timeout(Duration::from_secs(60))
+    .with_retry(RetryPolicy::new(4))
+    .with_rate_limit(RateLimit::default().per_second(2));
+let client = ResoClient::with_config(config)?;
 ```
 
-With client credentials the client fetches a token on first use, reuses it until 90% of `expires_in` has passed (a
-token without `expires_in` is kept until the server answers 401), and on a 401 fetches a new token and retries the
-request once. Concurrent requests on one client share its token and wait for a single fetch. Secrets and tokens are
-redacted from `Debug` output and never logged. Unconfirmed against a real MLS server (#32).
+## Ingest command
 
-## Quick start
-
-```rust
-use reso_client::{QueryBuilder, ResoClient};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ResoClient::from_env()?;
-
-    let query = QueryBuilder::new("Property")
-        .filter("City eq 'Austin' and ListPrice gt 500000")
-        .select(&["ListingKey", "City", "ListPrice"])
-        .order_by("ListPrice", "desc")
-        .top(10)
-        .build()?;
-
-    // Records come back as raw OData JSON: { "value": [...], "@odata.nextLink": "..." }
-    let results = client.execute(&query).await?;
-    if let Some(records) = results["value"].as_array() {
-        println!("{} records", records.len());
-    }
-
-    // Walk a whole result set: the server picks the page size and sends a next link
-    let mut page = client.execute_page(&QueryBuilder::new("Member").build()?).await?;
-    let mut total = page.records.len();
-    while let Some(next) = client.next_page(&page).await? {
-        total += next.records.len();
-        page = next;
-    }
-    println!("{} members", total);
-
-    // The service's $metadata document, as XML
-    let metadata = client.fetch_metadata().await?;
-    println!("{} bytes of metadata", metadata.len());
-
-    // The same document parsed: resources, keys, fields, enums
-    let model = client.fetch_metadata_model().await?;
-    for name in model.resource_names() {
-        println!("{}", name);
-    }
-
-    Ok(())
-}
-```
-
-Errors are `ResoError` values (`Config`, `Network`, `Unauthorized`, `RateLimited`, `ODataError` and others), so
-callers can tell a bad token from a server fault or a rate limit.
-
-The API reference is the rustdoc: `cargo doc --open`, or [docs.rs](https://docs.rs/reso-client). Agents and
-contributors start from [AGENTS.md](AGENTS.md).
-
-## Ingest CLI
-
-The `reso-ingest` crate (in this workspace, unpublished) has a command line over the library:
+`reso-ingest` reads a TOML file listing servers (secrets come from environment variables it names) and pulls each one:
 
 ```sh
-cargo run -p reso-ingest -- sync --config servers.toml --out data/          # incremental pull of every server
-cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --deletes
-cargo run -p reso-ingest -- discover --config servers.toml --server mls-one   # $metadata model as JSON
-cargo run -p reso-ingest -- status --out data/                                # checkpoints and the last run
+cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server
+cargo run -p reso-ingest -- discover --config servers.toml            # each server's $metadata model as JSON
+cargo run -p reso-ingest -- status --out data/                        # checkpoints and the last run
 ```
 
-- `sync` pulls each resource the server's `$metadata` lists (after the `include`/`exclude` filters), continuing from the
-  saved checkpoint; the first run is the full load. Resources without a single-field key or a `ModificationTimestamp`
-  are skipped (an error if named with `--resource`). `--deletes` also writes delete events (without an `EntityEvent`
-  feed this pulls every key each run). `--start-over` drops the selected checkpoints first.
-- Output: tagged NDJSON files and `manifest.<run>.json` in `--out` (default `reso-out`); checkpoints in `--state`
-  (default `<out>/state`). Progress lines (`##progress step=N/T label=server/resource`) go to stderr, the summary to
-  stdout.
-- Parquet: build with `--features parquet` and pass `--format parquet` for typed columns instead of NDJSON. Columns are
-  the four tags, `fetched_at` (timestamp), `event`, `key` (delete events) and a `record` struct with one field per
-  `$metadata` property (strings, booleans, integers, doubles, `Date32`, UTC millisecond timestamps, lists for
-  collections; decimals become doubles; enum, complex and unknown types become text, objects as JSON text).
-  Properties not in `$metadata` are not kept. A Parquet file is only readable once finished, so each checkpoint save
-  finishes the file: `sync` writes one file per page, `pull_resource` one per `--max-file-mb`.
-- Exit code `0` on success, `1` if any server or resource failed (the summary names the servers), `2` for bad usage or
-  configuration. Secrets come from the environment variables named in the config and are never printed.
-- `--help` lists every option; `reso-ingest/servers.example.toml` shows the configuration.
+Configuration, output format, delete detection and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
 
 ## Examples
 
-With a `.env` in place, run any example with `cargo run --example <name>`. They were written against Bridge
-Interactive's `actris_ref` reference dataset; the project has no working server credentials at the moment (see
-[#32](https://github.com/jeremeybingham/reso_client/issues/32)).
+`examples/` holds runnable programs: `cargo run --example <name>` with a `.env` or the variables above set. Most were
+written against Bridge Interactive's `actris_ref` dataset, and the project has no vendor credentials at the moment
+(#32), so they are kept as usage samples rather than checked on every change.
 
 | Example | Shows |
 |---|---|
-| `test_connectivity` | Connection and authentication check |
-| `test_property`, `test_member` | Queries on the Property and Member resources |
-| `test_filters`, `test_select` | Filter syntax and field selection |
+| `test_connectivity` | A first request: configuration, network and authentication |
+| `test_standard_paging` | Walking a whole result set by `@odata.nextLink`; runs against the local reference server |
+| `test_property`, `test_member`, `test_filters`, `test_select` | Queries, filters and field selection |
 | `test_core_queries` | The [RESO Web API core query examples](https://transport.reso.org/proposals/web-api-core.html#28-core-query-examples) |
 | `test_metadata` | Fetching `$metadata` |
-| `test_standard_paging` | Walking a whole result set by `@odata.nextLink` (`execute_page`, `next_page`); runs against the local reference server |
-| `test_actris_ref` | A tour of the reference dataset |
-| `analyze_property_fields` | Which Property fields are populated across 200 active listings |
-| `analyze_active_listings` | Summary statistics for 200 active residential listings |
-| `test_count_only`, `test_apply`, `test_expand`, `test_pagination_nextlink`, `test_replication` | Features that need server support `actris_ref` does not give (`/$count`, `$apply`, `$expand`, header paging, Bridge replication) |
+| `analyze_property_fields`, `analyze_active_listings` | Field fill rates and summary statistics over 200 active listings |
+| `test_actris_ref` | A tour of Bridge's reference dataset |
+| `test_count_only`, `test_apply`, `test_expand` | `/$count`, `$apply` and `$expand`, which need server support |
+| `test_replication`, `test_pagination_nextlink` | Bridge's `/replication` endpoint (vendor mode) |
+
+To run against RESO's reference server started locally (see
+[#35](https://github.com/jeremeybingham/reso_client/issues/35)), set `RESO_BASE_URL=http://localhost:8080` and
+`RESO_TOKEN=dummy`.
 
 ## Development
 
-```bash
-cargo test                    # unit, integration and doc tests
-cargo fmt && cargo clippy -- -D warnings
-cargo doc --open
+```sh
+cargo fmt && cargo clippy -- -D warnings   # both crates
+cargo test                                 # unit, wiremock integration and doc tests; offline
+cargo test -p reso-ingest --features parquet
+RESO_LIVE_URL=http://localhost:8080 cargo test --test live_reference_server -- --ignored   # local reference server
 ```
 
-Live tests against a local copy of RESO's reference server are ignored by default (CI stays offline). Start the server
-(see [#35](https://github.com/jeremeybingham/reso_client/issues/35)), then:
+Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
-```bash
-RESO_LIVE_URL=http://localhost:8080 cargo test --test live_reference_server -- --ignored
-```
+## What's next
 
-Unit tests live next to the code in `src/`; integration tests in `tests/` use wiremock servers. Contribution rules are
-in [AGENTS.md](AGENTS.md).
+- Run against a vendor server and fix what it shows ([#32](https://github.com/jeremeybingham/reso_client/issues/32)),
+  then publish `reso-ingest`.
+- Count with `$count=true&$top=0`, and size-based Parquet files in `sync`.
+- Finish the reference-server checks ([#35](https://github.com/jeremeybingham/reso_client/issues/35)) and the
+  Data Dictionary 2.1 notes ([#17](https://github.com/jeremeybingham/reso_client/issues/17)).
+- Optional: media download ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
+
+The overall plan is tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18).
 
 ## License
 
