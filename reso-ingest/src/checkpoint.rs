@@ -375,7 +375,7 @@ fn io_error(path: &Path, e: std::io::Error) -> IngestError {
     }
 }
 
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {

@@ -206,6 +206,11 @@ In `--out` (default `reso-out`):
   it stops with an error instead.
 - `state/` (or `--state`): one JSON checkpoint per server and resource (and one `$metadata` snapshot per server), saved after each batch is written, so a rerun
   after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times.
+- `state/<server>.<resource>.lock`: the feed's lease while a `sync` runs (process id, host, expiry; the expiry is renewed
+  every 100 seconds and removed when the sync ends). A second `sync` on the same state directory skips that feed with a
+  warning in the manifest and log (`skipped: another process is syncing this feed`), without failing the run. After a
+  crash the lease runs out in at most 5 minutes, then the next run takes the feed over. It works for processes that share
+  the state directory on a local disk; `media` does not take leases yet. Shared backends are #85.
 
 ## How it syncs
 

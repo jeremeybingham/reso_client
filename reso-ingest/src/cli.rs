@@ -21,6 +21,7 @@ use crate::checkpoint::CheckpointStore;
 use crate::checks::{count_warning, CheckingWriter, SchemaSnapshot};
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
+use crate::lease::{Lease, LeaseOutcome};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
 use crate::manifest::{sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
@@ -404,6 +405,9 @@ fn client_for(server: &ServerConfig) -> Result<ResoClient, String> {
 
 // ---------------------------------------------------------------- sync
 
+/// How long a feed's lease lasts without renewal (a crashed run blocks its feeds for at most this long)
+const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 struct SyncOptions {
     out: PathBuf,
     state: PathBuf,
@@ -603,6 +607,28 @@ async fn sync_server(
                 ));
             }
             continue;
+        };
+
+        // One writer per feed: a second process syncing this server and resource skips it
+        let _lease = match Lease::acquire(&options.state, &name, resource, LEASE_TTL) {
+            Ok(LeaseOutcome::Acquired(lease)) => lease,
+            Ok(LeaseOutcome::Held(holder)) => {
+                let message = format!("skipped: another process is syncing this feed ({holder})");
+                span.in_scope(
+                    || tracing::warn!(%holder, "feed skipped: leased by another process"),
+                );
+                send(&tx, format!("[{label}] {message}"));
+                let mut entry = failed_entry(&name, resource, "");
+                entry.error = None;
+                entry.warnings.push(message);
+                entries.push(entry);
+                continue;
+            }
+            Err(e) => {
+                span.in_scope(|| tracing::warn!(error = %e, "cannot take the feed's lease"));
+                entries.push(failed_entry(&name, resource, &e.to_string()));
+                continue;
+            }
         };
 
         let mut writer = match make_writer(
