@@ -2,23 +2,24 @@
 
 Guidance for AI coding agents and people working in this repository (tool-neutral).
 
-reso-client is a Rust library (crates.io `reso-client`, pre-1.0, v0.3.0) for RESO Web API servers (OData 4.0). Its goal
-is to become the **ingest layer** between one or more RESO servers and the applications that use their data: connect to
-many compliant servers, discover and pull every resource the account is licensed for, follow the API's rules (OAuth2,
-server-driven paging, RESO-standard replication, rate limits, retries), keep data current with incremental resumable
-syncs, and hand records over **raw**, tagged with their source, in a few file formats (NDJSON first, then Parquet). The
-typical user is an aggregator pulling from many MLS vendors into its own store. It is **not** responsible for
-de-duplication across MLSs, local field mapping, data-licence or display-rule enforcement, or choosing a database.
-Today `reso-client` is a one-server query client (bearer token or OAuth2 client credentials, standard paging and
-replication, retries) and the unpublished `reso-ingest` crate pulls many servers into NDJSON or Parquet; the plan is tracker issue
-#18 (milestone "Ingest layer", child issues #19-#31, test-server need #32), and README.md has the current limits and
-roadmap.
+This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in two Rust crates:
+
+- `reso-client` (crates.io, pre-1.0, v0.3.0): a client for one server: queries, standard paging and replication,
+  bearer token or OAuth2 client credentials, retries and rate limits, a parsed `$metadata` model.
+- `reso-ingest` (unpublished, `reso-ingest/`): pulls every resource from many servers into tagged NDJSON or Parquet
+  files, incrementally and resumably, with delete detection; library plus the `reso-ingest` command.
+
+Records are handed over **raw**, tagged with their source. The typical user is an aggregator pulling from many MLS
+vendors into its own store. The crates do **not** de-duplicate across MLSs, map local fields, enforce data-licence or
+display rules, or choose a database. The plan is tracker issue #18 (milestone "Ingest layer"); the open work is a
+vendor-server run (#32), reference-server checks (#35), DD 2.1 notes (#17) and optional media download (#30).
 
 ## Finding things
 
 | You want | Go to |
 |---|---|
-| Goal, current state and limits, roadmap, quick start, configuration | `README.md` |
+| What the crates do, limits, quick start, configuration, what's next | `README.md` |
+| The ingest command: configuration, output format, deletes, Parquet | `reso-ingest/README.md` |
 | The full plan, gap list with code references, open owner decisions | GitHub issue #18 and its children |
 | API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |
@@ -51,8 +52,9 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
   through `tracing` rather than `println!`, and avoids glob imports. Examples may unwrap.
 - **Public API.** Every public item has a `///` doc comment, with an example where useful. Breaking changes are allowed
   before 1.0 but are recorded in `CHANGELOG.md` with a version bump.
-- **No new dependencies without discussion** (XML parser, OAuth2 crate, rate-limit crates, `arrow`/`parquet` are open
-  decisions in #18). The ingest layer is likely a second crate (`reso-ingest`) so this client stays lean.
+- **No new dependencies without discussion.** Keep `reso-client` lean (its XML parser is `roxmltree`; OAuth2 and rate
+  limiting are hand-written); heavier ones belong in `reso-ingest` (`clap`, `toml`, and `arrow`/`parquet` behind the
+  `parquet` feature).
 - Every bug fixed gets a regression test. Docs change in the same commit as the behaviour they describe.
 
 ## Where things are
@@ -68,11 +70,17 @@ src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`
 src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
 src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter, ClientStats counters
 src/error.rs        ResoError and the Result alias
-reso-ingest/        second workspace crate (unpublished): config.rs (multi-server TOML, secrets via `*_env`), runner.rs
-                    (independent per-server tasks, concurrency cap), output.rs (RecordWriter, NdjsonWriter: tagged lines, size
-                    rotation), manifest.rs (RunManifest, pull_resource, sync_resource), checkpoint.rs (CheckpointStore, JSON files: checkpoints, key sets, event sequences),
-                    deletes.rs (reconcile_deletes, EventFeed: delete events by key diff or EntityEvent),
-                    cli.rs + main.rs (`reso-ingest` binary: sync, discover, status; clap args, run() takes writers so tests run it in-process), servers.example.toml, tests/
+reso-ingest/        second workspace crate (unpublished); README.md documents the command
+  src/config.rs     Config: multi-server TOML, secrets read from the variables named by `*_env`
+  src/runner.rs     run_servers: one independent task per server, concurrency cap
+  src/output.rs     RecordWriter, NdjsonWriter: tagged lines, size rotation
+  src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature)
+  src/manifest.rs   RunManifest, pull_resource, sync_resource
+  src/checkpoint.rs CheckpointStore: JSON files for checkpoints, key sets, event sequences
+  src/deletes.rs    reconcile_deletes, EventFeed: delete events by key diff or EntityEvent
+  src/cli.rs, main.rs  the `reso-ingest` binary (sync, discover, status); run() takes writers so tests run in-process
+  src/error.rs      IngestError
+  servers.example.toml, tests/ (wiremock servers, CLI run in-process)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),

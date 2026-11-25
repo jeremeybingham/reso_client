@@ -1,5 +1,8 @@
 # Development Summary: reso-client
 
+> Written in November 2025, when the project reached 0.2.1. It is a history of how the project began; files it
+> mentions such as `USAGE.md` and `llms.txt` have since been removed. Current documentation: [README.md](README.md).
+
 ## Overview
 
 `reso-client` is a Rust library for the [RESO Web API](https://www.reso.org/reso-web-api/), the standardized REST interface used by Multiple Listing Service (MLS) providers in real estate. It wraps OData 4.0 query semantics in an ergonomic, type-safe Rust API, and is published to crates.io as `reso-client`. The project is a good example of a developer using Claude Code to accelerate the evolution of a working prototype into a production-quality open-source library.
