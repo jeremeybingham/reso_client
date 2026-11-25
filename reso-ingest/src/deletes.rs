@@ -44,12 +44,57 @@ impl EventFeed {
     }
 }
 
-/// Find records of `resource` that left the feed since the last call and write them as delete events
+/// The resource whose deletes [`reconcile_deletes`] looks for
+#[derive(Debug, Clone, Copy)]
+pub struct DeleteTarget<'a> {
+    /// Resource name, for example `"Property"`
+    pub resource: &'a str,
+    /// Its single key field, for example `"ListingKey"`
+    pub key_field: &'a str,
+    /// A filter added (by `and`) to the key pull and to the lookups of `resource`, so a server
+    /// that needs one in every request accepts them and a key diff covers the same records as
+    /// the sync (see [`ServerConfig::filter_for`](crate::ServerConfig::filter_for)). It is not
+    /// added to the event resource query.
+    pub filter: Option<&'a str>,
+}
+
+impl<'a> DeleteTarget<'a> {
+    /// A target with no filter
+    pub fn new(resource: &'a str, key_field: &'a str) -> Self {
+        Self {
+            resource,
+            key_field,
+            filter: None,
+        }
+    }
+
+    /// Add the server's filter to every query on the resource
+    pub fn with_filter(mut self, filter: Option<&'a str>) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// A query on the resource with the target's filter and `extra` joined by `and`
+    fn query(&self, extra: Option<String>) -> QueryBuilder {
+        let filter = match (self.filter, extra) {
+            (Some(f), Some(e)) => Some(format!("({f}) and ({e})")),
+            (Some(f), None) => Some(f.to_owned()),
+            (None, e) => e,
+        };
+        let query = QueryBuilder::new(self.resource);
+        match filter {
+            Some(f) => query.filter(f),
+            None => query,
+        }
+    }
+}
+
+/// Find records of `target.resource` that left the feed since the last call and write them as delete events
 ///
 /// With `feed` (see [`EventFeed::detect`]) the server's event resource is read from the saved
-/// sequence on; each record it names is looked up by `key_field`, and the ones no longer there are
-/// deleted. Without it the keys of the whole resource are pulled (`$select=<key_field>`) and
-/// compared with the key set saved by the previous call.
+/// sequence on; each record it names is looked up by `target.key_field`, and the ones no longer
+/// there are deleted. Without it the keys of the whole resource are pulled
+/// (`$select=<key_field>`) and compared with the key set saved by the previous call.
 ///
 /// The first call only records a baseline (the key set, or the newest event sequence) and writes
 /// no deletes: a first full load already holds exactly what the server has. Run it after
@@ -67,15 +112,15 @@ impl EventFeed {
 pub async fn reconcile_deletes(
     client: &ResoClient,
     server: &str,
-    resource: &str,
-    key_field: &str,
+    target: &DeleteTarget<'_>,
     feed: Option<&EventFeed>,
     writer: &mut dyn RecordWriter,
     store: &CheckpointStore,
 ) -> ResourceEntry {
+    let resource = target.resource;
     let result = match feed {
-        Some(feed) => by_events(client, server, resource, key_field, feed, writer, store).await,
-        None => by_key_diff(client, server, resource, key_field, writer, store).await,
+        Some(feed) => by_events(client, server, target, feed, writer, store).await,
+        None => by_key_diff(client, server, target, writer, store).await,
     };
     let (deletes, mut error) = match result {
         Ok(n) => (n, None),
@@ -113,15 +158,16 @@ fn emit(writer: &mut dyn RecordWriter, keys: &[Value]) -> Result<(), String> {
 async fn by_key_diff(
     client: &ResoClient,
     server: &str,
-    resource: &str,
-    key_field: &str,
+    target: &DeleteTarget<'_>,
     writer: &mut dyn RecordWriter,
     store: &CheckpointStore,
 ) -> Outcome {
+    let (resource, key_field) = (target.resource, target.key_field);
     let previous = store.load_keys(server, resource).map_err(text)?;
 
     // Pull every key first; nothing is decided until the whole pull has succeeded.
-    let query = QueryBuilder::new(resource)
+    let query = target
+        .query(None)
         .select(&[key_field])
         .build()
         .map_err(text)?;
@@ -168,12 +214,12 @@ async fn by_key_diff(
 async fn by_events(
     client: &ResoClient,
     server: &str,
-    resource: &str,
-    key_field: &str,
+    target: &DeleteTarget<'_>,
     feed: &EventFeed,
     writer: &mut dyn RecordWriter,
     store: &CheckpointStore,
 ) -> Outcome {
+    let resource = target.resource;
     let seq = feed.sequence_field.as_str();
     let Some(after) = store.load_event_sequence(server, resource).map_err(text)? else {
         // First call: remember where the feed is now; earlier events are already in the full load.
@@ -217,7 +263,7 @@ async fn by_events(
             if !checked.insert(key.to_string()) {
                 continue;
             }
-            if !exists(client, resource, key_field, key).await? {
+            if !exists(client, target, key).await? {
                 gone.push(Value::String(key.to_string()));
             }
         }
@@ -237,14 +283,10 @@ async fn by_events(
 
 /// Whether a record with this key is still on the server (a filter lookup, so a 404 is an error,
 /// not "deleted")
-async fn exists(
-    client: &ResoClient,
-    resource: &str,
-    key_field: &str,
-    key: &str,
-) -> Result<bool, String> {
-    let query = QueryBuilder::new(resource)
-        .filter(format!("{key_field} eq {}", odata_string(key)))
+async fn exists(client: &ResoClient, target: &DeleteTarget<'_>, key: &str) -> Result<bool, String> {
+    let key_field = target.key_field;
+    let query = target
+        .query(Some(format!("{key_field} eq {}", odata_string(key))))
         .select(&[key_field])
         .top(1)
         .build()

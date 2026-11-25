@@ -561,3 +561,51 @@ async fn status_with_a_broken_state_or_out_directory_fails() {
     assert_eq!(r.code, 1, "{}{}", r.out, r.err);
     assert!(r.err.contains("error:"), "{}", r.err);
 }
+
+#[tokio::test]
+async fn server_filter_and_resource_expand_reach_every_query() {
+    std::env::set_var("CLI_TEST_TOKEN_X", SECRET);
+    let srv = server().await;
+    let dir = TempDir::new("expand");
+    let extra = "filter = \"OriginatingSystemName eq 'mls'\"\n\
+                 [server.resources.Property]\nexpand = [\"Media\"]\npage_size = 3";
+    let config = write_text_config(
+        &dir,
+        &bearer_server("mls", &srv.uri(), "CLI_TEST_TOKEN_X", extra),
+    );
+    let out = dir.path("out");
+    let out_s = out.to_str().unwrap();
+    for _ in 0..2 {
+        let r = cli(&["sync", "--config", &config, "--out", out_s, "--deletes"]).await;
+        assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    }
+
+    let mut syncs = 0;
+    let mut key_pulls = 0;
+    for request in srv.received_requests().await.unwrap() {
+        let q: Vec<(String, String)> = request
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let get = |name: &str| q.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        if request.url.path().ends_with("$metadata") || get("from").is_some() {
+            continue; // metadata, and next links the server wrote
+        }
+        let filter = get("$filter").unwrap_or_default();
+        assert!(filter.contains("OriginatingSystemName eq 'mls'"), "{q:?}");
+        if get("$orderby").is_some() {
+            syncs += 1;
+            assert_eq!(get("$expand"), Some("Media"), "{q:?}");
+            assert_eq!(get("$top"), Some("3"), "{q:?}");
+        } else {
+            key_pulls += 1;
+            assert_eq!(get("$select"), Some("ListingKey"), "{q:?}");
+            assert_eq!(get("$expand"), None, "{q:?}");
+        }
+    }
+    assert!(
+        syncs >= 2 && key_pulls == 2,
+        "{syncs} syncs, {key_pulls} key pulls"
+    );
+}

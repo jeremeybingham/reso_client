@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use reso_client::{ClientConfig, Metadata, ResoClient};
-use reso_ingest::{reconcile_deletes, CheckpointStore, EventFeed, NdjsonWriter};
+use reso_ingest::{reconcile_deletes, CheckpointStore, DeleteTarget, EventFeed, NdjsonWriter};
 use serde_json::{json, Value};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -70,8 +70,8 @@ async fn server(state: Arc<State>) -> MockServer {
                     .map(|(n, k)| json!({"EntityEventSequence": n, "ResourceRecordKey": k}))
                     .collect();
                 (rows, "EntityEvent")
-            } else if let Some(rest) = filter.strip_prefix("ListingKey eq '") {
-                let key = rest.trim_end_matches('\'');
+            } else if let Some((_, rest)) = filter.split_once("ListingKey eq '") {
+                let key = rest.trim_end_matches(')').trim_end_matches('\'');
                 let rows: Vec<Value> = state
                     .keys
                     .lock()
@@ -144,12 +144,22 @@ async fn run(
     run_id: &str,
     feed: Option<&EventFeed>,
 ) -> reso_ingest::ResourceEntry {
+    run_filtered(srv, store, out, run_id, feed, None).await
+}
+
+async fn run_filtered(
+    srv: &MockServer,
+    store: &CheckpointStore,
+    out: &std::path::Path,
+    run_id: &str,
+    feed: Option<&EventFeed>,
+    filter: Option<&str>,
+) -> reso_ingest::ResourceEntry {
     let mut w = NdjsonWriter::new(out, "mls", "Property", run_id, 1 << 20).unwrap();
     reconcile_deletes(
         &client(srv),
         "mls",
-        "Property",
-        "ListingKey",
+        &DeleteTarget::new("Property", "ListingKey").with_filter(filter),
         feed,
         &mut w,
         store,
@@ -359,4 +369,46 @@ async fn key_pull_with_a_keyless_record_is_not_trusted() {
     assert!(e.error.unwrap().contains("not trusted"));
     assert_eq!(e.deletes, 0);
     assert!(store.load_keys("mls", "Property").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn server_filter_goes_on_key_lookups_but_not_on_the_event_feed() {
+    const FILTER: &str = "OriginatingSystemName eq 'mls'";
+    let state = Arc::new(State::default());
+    set_keys(&state, &["K1", "K2"]);
+    *state.events.lock().unwrap() = vec![(1, "K1".into())];
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("filtered");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let out = dir.0.join("out");
+    let feed = EventFeed::entity_event();
+
+    run_filtered(&srv, &store, &out, "r1", Some(&feed), Some(FILTER)).await;
+    set_keys(&state, &["K1"]);
+    *state.events.lock().unwrap() = vec![(1, "K1".into()), (2, "K2".into()), (3, "K1".into())];
+    let e = run_filtered(&srv, &store, &out, "r2", Some(&feed), Some(FILTER)).await;
+    assert_eq!((e.error, e.deletes), (None, 1));
+
+    let requests = srv.received_requests().await.unwrap();
+    let filters = |path: &str| -> Vec<String> {
+        requests
+            .iter()
+            .filter(|r| r.url.path() == path)
+            .map(|r| param(r, "$filter").unwrap_or_default())
+            .collect()
+    };
+    let lookups = filters("/Property");
+    assert_eq!(lookups.len(), 2, "{lookups:?}");
+    assert!(
+        lookups
+            .iter()
+            .all(|f| f.starts_with("(OriginatingSystemName eq 'mls') and (ListingKey eq '")),
+        "{lookups:?}"
+    );
+    assert!(
+        filters("/EntityEvent")
+            .iter()
+            .all(|f| !f.contains("OriginatingSystemName")),
+        "the event resource is queried without the server filter"
+    );
 }

@@ -257,3 +257,84 @@ fn credential_transport_and_scope_reach_the_client_config() {
     assert_eq!(c.scope.as_deref(), Some("api"));
     assert_eq!(c.transport, reso_client::CredentialTransport::BasicHeader);
 }
+
+const FILTERED: &str = r#"
+[[server]]
+name = "grid"
+base_url = "https://api.grid.example/v2"
+page_size = 5000
+filter = "OriginatingSystemName eq 'mls'"
+[server.resources.Property]
+expand = ["Media", "Rooms"]
+page_size = 1000
+filter = "PropertyType eq 'Residential'"
+[server.resources.Member]
+expand = ["Media"]
+[server.auth]
+type = "bearer"
+token_env = "GRID_TOKEN"
+"#;
+
+#[test]
+fn server_and_resource_filters_combine_and_resource_settings_win() {
+    let config = Config::parse(FILTERED).unwrap();
+    let s = &config.servers[0];
+    assert_eq!(
+        s.filter_for("Property").as_deref(),
+        Some("(OriginatingSystemName eq 'mls') and (PropertyType eq 'Residential')")
+    );
+    assert_eq!(
+        s.filter_for("Office").as_deref(),
+        Some("OriginatingSystemName eq 'mls'")
+    );
+    assert_eq!(s.expand_for("Property"), ["Media", "Rooms"]);
+    assert_eq!(s.expand_for("Member"), ["Media"]);
+    assert!(s.expand_for("Office").is_empty());
+    assert_eq!(s.page_size_for("Property"), Some(1000));
+    assert_eq!(s.page_size_for("Member"), Some(5000));
+
+    let only_resource = FILTERED.replace("filter = \"OriginatingSystemName eq 'mls'\"\n", "");
+    let config = Config::parse(&only_resource).unwrap();
+    assert_eq!(
+        config.servers[0].filter_for("Property").as_deref(),
+        Some("PropertyType eq 'Residential'")
+    );
+    assert_eq!(config.servers[0].filter_for("Office"), None);
+}
+
+#[test]
+fn bad_filter_and_resource_settings_name_the_server() {
+    for (from, to, expected) in [
+        (
+            "page_size = 1000",
+            "page_size = 0",
+            "resources.Property.page_size must be at least 1",
+        ),
+        (
+            "filter = \"PropertyType eq 'Residential'\"",
+            "filter = \" \"",
+            "resources.Property.filter must not be empty",
+        ),
+        (
+            "filter = \"OriginatingSystemName eq 'mls'\"",
+            "filter = \"\"",
+            "filter must not be empty",
+        ),
+        (
+            "expand = [\"Media\"]\n",
+            "expand = [\"\"]\n",
+            "resources.Member.expand has an empty name",
+        ),
+        (
+            "expand = [\"Media\"]\n",
+            "expandd = [\"Media\"]\n",
+            "expandd",
+        ),
+    ] {
+        let text = FILTERED.replace(from, to);
+        assert_ne!(text, FILTERED, "{from}");
+        let (server, message) = server_error(&text);
+        assert_eq!(server, "grid");
+        assert!(message.contains(expected), "{message}");
+    }
+}

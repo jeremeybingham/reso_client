@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
-use crate::deletes::{reconcile_deletes, EventFeed};
+use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed};
 use crate::manifest::{sync_resource, ResourceEntry, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport};
 use crate::output::{new_run_id, NdjsonWriter, RecordWriter};
@@ -438,16 +438,34 @@ async fn sync_server(
             continue;
         };
 
-        let mut writer = match make_writer(&options, &metadata, &name, resource) {
+        let mut writer = match make_writer(
+            &options,
+            &metadata,
+            &name,
+            resource,
+            server.expand_for(resource),
+        ) {
             Ok(w) => w,
             Err(e) => {
                 entries.push(failed_entry(&name, resource, &e.to_string()));
                 continue;
             }
         };
+        let filter = server.filter_for(resource);
         let mut spec = StandardReplication::new(resource, &plan.key);
-        if let Some(n) = server.page_size {
+        if let Some(n) = server.page_size_for(resource) {
             spec = spec.page_size(n);
+        }
+        if let Some(f) = &filter {
+            spec = spec.filter(f.as_str());
+        }
+        let expand: Vec<&str> = server
+            .expand_for(resource)
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if !expand.is_empty() {
+            spec = spec.expand(&expand);
         }
         let mut entry = sync_resource(
             &client,
@@ -463,8 +481,7 @@ async fn sync_server(
             let deleted = reconcile_deletes(
                 &client,
                 &name,
-                resource,
-                &plan.key,
+                &DeleteTarget::new(resource, &plan.key).with_filter(filter.as_deref()),
                 feed.as_ref(),
                 writer.as_mut(),
                 &store,
@@ -498,6 +515,7 @@ fn make_writer(
     #[cfg_attr(not(feature = "parquet"), allow(unused_variables))] metadata: &Metadata,
     server: &str,
     resource: &str,
+    #[cfg_attr(not(feature = "parquet"), allow(unused_variables))] expanded: &[String],
 ) -> Result<Box<dyn RecordWriter>, crate::error::IngestError> {
     match options.format {
         Format::Ndjson => Ok(Box::new(NdjsonWriter::new(
@@ -516,14 +534,17 @@ fn make_writer(
                         path: options.out.display().to_string(),
                         message: format!("no entity type for {resource} in $metadata"),
                     })?;
-            Ok(Box::new(ParquetWriter::new(
-                &options.out,
-                server,
-                resource,
-                &options.run_id,
-                options.max_file_bytes,
-                entity,
-            )?))
+            Ok(Box::new(
+                ParquetWriter::new(
+                    &options.out,
+                    server,
+                    resource,
+                    &options.run_id,
+                    options.max_file_bytes,
+                    entity,
+                )?
+                .with_expanded(expanded),
+            ))
         }
     }
 }

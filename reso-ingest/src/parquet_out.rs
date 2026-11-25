@@ -62,10 +62,22 @@ pub fn arrow_type(odata_type: &str) -> DataType {
 /// a struct with one nullable field per property of `entity` (null for a delete event).
 /// Properties the server sends that `$metadata` does not declare are not kept.
 pub fn schema_for(entity: &EntityType) -> SchemaRef {
-    let fields: Vec<Field> = entity
+    schema_from(&record_types(entity))
+}
+
+/// (name, Arrow type) for each declared property of `entity`
+fn record_types(entity: &EntityType) -> Vec<(String, DataType)> {
+    entity
         .properties
         .iter()
-        .map(|p| Field::new(&p.name, arrow_type(&p.type_name), true))
+        .map(|p| (p.name.clone(), arrow_type(&p.type_name)))
+        .collect()
+}
+
+fn schema_from(record_types: &[(String, DataType)]) -> SchemaRef {
+    let fields: Vec<Field> = record_types
+        .iter()
+        .map(|(name, ty)| Field::new(name, ty.clone(), true))
         .collect();
     Arc::new(Schema::new(vec![
         Field::new("source", DataType::Utf8, false),
@@ -168,14 +180,25 @@ impl ParquetWriter {
             run_id: run_id.to_string(),
             max_file_bytes,
             schema: schema_for(entity),
-            record_types: entity
-                .properties
-                .iter()
-                .map(|p| (p.name.clone(), arrow_type(&p.type_name)))
-                .collect(),
+            record_types: record_types(entity),
             current: None,
             files: Vec::new(),
         })
+    }
+
+    /// Keep these expanded navigation properties (`$expand`) as columns of JSON text
+    ///
+    /// `$metadata` declares them as navigation properties, not properties, so without this the
+    /// related records a server sends inline (for example `Media` inside `Property`) are not kept.
+    /// Call before the first row; a name that is already a column is left as it is.
+    pub fn with_expanded(mut self, names: &[String]) -> Self {
+        for name in names {
+            if !self.record_types.iter().any(|(n, _)| n == name) {
+                self.record_types.push((name.clone(), DataType::Utf8));
+            }
+        }
+        self.schema = schema_from(&self.record_types);
+        self
     }
 
     fn fail(&self, message: impl ToString) -> IngestError {

@@ -228,3 +228,25 @@ fn writes_nothing_when_nothing_arrives() {
     assert!(w.finish().unwrap().is_empty());
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
 }
+
+#[test]
+fn expanded_navigation_properties_are_kept_as_json_text() {
+    let dir = TempDir::new("expanded");
+    let mut w =
+        writer(&dir, 1 << 30).with_expanded(&["Media".to_string(), "ListingKey".to_string()]);
+    let media = json!([{"MediaKey": "M1", "MediaURL": "https://media.example/m1.jpg"}]);
+    w.write_batch(
+        &[
+            json!({"ListingKey": "A1", "Media": media.clone()}),
+            json!({"ListingKey": "A2"}),
+        ],
+        "2026-11-24T10:00:05Z",
+    )
+    .unwrap();
+    let files = w.finish().unwrap();
+    let rows = read_rows(&dir.0.join(&files[0].name));
+    let stored = rows[0]["record"]["Media"].as_str().expect("Media as text");
+    assert_eq!(serde_json::from_str::<Value>(stored).unwrap(), media);
+    assert_eq!(rows[0]["record"]["ListingKey"], json!("A1"));
+    assert!(rows[1]["record"].get("Media").is_none_or(Value::is_null));
+}

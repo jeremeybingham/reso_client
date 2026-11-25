@@ -1,5 +1,6 @@
 //! The TOML configuration: many servers, each with auth, limits and resource filters
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -36,6 +37,12 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// page_size = 1000                    # optional
 /// include = ["Property", "Member"]    # optional; empty = every resource
 /// exclude = ["Media"]                 # optional; wins over include
+/// filter = "OriginatingSystemName eq 'mls'"   # optional; added to every query
+///
+/// [server.resources.Property]         # optional; settings for one resource
+/// filter = "PropertyType eq 'Residential'"    # ANDed with the server filter
+/// expand = ["Media"]                  # `$expand` on sync pulls
+/// page_size = 1000
 ///
 /// [server.auth]
 /// type = "client_credentials"
@@ -84,6 +91,13 @@ pub struct ServerConfig {
     /// Resources never to pull; wins over `include`
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Filter added (by `and`) to every query sent to this server: sync pulls, the key pulls and
+    /// lookups that find deletes. Some servers require one (MLS Grid: `OriginatingSystemName`).
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Settings for single resources, by resource name
+    #[serde(default)]
+    pub resources: BTreeMap<String, ResourceConfig>,
     /// How to authenticate
     pub auth: AuthConfig,
     /// Retry and rate limits
@@ -92,6 +106,22 @@ pub struct ServerConfig {
     /// Media file downloads: their own limits, and where the token goes
     #[serde(default)]
     pub media: MediaConfig,
+}
+
+/// Settings for one resource of a server (`[server.resources.<Name>]`)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceConfig {
+    /// Filter for this resource, combined by `and` with the server's `filter`
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Navigation properties to expand on sync pulls (`$expand`), for example `["Media"]`
+    #[serde(default)]
+    pub expand: Vec<String>,
+    /// `$top` for this resource; overrides the server's `page_size` (servers may allow fewer
+    /// records per page with `$expand`)
+    #[serde(default)]
+    pub page_size: Option<u32>,
 }
 
 /// Authentication settings; secrets are named by environment variable, never written in the file
@@ -342,6 +372,24 @@ impl ServerConfig {
         if self.page_size == Some(0) {
             return Err("page_size must be at least 1".into());
         }
+        if self.filter.as_deref().is_some_and(|f| f.trim().is_empty()) {
+            return Err("filter must not be empty".into());
+        }
+        for (name, resource) in &self.resources {
+            if resource.page_size == Some(0) {
+                return Err(format!("resources.{name}.page_size must be at least 1"));
+            }
+            if resource
+                .filter
+                .as_deref()
+                .is_some_and(|f| f.trim().is_empty())
+            {
+                return Err(format!("resources.{name}.filter must not be empty"));
+            }
+            if resource.expand.iter().any(|e| e.trim().is_empty()) {
+                return Err(format!("resources.{name}.expand has an empty name"));
+            }
+        }
         if let Some(t) = &self.media.send_token {
             if SendToken::parse(t).is_none() {
                 return Err(format!(
@@ -392,6 +440,34 @@ impl ServerConfig {
     pub fn includes(&self, resource: &str) -> bool {
         !self.exclude.iter().any(|r| r == resource)
             && (self.include.is_empty() || self.include.iter().any(|r| r == resource))
+    }
+
+    /// The filter for every query on `resource`: the server's and the resource's, joined by `and`
+    pub fn filter_for(&self, resource: &str) -> Option<String> {
+        let own = self
+            .resources
+            .get(resource)
+            .and_then(|r| r.filter.as_deref());
+        match (self.filter.as_deref(), own) {
+            (Some(s), Some(r)) => Some(format!("({s}) and ({r})")),
+            (Some(f), None) | (None, Some(f)) => Some(f.to_owned()),
+            (None, None) => None,
+        }
+    }
+
+    /// The navigation properties to expand when syncing `resource`
+    pub fn expand_for(&self, resource: &str) -> &[String] {
+        self.resources
+            .get(resource)
+            .map_or(&[], |r| r.expand.as_slice())
+    }
+
+    /// The page size for `resource`: its own, else the server's
+    pub fn page_size_for(&self, resource: &str) -> Option<u32> {
+        self.resources
+            .get(resource)
+            .and_then(|r| r.page_size)
+            .or(self.page_size)
     }
 
     /// Build the [`ClientConfig`], reading secrets from the process environment
