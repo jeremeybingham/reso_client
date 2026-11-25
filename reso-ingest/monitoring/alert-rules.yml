@@ -42,3 +42,26 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "reso-ingest has not finished a run in {{ $value | humanizeDuration }}"
+
+      - alert: ResoDeletesHeld
+        # A delete pass found more deletes than [server.deletes] allows and wrote none; check the
+        # server, then run `sync --deletes --allow-mass-deletes` once
+        expr: reso_ingest_last_run_deletes_held > 0
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $value }} deletes of {{ $labels.server }}/{{ $labels.resource }} are held for review"
+
+      - alert: ResoSchemaChanged
+        # The server's $metadata differs from the previous run's (lasts until the next run)
+        expr: reso_ingest_schema_changes > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $labels.server }} changed its $metadata ({{ $value }} changes); see the run manifest"
+
+      - alert: ResoDataWarnings
+        # Records without a key, repeated keys in a page, timestamps before the checkpoint, or a
+        # count that does not match the server's
+        expr: reso_ingest_last_run_warnings > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "{{ $labels.server }}/{{ $labels.resource }} has check findings; see the run manifest"

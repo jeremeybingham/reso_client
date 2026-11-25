@@ -18,6 +18,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tracing::Instrument;
 
 use crate::checkpoint::CheckpointStore;
+use crate::checks::{count_warning, CheckingWriter, SchemaSnapshot};
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
@@ -28,6 +29,7 @@ use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
+use crate::webhook::{post_summary, run_summary};
 
 const TIMESTAMP_FIELD: &str = "ModificationTimestamp";
 const DEFAULT_OUT: &str = "reso-out";
@@ -75,6 +77,12 @@ enum Command {
         /// Without an EntityEvent feed this pulls every key of each resource on each run.
         #[arg(long)]
         deletes: bool,
+        /// Write deletes even when they pass the [server.deletes] limits (max_deletes, max_percent)
+        ///
+        /// Without it, a pass over a limit writes none and keeps its state, so the next run finds
+        /// the same deletes; use this once after checking them.
+        #[arg(long)]
+        allow_mass_deletes: bool,
         /// Download the media files of each page right after it is written
         ///
         /// Takes the Media records (or, for other resources, the `Media` arrays that `expand`
@@ -169,6 +177,7 @@ struct Args {
     out: Option<PathBuf>,
     state: Option<PathBuf>,
     deletes: bool,
+    allow_mass_deletes: bool,
     media: bool,
     start_over: bool,
     max_file_mb: Option<u64>,
@@ -259,6 +268,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             out: out_dir,
             state,
             deletes,
+            allow_mass_deletes,
             media,
             media_dir,
             start_over,
@@ -273,6 +283,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                 out: Some(out_dir),
                 state,
                 deletes,
+                allow_mass_deletes,
                 media,
                 media_dir,
                 start_over,
@@ -399,6 +410,7 @@ struct SyncOptions {
     run_id: String,
     resources: Vec<String>,
     deletes: bool,
+    allow_mass_deletes: bool,
     media: Option<PathBuf>,
     start_over: bool,
     max_file_bytes: u64,
@@ -423,6 +435,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         run_id,
         resources: args.resources.clone(),
         deletes: args.deletes,
+        allow_mass_deletes: args.allow_mass_deletes,
         media: args.media.then(|| {
             args.media_dir
                 .clone()
@@ -457,9 +470,10 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let mut media_manifest = MediaManifest::new(&options.run_id);
     for report in reports {
         match report.result {
-            Ok((entries, media)) => {
+            Ok((entries, media, schema_changes)) => {
                 entries.into_iter().for_each(|e| manifest.add_resource(e));
                 media_manifest.servers.extend(media);
+                manifest.add_schema_changes(&report.name, schema_changes);
             }
             Err(message) => manifest.add_server_failure(report.name, message),
         }
@@ -472,8 +486,25 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             metrics_failed = true;
         }
     }
+    let mut webhook_failed = false;
+    if let Some(var) = &config.webhook_url_env {
+        match std::env::var(var) {
+            Ok(url) if !url.trim().is_empty() => {
+                let path = manifest_path.as_ref().ok().map(|p| p.display().to_string());
+                let summary = run_summary(&manifest, path.as_deref());
+                if let Err(e) = post_summary(url.trim(), &summary).await {
+                    let _ = writeln!(err, "error: {e}");
+                    webhook_failed = true;
+                }
+            }
+            _ => {
+                let _ = writeln!(err, "error: webhook_url_env: {var} is not set or empty");
+                webhook_failed = true;
+            }
+        }
+    }
     print_summary(&manifest, manifest_path.as_deref().ok(), out);
-    let mut clean = manifest.is_clean() && !metrics_failed;
+    let mut clean = manifest.is_clean() && !metrics_failed && !webhook_failed;
     if options.media.is_some() {
         for r in &media_manifest.servers {
             let _ = writeln!(out, "  {}", media_line(r));
@@ -504,7 +535,7 @@ async fn sync_server(
     server: ServerConfig,
     options: Arc<SyncOptions>,
     tx: UnboundedSender<String>,
-) -> Result<(Vec<ResourceEntry>, Option<MediaReport>), String> {
+) -> Result<(Vec<ResourceEntry>, Option<MediaReport>, Vec<String>), String> {
     let name = server.name.clone();
     let client = client_for(&server)?;
     let metadata = client
@@ -512,6 +543,7 @@ async fn sync_server(
         .await
         .map_err(|e| format!("cannot read $metadata: {e}"))?;
     let (resources, missing) = select_resources(&server, &metadata, &options.resources);
+    let schema_changes = schema_changes(&server, &metadata, &options.state)?;
     let mut entries: Vec<ResourceEntry> = missing
         .into_iter()
         .map(|r| {
@@ -605,8 +637,12 @@ async fn sync_server(
         if !expand.is_empty() {
             spec = spec.expand(&expand);
         }
+        // A full load when there is no checkpoint to start from
+        let full_load =
+            options.start_over || matches!(store.load(&name, resource), Ok(None) | Err(_));
+        let mut checked = CheckingWriter::new(writer.as_mut(), &plan.key);
         let mut entry = if let Some(flag) = &server.deletes.flag_field {
-            let mut flagged = FlagDeleteWriter::new(writer.as_mut(), flag, &plan.key);
+            let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
             let mut entry = sync_resource_media(
                 &client,
                 &name,
@@ -627,7 +663,7 @@ async fn sync_server(
                 &name,
                 resource,
                 spec,
-                writer.as_mut(),
+                &mut checked,
                 &store,
                 options.start_over,
                 page_media.as_mut(),
@@ -635,11 +671,23 @@ async fn sync_server(
             .instrument(span.clone())
             .await
         };
+        entry.warnings = checked.warnings();
+        if full_load && entry.error.is_none() {
+            // A full load should hold what the server counts (servers without $count are skipped)
+            let written = entry.records;
+            entry.warnings.extend(
+                count_warning(&client, resource, filter.as_deref(), written)
+                    .instrument(span.clone())
+                    .await,
+            );
+        }
         if options.deletes && entry.error.is_none() && server.deletes.flag_field.is_none() {
             let deleted = reconcile_deletes(
                 &client,
                 &name,
-                &DeleteTarget::new(resource, &plan.key).with_filter(filter.as_deref()),
+                &DeleteTarget::new(resource, &plan.key)
+                    .with_filter(filter.as_deref())
+                    .with_limits(server.deletes.limits(options.allow_mass_deletes)),
                 feed.as_ref(),
                 writer.as_mut(),
                 &store,
@@ -647,12 +695,19 @@ async fn sync_server(
             .instrument(span.clone())
             .await;
             entry.deletes = deleted.deletes;
+            entry.deletes_held = deleted.deletes_held;
+            entry.warnings.extend(deleted.warnings);
             entry.error = deleted.error;
             if !deleted.files.is_empty() {
                 entry.files = deleted.files; // the writer's list is cumulative
             }
         }
         entry.stats = ResourceStats::new(started.elapsed(), &client.stats().since(&stats_before));
+        span.in_scope(|| {
+            for w in &entry.warnings {
+                tracing::warn!(warning = %w, "check finding");
+            }
+        });
         span.in_scope(|| match &entry.error {
             None => tracing::info!(
                 records = entry.records,
@@ -680,7 +735,31 @@ async fn sync_server(
         );
         entries.push(entry);
     }
-    Ok((entries, page_media.map(PageMedia::finish)))
+    Ok((entries, page_media.map(PageMedia::finish), schema_changes))
+}
+
+/// Compare the server's `$metadata` with the snapshot of the previous run and save the new one
+///
+/// The first run has nothing to compare with and only saves. Resources are the ones the
+/// configuration allows, not only the ones this run was asked for, so `--resource` runs do not
+/// make the next full run look like a change.
+fn schema_changes(
+    server: &ServerConfig,
+    metadata: &Metadata,
+    state: &Path,
+) -> Result<Vec<String>, String> {
+    let (all, _) = select_resources(server, metadata, &[]);
+    let now = SchemaSnapshot::from_metadata(metadata, &all);
+    let store = CheckpointStore::new(state);
+    let before = store.load_schema(&server.name).map_err(|e| e.to_string())?;
+    store
+        .save_schema(&server.name, &now)
+        .map_err(|e| e.to_string())?;
+    let changes = before.map(|b| b.changes_to(&now)).unwrap_or_default();
+    for change in &changes {
+        tracing::warn!(server = %server.name, %change, "schema changed");
+    }
+    Ok(changes)
 }
 
 fn make_writer(
@@ -746,6 +825,8 @@ fn failed_entry(server: &str, resource: &str, error: &str) -> ResourceEntry {
         checkpoint: None,
         error: Some(error.to_string()),
         stats: ResourceStats::default(),
+        warnings: Vec::new(),
+        deletes_held: 0,
     }
 }
 

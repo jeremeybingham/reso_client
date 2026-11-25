@@ -29,6 +29,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 ///
 /// ```toml
 /// max_concurrent_servers = 2          # optional, default 4
+/// webhook_url_env = "RESO_WEBHOOK"    # optional; variable holding the URL that gets the run summary
 ///
 /// [[server]]
 /// name = "bridge"
@@ -64,6 +65,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub struct Config {
     /// Most servers running at the same time (default 4)
     pub max_concurrent_servers: usize,
+    /// Name of the environment variable that holds the webhook URL (`webhook_url_env`); the URL
+    /// is read when the run ends, and the run summary is POSTed to it as JSON
+    pub webhook_url_env: Option<String>,
     /// The servers, in file order; names are unique
     pub servers: Vec<ServerConfig>,
 }
@@ -120,6 +124,25 @@ pub struct DeletesConfig {
     /// server.
     #[serde(default)]
     pub flag_field: Option<String>,
+    /// Hold back a delete pass that finds more than this many deletes (`--deletes`; not for
+    /// `flag_field`). See [`DeleteLimits`](crate::DeleteLimits).
+    #[serde(default)]
+    pub max_deletes: Option<u64>,
+    /// Hold back a key-comparison pass that deletes more than this percentage (1 to 100) of the
+    /// keys known from the previous pass
+    #[serde(default)]
+    pub max_percent: Option<u32>,
+}
+
+impl DeletesConfig {
+    /// The limits these settings describe; `allow` skips them (`--allow-mass-deletes`)
+    pub fn limits(&self, allow: bool) -> crate::DeleteLimits {
+        crate::DeleteLimits {
+            max_deletes: self.max_deletes,
+            max_percent: self.max_percent.map(f64::from),
+            allow,
+        }
+    }
 }
 
 /// Settings for one resource of a server (`[server.resources.<Name>]`)
@@ -330,6 +353,16 @@ impl Config {
                 ))
             }
         };
+        let webhook_url_env = match table.remove("webhook_url_env") {
+            None => None,
+            Some(toml::Value::String(name)) if is_env_name(&name) => Some(name),
+            Some(_) => {
+                return Err(IngestError::Parse(
+                    "webhook_url_env must name an environment variable (the URL itself is a secret and is not written in the file)"
+                        .into(),
+                ))
+            }
+        };
         let entries = match table.remove("server") {
             Some(toml::Value::Array(a)) => a,
             Some(_) => {
@@ -370,6 +403,7 @@ impl Config {
         }
         Ok(Config {
             max_concurrent_servers,
+            webhook_url_env,
             servers,
         })
     }
@@ -409,6 +443,16 @@ impl ServerConfig {
             .is_some_and(|f| f.trim().is_empty())
         {
             return Err("deletes.flag_field must not be empty".into());
+        }
+        if self
+            .deletes
+            .max_percent
+            .is_some_and(|p| !(1..=100).contains(&p))
+        {
+            return Err("deletes.max_percent must be between 1 and 100".into());
+        }
+        if self.deletes.max_deletes == Some(0) {
+            return Err("deletes.max_deletes must be at least 1".into());
         }
         if self.name.trim().is_empty() {
             return Err("name must not be empty".into());

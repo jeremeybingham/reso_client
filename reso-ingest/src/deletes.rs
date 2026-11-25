@@ -58,6 +58,45 @@ pub struct DeleteTarget<'a> {
     /// the sync (see [`ServerConfig::filter_for`](crate::ServerConfig::filter_for)). It is not
     /// added to the event resource query.
     pub filter: Option<&'a str>,
+    /// When to hold deletes back instead of writing them
+    pub limits: DeleteLimits,
+}
+
+/// When [`reconcile_deletes`] holds deletes back for review instead of writing them
+///
+/// A vendor outage that empties a result set looks like "everything was deleted". With a limit set,
+/// a pass that finds more deletes than allowed writes none, saves no new state (so the next run
+/// finds the same deletes again) and reports them in [`ResourceEntry::deletes_held`] with a
+/// warning. Run once with `allow` to release them after checking. Limits apply to the key
+/// comparison and the event feed; flag-field deletes are written as the records stream by and are
+/// not held.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DeleteLimits {
+    /// Most delete events one pass may write
+    pub max_deletes: Option<u64>,
+    /// Most deletes as a percentage of the keys known before the pass (key comparison only)
+    pub max_percent: Option<f64>,
+    /// Ignore the limits for this pass
+    pub allow: bool,
+}
+
+impl DeleteLimits {
+    /// Why `found` deletes out of `known` keys (when known) pass the limit, or `None` if they do not
+    fn exceeded(&self, found: u64, known: Option<u64>) -> Option<String> {
+        if self.allow || found == 0 {
+            return None;
+        }
+        if let Some(max) = self.max_deletes.filter(|m| found > *m) {
+            return Some(format!("{found} deletes found, over the limit of {max}"));
+        }
+        let (max, known) = (self.max_percent?, known.filter(|k| *k > 0)?);
+        let percent = found as f64 * 100.0 / known as f64;
+        (percent > max).then(|| {
+            format!(
+                "{found} of {known} known keys ({percent:.1}%) deleted, over the limit of {max}%"
+            )
+        })
+    }
 }
 
 impl<'a> DeleteTarget<'a> {
@@ -67,7 +106,14 @@ impl<'a> DeleteTarget<'a> {
             resource,
             key_field,
             filter: None,
+            limits: DeleteLimits::default(),
         }
+    }
+
+    /// Hold deletes back when they pass `limits`
+    pub fn with_limits(mut self, limits: DeleteLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Add the server's filter to every query on the resource
@@ -124,9 +170,16 @@ pub async fn reconcile_deletes(
         Some(feed) => by_events(client, server, target, feed, writer, store).await,
         None => by_key_diff(client, server, target, writer, store).await,
     };
-    let (deletes, mut error) = match result {
-        Ok(n) => (n, None),
-        Err(e) => (0, Some(e)),
+    let mut warnings = Vec::new();
+    let (deletes, held, mut error) = match result {
+        Ok(Pass::Written(n)) => (n, 0, None),
+        Ok(Pass::Held(n, why)) => {
+            warnings.push(format!(
+                "{n} deletes held, not written: {why}; check the server, then rerun with --allow-mass-deletes"
+            ));
+            (0, n, None)
+        }
+        Err(e) => (0, 0, Some(e)),
     };
     let files = match writer.finish() {
         Ok(files) => files,
@@ -144,10 +197,18 @@ pub async fn reconcile_deletes(
         checkpoint: None,
         error,
         stats: ResourceStats::default(),
+        warnings,
+        deletes_held: held,
     }
 }
 
-type Outcome = Result<u64, String>;
+/// What one delete pass did: wrote this many events, or held this many back for the reason
+enum Pass {
+    Written(u64),
+    Held(u64, String),
+}
+
+type Outcome = Result<Pass, String>;
 
 fn text<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -207,11 +268,16 @@ async fn by_key_diff(
                 deleted.push(key.clone());
             }
         }
+        let known = Some(previous.len() as u64);
+        if let Some(why) = target.limits.exceeded(deleted.len() as u64, known) {
+            // The key set is not replaced, so the next run finds the same deletes
+            return Ok(Pass::Held(deleted.len() as u64, why));
+        }
         emit(writer, &deleted)?;
     }
     let keys: Vec<Value> = current.into_values().collect();
     store.save_keys(server, resource, &keys).map_err(text)?;
-    Ok(deleted.len() as u64)
+    Ok(Pass::Written(deleted.len() as u64))
 }
 
 async fn by_events(
@@ -237,7 +303,7 @@ async fn by_events(
         store
             .save_event_sequence(server, resource, newest.unwrap_or(0))
             .map_err(text)?;
-        return Ok(0);
+        return Ok(Pass::Written(0));
     };
 
     let filter = format!(
@@ -252,7 +318,7 @@ async fn by_events(
         .map_err(text)?;
     let mut newest = after;
     let mut checked: HashSet<String> = HashSet::new();
-    let mut deleted = 0u64;
+    let mut deleted: Vec<Value> = Vec::new();
     let mut page = client.execute_page(&query).await.map_err(text)?;
     loop {
         let mut gone = Vec::new();
@@ -270,18 +336,22 @@ async fn by_events(
                 gone.push(Value::String(key.to_string()));
             }
         }
-        emit(writer, &gone)?;
-        deleted += gone.len() as u64;
+        deleted.extend(gone);
         match client.next_page(&page).await.map_err(text)? {
             Some(next) => page = next,
             None => break,
         }
     }
-    // Saved only after the whole feed was read, so the order the server returns events in does not matter.
+    // Nothing is written or saved before the whole feed was read, so the order the server returns
+    // events in does not matter and a held pass can be repeated.
+    if let Some(why) = target.limits.exceeded(deleted.len() as u64, None) {
+        return Ok(Pass::Held(deleted.len() as u64, why));
+    }
+    emit(writer, &deleted)?;
     store
         .save_event_sequence(server, resource, newest)
         .map_err(text)?;
-    Ok(deleted)
+    Ok(Pass::Written(deleted.len() as u64))
 }
 
 /// Whether a record with this key is still on the server (a filter lookup, so a 404 is an error,

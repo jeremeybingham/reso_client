@@ -83,6 +83,11 @@ pub struct ResourceEntry {
     pub error: Option<String>,
     /// Time and request counters; all zero where the caller did not measure them
     pub stats: ResourceStats,
+    /// Check findings for this resource: data checks, count comparison, held deletes. They do not make
+    /// the run fail.
+    pub warnings: Vec<String>,
+    /// Delete events found but not written because they passed the configured limit
+    pub deletes_held: u64,
 }
 
 /// A server that failed as a whole (for example a task error from `run_servers`)
@@ -92,6 +97,15 @@ pub struct ServerFailure {
     pub server: String,
     /// Error text
     pub error: String,
+}
+
+/// What changed in a server's `$metadata` since the previous run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SchemaChanges {
+    /// Server name
+    pub server: String,
+    /// One line per change, for example `Property.ListPrice: type Edm.Decimal -> Edm.String`
+    pub changes: Vec<String>,
 }
 
 /// The record of one run: counts, files, checkpoints and errors
@@ -109,6 +123,8 @@ pub struct RunManifest {
     pub resources: Vec<ResourceEntry>,
     /// Servers that failed outright
     pub server_failures: Vec<ServerFailure>,
+    /// `$metadata` changes since the previous run, per server (servers with none are absent)
+    pub schema_changes: Vec<SchemaChanges>,
 }
 
 impl RunManifest {
@@ -120,6 +136,7 @@ impl RunManifest {
             finished_at: None,
             resources: Vec::new(),
             server_failures: Vec::new(),
+            schema_changes: Vec::new(),
         }
     }
 
@@ -134,6 +151,31 @@ impl RunManifest {
             server: server.into(),
             error: error.into(),
         });
+    }
+
+    /// Add a server's schema changes (ignored when there are none)
+    pub fn add_schema_changes(&mut self, server: impl Into<String>, changes: Vec<String>) {
+        if !changes.is_empty() {
+            self.schema_changes.push(SchemaChanges {
+                server: server.into(),
+                changes,
+            });
+        }
+    }
+
+    /// Every check finding of the run as `server/resource: text` or `server: text` lines
+    pub fn warnings(&self) -> Vec<String> {
+        let schema = self.schema_changes.iter().flat_map(|s| {
+            s.changes
+                .iter()
+                .map(move |c| format!("{}: schema: {c}", s.server))
+        });
+        let data = self.resources.iter().flat_map(|r| {
+            r.warnings
+                .iter()
+                .map(move |w| format!("{}/{}: {w}", r.server, r.resource))
+        });
+        schema.chain(data).collect()
     }
 
     /// True when no resource or server reported an error
@@ -253,6 +295,8 @@ pub async fn sync_resource_media(
                 checkpoint: None,
                 error: Some(e.to_string()),
                 stats: ResourceStats::default(),
+                warnings: Vec::new(),
+                deletes_held: 0,
             };
         }
     }
@@ -343,6 +387,8 @@ async fn pull(
         checkpoint,
         error,
         stats: ResourceStats::default(),
+        warnings: Vec::new(),
+        deletes_held: 0,
     }
 }
 

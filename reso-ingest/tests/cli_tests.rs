@@ -490,6 +490,7 @@ async fn composite_key_resource_is_skipped_unless_asked_for_and_page_size_is_sen
         .await
         .unwrap()
         .iter()
+        .filter(|q| !q.url.query_pairs().any(|(k, _)| k == "$count")) // the count check of a full load
         .filter_map(|q| {
             q.url
                 .query_pairs()
@@ -606,6 +607,7 @@ async fn server_filter_and_resource_expand_reach_every_query() {
 
     let mut syncs = 0;
     let mut key_pulls = 0;
+    let mut counts = 0;
     for request in srv.received_requests().await.unwrap() {
         let q: Vec<(String, String)> = request
             .url
@@ -618,7 +620,9 @@ async fn server_filter_and_resource_expand_reach_every_query() {
         }
         let filter = get("$filter").unwrap_or_default();
         assert!(filter.contains("OriginatingSystemName eq 'mls'"), "{q:?}");
-        if get("$orderby").is_some() {
+        if get("$count").is_some() {
+            counts += 1; // the full load's count check carries the server filter too
+        } else if get("$orderby").is_some() {
             syncs += 1;
             assert_eq!(get("$expand"), Some("Media"), "{q:?}");
             assert_eq!(get("$top"), Some("3"), "{q:?}");
@@ -629,8 +633,8 @@ async fn server_filter_and_resource_expand_reach_every_query() {
         }
     }
     assert!(
-        syncs >= 2 && key_pulls == 2,
-        "{syncs} syncs, {key_pulls} key pulls"
+        syncs >= 2 && key_pulls == 2 && counts == 1,
+        "{syncs} syncs, {key_pulls} key pulls, {counts} counts"
     );
 }
 
