@@ -68,3 +68,31 @@ async fn concurrency_cap_is_respected() {
     assert!(reports.iter().all(|r| r.result.is_ok()));
     assert_eq!(peak.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn dropping_the_run_aborts_the_server_tasks() {
+    // Each task holds a sender; a receiver sees the channel close once its task is dropped
+    let (senders, mut receivers): (Vec<_>, Vec<_>) = (0..2)
+        .map(|_| tokio::sync::oneshot::channel::<()>())
+        .unzip();
+    let senders = std::sync::Mutex::new(senders);
+    let run = run_servers(servers(2), 2, |_| {
+        let tx = senders.lock().unwrap().pop().unwrap();
+        async move {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            drop(tx);
+            Ok::<_, String>(())
+        }
+    });
+    // Let the tasks start, then drop the run
+    assert!(tokio::time::timeout(Duration::from_millis(50), run)
+        .await
+        .is_err());
+    for rx in &mut receivers {
+        let closed = tokio::time::timeout(Duration::from_secs(5), rx).await;
+        assert!(
+            matches!(closed, Ok(Err(_))),
+            "task still running after the run was dropped"
+        );
+    }
+}
