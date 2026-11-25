@@ -7,6 +7,8 @@ metadata:
 data:
   servers.toml: |
     # Secrets are named here, never written: *_env keys name variables from the Secret below.
+    # Variables only change on a restart; to pick up a rotated Secret without one, mount it as a
+    # volume and use *_file keys instead (client_secret_file = "/run/secrets/MLS_ONE_CLIENT_SECRET").
     [[server]]
     name = "mls-one"
     base_url = "https://api.mls-one.example/odata"

@@ -29,19 +29,19 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::routing::get;
 use axum::Router;
-use reso_client::ResoClient;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc::unbounded_channel, Semaphore};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
-use crate::cli::{client_for, sync_server_with, Format, SyncOptions};
+use crate::cli::{sync_server_with, Format, SyncOptions};
 use crate::config::{Config, ServerConfig, MAX_BACKOFF};
 use crate::error::IngestError;
 use crate::manifest::{ResourceEntry, RunManifest};
 use crate::metrics::{escape, render_prometheus};
 use crate::output::now_rfc3339;
 use crate::runs;
+use crate::secrets::ClientHandle;
 use crate::shutdown::Shutdown;
 use crate::state::{FileStateStore, StateStore};
 
@@ -132,7 +132,7 @@ impl Shared {
 }
 
 /// One server to schedule: its settings, the shared client and its feeds with intervals
-type Plan = (ServerConfig, Arc<ResoClient>, Vec<(String, Duration)>);
+type Plan = (ServerConfig, Arc<ClientHandle>, Vec<(String, Duration)>);
 
 /// A running daemon
 ///
@@ -162,10 +162,7 @@ impl Daemon {
                 tracing::info!(server = %server.name, "no resource has an interval: server not scheduled");
                 continue;
             }
-            let client = client_for(server).map_err(|message| IngestError::Server {
-                server: server.name.clone(),
-                message,
-            })?;
+            let client = ClientHandle::new(server)?;
             plans.push((server.clone(), Arc::new(client), feeds));
         }
         if plans.is_empty() {
@@ -303,7 +300,7 @@ async fn run_feed(
     server: ServerConfig,
     resource: String,
     interval: Duration,
-    client: Arc<ResoClient>,
+    client: Arc<ClientHandle>,
     permits: Arc<Semaphore>,
     options: Arc<ServeOptions>,
     shared: Arc<Shared>,
@@ -393,7 +390,7 @@ enum Outcome {
 async fn sync_once(
     server: &ServerConfig,
     resource: &str,
-    client: &ResoClient,
+    client: &ClientHandle,
     options: &ServeOptions,
     shutdown: &Shutdown,
 ) -> Outcome {

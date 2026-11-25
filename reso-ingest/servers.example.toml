@@ -1,5 +1,6 @@
 # Example reso-ingest configuration: two servers.
-# Secrets are never written here: `*_env` keys name the environment variable that holds the value.
+# Secrets are never written here: `*_env` keys name the environment variable that holds the value, or
+# `*_file` keys a file that holds it (re-read before each resource, so a rotated file needs no restart).
 # Copy this file, edit it, and export the variables before running.
 
 # Most servers running at the same time (default 4)
@@ -33,7 +34,7 @@ exclude = ["OpenHouse"]                      # wins over include
 type = "client_credentials"
 token_url = "https://auth.mls-one.example/oauth/token"
 client_id_env = "MLS_ONE_CLIENT_ID"
-client_secret_env = "MLS_ONE_CLIENT_SECRET"
+client_secret_env = "MLS_ONE_CLIENT_SECRET"   # or client_secret_file = "/run/secrets/mls-one"
 scope = "api"
 transport = "body"                           # body (default), header or query
 

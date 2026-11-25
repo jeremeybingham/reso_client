@@ -1,7 +1,7 @@
 //! The TOML configuration: many servers, each with auth, limits and resource filters
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use reso_client::{
@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::error::IngestError;
 
-/// Keys that would hold a secret in the file itself; they are rejected with a pointer to the `_env` form
+/// Keys that would hold a secret in the file itself; they are rejected with a pointer to the `_env` and `_file` forms
 const SECRET_KEYS: &[&str] = &[
     "token",
     "access_token",
@@ -207,23 +207,39 @@ pub fn parse_interval(text: &str) -> Result<std::time::Duration, String> {
     Ok(std::time::Duration::from_millis(millis))
 }
 
-/// Authentication settings; secrets are named by environment variable, never written in the file
+/// Authentication settings; secrets are named by environment variable or file, never written in the file
+///
+/// Each secret takes one source: `<name>_env` (an environment variable) or `<name>_file` (a file,
+/// for example a Kubernetes secret mount). Sources are read again before each resource is synced,
+/// so a rotated file is picked up without a restart; see [`ClientHandle`](crate::ClientHandle).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuthConfig {
-    /// A static bearer token read from `token_env`
+    /// A static bearer token read from `token_env` or `token_file`
     Bearer {
         /// Variable holding the token
-        token_env: String,
+        #[serde(default)]
+        token_env: Option<String>,
+        /// File holding the token
+        #[serde(default)]
+        token_file: Option<String>,
     },
     /// OAuth2 client credentials
     ClientCredentials {
         /// Token endpoint URL
         token_url: String,
         /// Variable holding the client id
-        client_id_env: String,
+        #[serde(default)]
+        client_id_env: Option<String>,
+        /// File holding the client id
+        #[serde(default)]
+        client_id_file: Option<String>,
         /// Variable holding the client secret
-        client_secret_env: String,
+        #[serde(default)]
+        client_secret_env: Option<String>,
+        /// File holding the client secret
+        #[serde(default)]
+        client_secret_file: Option<String>,
         /// Optional scope
         #[serde(default)]
         scope: Option<String>,
@@ -231,6 +247,114 @@ pub enum AuthConfig {
         #[serde(default)]
         transport: Option<String>,
     },
+}
+
+impl AuthConfig {
+    /// The sources of the secrets, in order: `token` for a bearer token; `client_id` then
+    /// `client_secret` for client credentials
+    ///
+    /// # Errors
+    ///
+    /// A message when a secret has both sources or neither.
+    pub fn sources(&self) -> Result<Vec<SecretSource>, String> {
+        match self {
+            AuthConfig::Bearer {
+                token_env,
+                token_file,
+            } => Ok(vec![SecretSource::pick("token", token_env, token_file)?]),
+            AuthConfig::ClientCredentials {
+                client_id_env,
+                client_id_file,
+                client_secret_env,
+                client_secret_file,
+                ..
+            } => Ok(vec![
+                SecretSource::pick("client_id", client_id_env, client_id_file)?,
+                SecretSource::pick("client_secret", client_secret_env, client_secret_file)?,
+            ]),
+        }
+    }
+}
+
+/// Where one secret is read from
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretSource {
+    /// An environment variable, by name (`*_env`)
+    Env(String),
+    /// A file (`*_file`); surrounding whitespace, such as a final newline, is removed
+    File(PathBuf),
+}
+
+impl SecretSource {
+    fn pick(field: &str, env: &Option<String>, file: &Option<String>) -> Result<Self, String> {
+        match (env, file) {
+            (Some(e), None) => {
+                // A pasted secret in an `_env` field would not look like a variable name
+                if is_env_name(e) {
+                    Ok(Self::Env(e.clone()))
+                } else {
+                    Err(format!(
+                        "auth.{field}_env must be an environment variable name (letters, digits, underscore); the value is not echoed because it may be a secret"
+                    ))
+                }
+            }
+            (None, Some(f)) if f.trim().is_empty() => {
+                Err(format!("auth.{field}_file must not be empty"))
+            }
+            (None, Some(f)) => Ok(Self::File(PathBuf::from(f))),
+            (Some(_), Some(_)) => Err(format!(
+                "auth: set only one of {field}_env and {field}_file"
+            )),
+            (None, None) => Err(format!("auth: {field}_env or {field}_file is required")),
+        }
+    }
+
+    /// Read the secret now; `lookup` reads environment variables
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::MissingEnv`] for an unset or empty variable, [`IngestError::SecretFile`] for
+    /// a file that cannot be read or is empty. Neither holds the secret.
+    pub fn read(
+        &self,
+        server: &str,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<String, IngestError> {
+        match self {
+            SecretSource::Env(variable) => {
+                lookup(variable)
+                    .filter(|v| !v.is_empty())
+                    .ok_or_else(|| IngestError::MissingEnv {
+                        server: server.to_owned(),
+                        variable: variable.clone(),
+                    })
+            }
+            SecretSource::File(path) => {
+                let fail = |message: String| IngestError::SecretFile {
+                    server: server.to_owned(),
+                    path: path.display().to_string(),
+                    message,
+                };
+                // The error is the I/O error kind only: its text never holds file contents
+                let text = std::fs::read_to_string(path).map_err(|e| fail(e.kind().to_string()))?;
+                let value = text.trim();
+                if value.is_empty() {
+                    return Err(fail("the file is empty".into()));
+                }
+                Ok(value.to_owned())
+            }
+        }
+    }
+}
+
+/// The values of a server's secrets, in the order of [`AuthConfig::sources`]; `Debug` redacts them
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Secrets(Vec<String>);
+
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Secrets(<{} redacted>)", self.0.len())
+    }
 }
 
 /// Retries per request when a server does not set `max_retries` (the library itself defaults to 0)
@@ -467,7 +591,7 @@ fn check_no_literal_secrets(entry: &toml::Value) -> Result<(), String> {
     for key in auth.keys() {
         if SECRET_KEYS.contains(&key.as_str()) {
             return Err(format!(
-                "auth.{key}: secrets must not be written in the config file; use `{key}_env` to name the environment variable that holds it"
+                "auth.{key}: secrets must not be written in the config file; use `{key}_env` to name the environment variable that holds it, or `{key}_file` for a file"
             ));
         }
     }
@@ -546,39 +670,24 @@ impl ServerConfig {
         if self.media.timeout_secs == Some(0) {
             return Err("media.timeout_secs must be at least 1".into());
         }
-        let env_names: Vec<(&str, &str)> = match &self.auth {
-            AuthConfig::Bearer { token_env } => vec![("token_env", token_env)],
-            AuthConfig::ClientCredentials {
-                client_id_env,
-                client_secret_env,
-                transport,
-                token_url,
-                ..
-            } => {
-                if let Some(t) = transport {
-                    if CredentialTransport::parse(t).is_none() {
-                        return Err(format!(
-                            "auth.transport `{t}` is not one of body, header, query"
-                        ));
-                    }
+        if let AuthConfig::ClientCredentials {
+            transport,
+            token_url,
+            ..
+        } = &self.auth
+        {
+            if let Some(t) = transport {
+                if CredentialTransport::parse(t).is_none() {
+                    return Err(format!(
+                        "auth.transport `{t}` is not one of body, header, query"
+                    ));
                 }
-                if !token_url.starts_with("http://") && !token_url.starts_with("https://") {
-                    return Err("auth.token_url must start with http:// or https://".into());
-                }
-                vec![
-                    ("client_id_env", client_id_env),
-                    ("client_secret_env", client_secret_env),
-                ]
             }
-        };
-        for (key, value) in env_names {
-            // A pasted secret in an `_env` field would not look like a variable name
-            if !is_env_name(value) {
-                return Err(format!(
-                    "auth.{key} must be an environment variable name (letters, digits, underscore); the value is not echoed because it may be a secret"
-                ));
+            if !token_url.starts_with("http://") && !token_url.starts_with("https://") {
+                return Err("auth.token_url must start with http:// or https://".into());
             }
         }
+        self.auth.sources()?;
         Ok(())
     }
 
@@ -641,35 +750,61 @@ impl ServerConfig {
         feeds.into_iter().collect()
     }
 
-    /// Build the [`ClientConfig`], reading secrets from the process environment
+    /// Build the [`ClientConfig`], reading secrets from the process environment and secret files
     pub fn client_config(&self) -> Result<ClientConfig, IngestError> {
         self.client_config_with(|name| std::env::var(name).ok())
     }
 
     /// Like [`client_config`](Self::client_config) with the variable lookup supplied by the caller
+    ///
+    /// Secrets named by `*_file` are read from their files.
     pub fn client_config_with(
         &self,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<ClientConfig, IngestError> {
-        let get = |variable: &str| {
-            lookup(variable)
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| IngestError::MissingEnv {
+        self.client_config_from(&self.read_secrets(&lookup)?)
+    }
+
+    /// Read every secret of this server from its source now
+    pub(crate) fn read_secrets(
+        &self,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Secrets, IngestError> {
+        let sources = self.auth.sources().map_err(|message| IngestError::Server {
+            server: self.name.clone(),
+            message,
+        })?;
+        sources
+            .iter()
+            .map(|s| s.read(&self.name, lookup))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Secrets)
+    }
+
+    /// Build the [`ClientConfig`] with secrets already read by [`read_secrets`](Self::read_secrets)
+    pub(crate) fn client_config_from(
+        &self,
+        secrets: &Secrets,
+    ) -> Result<ClientConfig, IngestError> {
+        let secret = |i: usize| {
+            secrets
+                .0
+                .get(i)
+                .cloned()
+                .ok_or_else(|| IngestError::Server {
                     server: self.name.clone(),
-                    variable: variable.to_owned(),
+                    message: "a secret is missing".into(),
                 })
         };
         let auth = match &self.auth {
-            AuthConfig::Bearer { token_env } => Auth::Bearer(get(token_env)?),
+            AuthConfig::Bearer { .. } => Auth::Bearer(secret(0)?),
             AuthConfig::ClientCredentials {
                 token_url,
-                client_id_env,
-                client_secret_env,
                 scope,
                 transport,
+                ..
             } => {
-                let mut c =
-                    ClientCredentials::new(token_url, get(client_id_env)?, get(client_secret_env)?);
+                let mut c = ClientCredentials::new(token_url, secret(0)?, secret(1)?);
                 if let Some(scope) = scope {
                     c = c.with_scope(scope);
                 }

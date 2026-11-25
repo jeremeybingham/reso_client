@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `reso-ingest` reads secrets from files as well as environment variables (#92): `token_file`, `client_id_file` and
+  `client_secret_file` beside the `*_env` keys, one form per secret. `ClientHandle` reads the secrets again before
+  each resource and builds a new client when one changed, so `sync` and `serve` use a rotated secret file without a
+  restart. After a 401 or a failed token request, a resource is retried once when the secrets changed. A file that
+  cannot be read is `IngestError::SecretFile`, which names the file and never its contents. `reso-client` is unchanged.
+
 ### Changed
 - `reso-ingest` with a bucket resumes a killed run from its last delivered file (#107, fifth part): the NDJSON writer
   with a sink used to rotate in the middle of a page and open the next file at once, so a file was nearly always open,
