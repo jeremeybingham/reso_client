@@ -412,3 +412,133 @@ async fn server_filter_goes_on_key_lookups_but_not_on_the_event_feed() {
         "the event resource is queried without the server filter"
     );
 }
+
+fn limited(
+    limits: reso_ingest::DeleteLimits,
+) -> impl Fn(&DeleteTarget<'static>) -> DeleteTarget<'static> {
+    move |t| t.with_limits(limits)
+}
+
+async fn run_limited(
+    srv: &MockServer,
+    store: &CheckpointStore,
+    out: &std::path::Path,
+    run_id: &str,
+    feed: Option<&EventFeed>,
+    limits: reso_ingest::DeleteLimits,
+) -> reso_ingest::ResourceEntry {
+    let mut w = NdjsonWriter::new(out, "mls", "Property", run_id, 1 << 20).unwrap();
+    let target = limited(limits)(&DeleteTarget::new("Property", "ListingKey"));
+    reconcile_deletes(&client(srv), "mls", &target, feed, &mut w, store).await
+}
+
+#[tokio::test]
+async fn mass_key_diff_deletes_are_held_until_allowed() {
+    let state = Arc::new(State::default());
+    set_keys(
+        &state,
+        &["K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10"],
+    );
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("hold-diff");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let out = dir.0.join("out");
+    let percent = reso_ingest::DeleteLimits {
+        max_percent: Some(50.0),
+        ..Default::default()
+    };
+
+    let e = run_limited(&srv, &store, &out, "r1", None, percent).await;
+    assert_eq!((e.error, e.deletes), (None, 0), "baseline");
+
+    // Seven of ten keys vanish (an outage emptying most of the feed): held
+    set_keys(&state, &["K1", "K2", "K3"]);
+    let e = run_limited(&srv, &store, &out, "r2", None, percent).await;
+    assert_eq!(e.error, None);
+    assert_eq!((e.deletes, e.deletes_held), (0, 7));
+    assert_eq!(e.warnings.len(), 1);
+    assert!(
+        e.warnings[0].contains("7 of 10 known keys (70.0%)")
+            && e.warnings[0].contains("--allow-mass-deletes"),
+        "{:?}",
+        e.warnings
+    );
+    assert!(
+        lines(&out).iter().all(|l| l["type"] != "delete"),
+        "nothing written"
+    );
+
+    // The same pass finds the same deletes next time; an absolute limit holds it too
+    let absolute = reso_ingest::DeleteLimits {
+        max_deletes: Some(5),
+        ..Default::default()
+    };
+    let e = run_limited(&srv, &store, &out, "r3", None, absolute).await;
+    assert_eq!((e.deletes, e.deletes_held), (0, 7));
+
+    // Within the limits they go out
+    let roomy = reso_ingest::DeleteLimits {
+        max_deletes: Some(7),
+        max_percent: Some(70.0),
+        allow: false,
+    };
+    let e = run_limited(&srv, &store, &out, "r4", None, roomy).await;
+    assert_eq!((e.deletes, e.deletes_held, e.warnings.len()), (7, 0, 0));
+}
+
+#[tokio::test]
+async fn allow_releases_held_deletes() {
+    let state = Arc::new(State::default());
+    set_keys(&state, &["K1", "K2", "K3", "K4"]);
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("hold-allow");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let out = dir.0.join("out");
+    let strict = reso_ingest::DeleteLimits {
+        max_deletes: Some(1),
+        ..Default::default()
+    };
+    run_limited(&srv, &store, &out, "r1", None, strict).await;
+    set_keys(&state, &["K1"]);
+    let e = run_limited(&srv, &store, &out, "r2", None, strict).await;
+    assert_eq!((e.deletes, e.deletes_held), (0, 3));
+    let allowed = reso_ingest::DeleteLimits {
+        allow: true,
+        ..strict
+    };
+    let e = run_limited(&srv, &store, &out, "r3", None, allowed).await;
+    assert_eq!((e.deletes, e.deletes_held), (3, 0));
+}
+
+#[tokio::test]
+async fn mass_event_deletes_are_held_and_found_again() {
+    let state = Arc::new(State::default());
+    set_keys(&state, &["K1", "K2", "K3"]);
+    *state.events.lock().unwrap() = vec![(1, "K1".into())];
+    let srv = server(state.clone()).await;
+    let dir = TempDir::new("hold-events");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let out = dir.0.join("out");
+    let feed = EventFeed::entity_event();
+    let limit = reso_ingest::DeleteLimits {
+        max_deletes: Some(1),
+        ..Default::default()
+    };
+    run_limited(&srv, &store, &out, "r1", Some(&feed), limit).await;
+
+    set_keys(&state, &["K1"]);
+    *state.events.lock().unwrap() = vec![(1, "K1".into()), (2, "K2".into()), (3, "K3".into())];
+    let e = run_limited(&srv, &store, &out, "r2", Some(&feed), limit).await;
+    assert_eq!((e.error, e.deletes, e.deletes_held), (None, 0, 2));
+    assert_eq!(
+        store.load_event_sequence("mls", "Property").unwrap(),
+        Some(1),
+        "the sequence stays, so the next pass sees the events again"
+    );
+    let allowed = reso_ingest::DeleteLimits {
+        allow: true,
+        ..limit
+    };
+    let e = run_limited(&srv, &store, &out, "r3", Some(&feed), allowed).await;
+    assert_eq!((e.deletes, e.deletes_held), (2, 0));
+}

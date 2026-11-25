@@ -161,6 +161,18 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
         "reso_ingest_last_run_responses",
         "Responses received in the last run by status class (2xx includes 3xx; 429 is not in 4xx)",
     );
+    let mut warnings = Family::new(
+        "reso_ingest_last_run_warnings",
+        "Check findings (data checks, count comparison, held deletes) in the last run",
+    );
+    let mut held = Family::new(
+        "reso_ingest_last_run_deletes_held",
+        "Delete events found but held back by a limit in the last run",
+    );
+    let mut schema = Family::new(
+        "reso_ingest_schema_changes",
+        "$metadata changes found against the previous run (fields, types, resources, enum values)",
+    );
     let mut failed = Family::new(
         "reso_ingest_server_failed",
         "1 for a server that failed as a whole in the last run",
@@ -187,6 +199,8 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
         }
         records.samples.push((l.clone(), r.records as f64));
         deletes.samples.push((l.clone(), r.deletes as f64));
+        warnings.samples.push((l.clone(), r.warnings.len() as f64));
+        held.samples.push((l.clone(), r.deletes_held as f64));
         files.samples.push((l.clone(), r.files.len() as f64));
         file_bytes.samples.push((
             l.clone(),
@@ -213,6 +227,12 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
                 .push((format!("{l},class=\"{class}\""), n as f64));
         }
     }
+    for c in &manifest.schema_changes {
+        schema.samples.push((
+            format!("server=\"{}\"", escape(&c.server)),
+            c.changes.len() as f64,
+        ));
+    }
     for f in &manifest.server_failures {
         failed
             .samples
@@ -228,7 +248,7 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
     let mut out = String::new();
     for f in [
         lag, ok, ok_at, records, deletes, files, file_bytes, duration, rate, requests, retries,
-        http_bytes, responses, failed, finished, resources,
+        http_bytes, responses, warnings, held, schema, failed, finished, resources,
     ] {
         if f.samples.is_empty() {
             continue;

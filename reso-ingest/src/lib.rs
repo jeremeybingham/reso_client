@@ -55,6 +55,7 @@
 //! ```
 
 mod checkpoint;
+mod checks;
 pub mod cli;
 mod config;
 mod deletes;
@@ -67,12 +68,14 @@ mod output;
 #[cfg(feature = "parquet")]
 mod parquet_out;
 mod runner;
+mod webhook;
 
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
+pub use checks::{count_warning, CheckingWriter, SchemaSnapshot};
 pub use config::{
     AuthConfig, Config, DeletesConfig, LimitsConfig, MediaConfig, ResourceConfig, ServerConfig,
 };
-pub use deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
+pub use deletes::{reconcile_deletes, DeleteLimits, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;
 pub use logging::{env_filter, log_subscriber, LogFormat, DEFAULT_FILTER, LOG_FORMAT_ENV};
 pub use manifest::{
@@ -88,3 +91,4 @@ pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWr
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use runner::{run_servers, ServerReport};
+pub use webhook::{post_summary, run_summary};

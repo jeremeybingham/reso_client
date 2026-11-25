@@ -8,6 +8,7 @@ use reso_client::Checkpoint;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::checks::SchemaSnapshot;
 use crate::error::IngestError;
 use crate::output::now_rfc3339;
 
@@ -278,6 +279,29 @@ impl CheckpointStore {
         self.write_atomic(&path, &file)
     }
 
+    /// The schema snapshot saved by the last run for this server, or `None` before the first
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the file is unreadable or invalid.
+    pub fn load_schema(&self, server: &str) -> Result<Option<SchemaSnapshot>, IngestError> {
+        self.read_state(&self.schema_path(server))
+    }
+
+    /// Save the schema snapshot atomically
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the file cannot be written.
+    pub fn save_schema(&self, server: &str, schema: &SchemaSnapshot) -> Result<(), IngestError> {
+        self.write_atomic(&self.schema_path(server), schema)
+    }
+
+    // `@` cannot appear in a sanitized resource name, so this never collides with a checkpoint
+    fn schema_path(&self, server: &str) -> PathBuf {
+        self.dir.join(format!("{}.@schema.json", sanitize(server)))
+    }
+
     fn state_path(&self, server: &str, resource: &str, kind: &str) -> PathBuf {
         self.dir.join(format!(
             "{}.{}.{kind}.json",
@@ -307,6 +331,7 @@ impl CheckpointStore {
             if !name.ends_with(".json")
                 || name.ends_with(".keys.json")
                 || name.ends_with(".events.json")
+                || name.ends_with(".@schema.json")
             {
                 continue;
             }

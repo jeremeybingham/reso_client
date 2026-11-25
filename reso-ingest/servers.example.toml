@@ -5,6 +5,9 @@
 # Most servers running at the same time (default 4)
 max_concurrent_servers = 2
 
+# Variable holding a URL that gets the run summary as JSON when a run ends (optional)
+# webhook_url_env = "RESO_WEBHOOK"
+
 # A vendor server with OAuth2 client credentials
 [[server]]
 name = "mls-one"
@@ -15,6 +18,7 @@ include = ["Property", "Member", "Office"]   # empty or absent = every resource
 exclude = ["OpenHouse"]                      # wins over include
 # filter = "OriginatingSystemName eq 'mls'"  # added to every query (some servers require one)
 # deletes = { flag_field = "MlgCanView" }    # a record with this field false is deleted (MLS Grid)
+# deletes = { max_deletes = 5000, max_percent = 20 }   # hold a --deletes pass over these limits for review
 
 # Settings for one resource (optional)
 # [server.resources.Property]

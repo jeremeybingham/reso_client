@@ -241,6 +241,7 @@ async fn shipped_dashboard_and_alerts_use_only_exported_metrics() {
         .collect();
     // Families that only appear when something went wrong (a failed server, a 429 run)
     exported.insert("reso_ingest_server_failed".into());
+    exported.insert("reso_ingest_schema_changes".into());
 
     let monitoring = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("monitoring");
     let dashboard: serde_json::Value =

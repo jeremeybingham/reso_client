@@ -71,6 +71,8 @@ The rest describe the run just finished. Labels are `server` and `resource` unle
 | `reso_ingest_last_run_duration_seconds`, `_records_per_second` | Time taken, and records over time |
 | `reso_ingest_last_run_requests`, `_retries`, `_http_bytes` | HTTP requests (retries included), retries, body bytes |
 | `reso_ingest_last_run_responses` (also `class`) | Responses by `2xx` (3xx included), `429`, `4xx`, `5xx` |
+| `reso_ingest_last_run_warnings`, `_deletes_held` | Check findings and held deletes (see [Run checks](#run-checks)) |
+| `reso_ingest_schema_changes` (`server` only) | `$metadata` changes against the previous run (absent when none) |
 | `reso_ingest_server_failed` (`server` only) | 1 for a server that failed as a whole |
 | `reso_ingest_last_run_finished_timestamp_seconds`, `_resources` | No labels: when the run ended, resources handled |
 
@@ -80,7 +82,7 @@ is not exported; the text format needs no new dependency.
 
 `monitoring/` holds an example Grafana dashboard (`grafana-dashboard.json`: import it and pick the Prometheus data
 source) and Prometheus alert rules (`alert-rules.yml`: stale feed, failed resource or server, repeated 429s, no run
-finished). A test checks that both use only the metrics above. Their thresholds are starting points.
+finished, held deletes, schema changes, check findings). A test checks that both use only the metrics above. Their thresholds are starting points.
 
 ## Configuration
 
@@ -147,6 +149,46 @@ a new copy of the parent.
 
 To download the files of expanded `Media` arrays, use `sync --media` (see [Media files](#media-files)).
 
+## Run checks
+
+Each run compares itself with the last and writes what it finds to the manifest (`warnings` per resource,
+`schema_changes` per server, `deletes_held`), to the log at `warn` level, and to the metrics. Findings do not change the
+exit code: the run's data is fine, you decide what to do. The webhook (below) and the alert rules in `monitoring/` are
+how someone hears about them.
+
+| Check | What it reports | Where |
+|---|---|---|
+| `$metadata` changes | Resources and fields added or removed, a field's type changed, enum members added or removed, since the previous run (a snapshot per server in `state/<server>.@schema.json`; the first run only saves it). Covers the resources the configuration allows, not only the ones a `--resource` run pulled. Lookup values that come from a `Lookup` resource are data, not `$metadata`, and are not compared. | `schema_changes` |
+| Count | On a full load (no checkpoint at the start), the records written against `$count=true&$top=0` with the same filters. A server that gives no count is skipped without a finding. | `warnings` |
+| Repeated keys | The same key twice in one page. | `warnings` |
+| Records with no key, or a `ModificationTimestamp` older than the checkpoint or than the record before it | Not warnings: the replication stops the resource with an error (a server that ignored `$filter` or `$orderby`), as before. | `error` |
+| Delete volume | With `deletes.max_deletes` and/or `deletes.max_percent` (1 to 100, of the keys known before the pass; key comparison only) set, a `--deletes` pass that finds more writes none, saves no new state, and reports `deletes_held`. The next run finds the same deletes again; after checking the server, run `sync --deletes --allow-mass-deletes` once to write them. | `deletes_held`, `warnings` |
+
+Delete limits apply to the key comparison and to the `EntityEvent` feed (`max_deletes` only, as the feed has no
+key total); `flag_field` deletes are written as the records stream by and are not held. Limits are set per server:
+
+```toml
+deletes = { max_deletes = 5000, max_percent = 20 }
+```
+
+### Webhook
+
+`webhook_url_env = "RESO_WEBHOOK"` at the top of the configuration names the environment variable that holds the URL
+(it often holds a token, so it is not written in the file). When a run ends, after the manifest and metrics file, the
+run summary is POSTed to it as JSON (30-second timeout, no retries). A failed POST or an unset variable is reported on
+stderr (the URL is never printed) and the exit code is `1`.
+
+```json
+{"run_id": "20261125T120000Z", "started_at": "...", "finished_at": "...", "clean": true,
+ "resources": 3, "records": 120, "deletes": 2, "deletes_held": 0,
+ "failures": ["mls-one/Property: ..."],
+ "warnings": ["mls-one/Property: 1 records repeat a `ListingKey` already in the same page",
+              "mls-one: schema: Property.ListPrice: type Edm.Decimal -> Edm.String"],
+ "manifest": "reso-out/manifest.20261125T120000Z.json"}
+```
+
+`clean` is false when a resource or server failed; `warnings` are the check findings above.
+
 ## What it writes
 
 In `--out` (default `reso-out`):
@@ -162,7 +204,7 @@ In `--out` (default `reso-out`):
 - `.run.<run>`: an empty marker that reserves the run id. Ids are the start time (`20261124T173005Z`); a run started in
   the same second as another in the same `--out` gets `-02`, `-03`, … added. A writer never overwrites an existing file:
   it stops with an error instead.
-- `state/` (or `--state`): one JSON checkpoint per server and resource, saved after each batch is written, so a rerun
+- `state/` (or `--state`): one JSON checkpoint per server and resource (and one `$metadata` snapshot per server), saved after each batch is written, so a rerun
   after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times.
 
 ## How it syncs
