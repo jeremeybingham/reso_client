@@ -208,9 +208,30 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 ## What's next
 
-- Run against a vendor server and fix what it shows ([#32](https://github.com/jeremeybingham/reso_client/issues/32)),
-  then publish `reso-ingest`.
-- Check media download against a vendor's file host (signed URLs, media limits) as part of #32.
+**Can be done now, from vendors' public documentation** (built against mock servers like the rest; confirmed only by
+#32). Read in November 2026, MLS Grid and Trestle differ from the standard in ways `reso-ingest` cannot yet handle:
+
+- **Required filter and expand per server or resource.** MLS Grid requires `OriginatingSystemName eq '…'` in every
+  request and serves `Media` only through `$expand` on `Property`, `Member` and `Office` (with `$expand`, at most 1000
+  records per page).
+- **Deletes signalled by a field.** MLS Grid marks removed records with `MlgCanView` false and drops them from the feed
+  after 7 days; it has no `EntityEvent`. Expanded child records carry no flag and replace the earlier set.
+- **Media from expanded records.** `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
+  are signed, single-use and expire after an hour, so files must be fetched soon after the sync that saw them.
+- **More rate limits.** MLS Grid also caps requests per day (40,000) and download volume per hour (4 GB); `RateLimit`
+  has per second, per hour and bytes per day only.
+
+**Small fixes:** run ids have one-second resolution, so two syncs in the same second would share file names.
+
+**Waiting on others:**
+
+- A vendor server ([#32](https://github.com/jeremeybingham/reso_client/issues/32)): run against it, fix what it shows,
+  check media download against its file host, then publish `reso-ingest`.
+- Moving off `chrono` ([#51](https://github.com/jeremeybingham/reso_client/issues/51)) waits on an arrow/parquet release.
+- Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
+
+**Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
+output.
 
 The overall plan is tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18).
 
