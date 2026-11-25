@@ -39,6 +39,21 @@ pub trait RecordWriter: Send {
     /// [`IngestError::Output`] when the flush fails.
     fn flush(&mut self) -> Result<(), IngestError>;
 
+    /// A safe point after a page: make what was written durable if that is cheap, and say whether
+    /// everything written so far now is
+    ///
+    /// `sync_resource` saves a checkpoint only when this returns `true`; otherwise it holds the
+    /// checkpoint back until a later `commit` returns `true` or [`RecordWriter::finish`] succeeds.
+    /// The default flushes and returns `true`. A writer whose files are unreadable until finished
+    /// (Parquet) returns `false` while rows sit in an open file.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the flush fails.
+    fn commit(&mut self) -> Result<bool, IngestError> {
+        self.flush().map(|()| true)
+    }
+
     /// Flush and close the output; returns the files written, in order
     ///
     /// # Errors

@@ -204,6 +204,9 @@ async fn pull(
     let mut records = 0u64;
     let mut checkpoint = checkpoint_json(run.checkpoint());
     let mut error = None;
+    // The checkpoint of the last page written in full, not yet saved because its rows are still
+    // in an open file; saved once the file is finished
+    let mut pending: Option<Checkpoint> = None;
 
     loop {
         match run.next_batch().await {
@@ -214,9 +217,18 @@ async fn pull(
                 }
                 records += batch.len() as u64;
                 if let Some(store) = store {
-                    let saved = writer.flush().and_then(|()| match run.checkpoint() {
-                        Some(cp) => store.save(server, resource, cp),
-                        None => Ok(()),
+                    // Save only when every row so far is in a readable file; otherwise hold the
+                    // checkpoint back (Parquet keeps one file open across pages)
+                    let saved = writer.commit().and_then(|durable| {
+                        pending = None;
+                        match run.checkpoint() {
+                            Some(cp) if durable => store.save(server, resource, cp),
+                            Some(cp) => {
+                                pending = Some(cp.clone());
+                                Ok(())
+                            }
+                            None => Ok(()),
+                        }
                     });
                     if let Err(e) = saved {
                         error = Some(e.to_string());
@@ -234,7 +246,15 @@ async fn pull(
     }
 
     let files = match writer.finish() {
-        Ok(files) => files,
+        Ok(files) => {
+            // The open file is finished: its rows are readable, so the held checkpoint is safe
+            if let (Some(store), Some(cp)) = (store, pending.as_ref()) {
+                if let Err(e) = store.save(server, resource, cp) {
+                    error.get_or_insert_with(|| e.to_string());
+                }
+            }
+            files
+        }
         Err(e) => {
             error.get_or_insert_with(|| e.to_string());
             Vec::new()

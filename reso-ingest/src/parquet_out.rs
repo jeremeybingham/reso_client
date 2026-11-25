@@ -121,11 +121,15 @@ struct Open {
 /// `{source}.{resource}.{run_id}.{NNNN}.parquet`, written as `….parquet.part` and renamed when
 /// complete, so a file with the final name is always readable. Compression is Snappy.
 ///
-/// **Flush closes the file.** A Parquet file is unreadable until its footer is written, and
-/// [`RecordWriter::flush`] promises that everything written so far is safe. So `flush` finishes the
-/// current file and the next write starts a new one. `sync_resource` flushes after every page, so
-/// an incremental run makes one file per page; `pull_resource` does not flush and makes one file
-/// per `max_file_bytes`. Size is checked after each batch, so a file can pass the limit by one batch.
+/// **Commit does not close the file.** A Parquet file is unreadable until its footer is written.
+/// [`RecordWriter::commit`] returns `true` only when no file is open, so `sync_resource` holds a
+/// checkpoint back until the file holding its rows is finished (at the size limit or at the end of
+/// the resource) and a checkpoint never points past rows that are not in a readable file. A run
+/// that stops mid-file leaves a `.part` file and resumes from the last finished file, which
+/// re-fetches the pages since (at-least-once). Rows are streamed to the `.part` file, so memory
+/// holds one row group, not the pages. [`RecordWriter::flush`] still finishes the current file
+/// (the delete step uses it). Size is checked after each batch, so a file can pass the limit by
+/// one batch.
 ///
 /// A value that does not fit its column (for example text in an integer column) makes the write
 /// fail with [`IngestError::Output`], and the resource stops.
@@ -331,6 +335,10 @@ impl RecordWriter for ParquetWriter {
 
     fn flush(&mut self) -> Result<(), IngestError> {
         self.close_current()
+    }
+
+    fn commit(&mut self) -> Result<bool, IngestError> {
+        Ok(self.current.is_none())
     }
 
     fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {
