@@ -215,8 +215,6 @@ filter on every request and inline `$expand` are now supported, [#65](https://gi
 - **Media from expanded records** ([#67](https://github.com/jeremeybingham/reso_client/issues/67)), downloaded during sync. `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
   are signed, single-use and expire after an hour, so files must be fetched soon after the sync that saw them.
 
-**Small fixes:** run ids ([#69](https://github.com/jeremeybingham/reso_client/issues/69)) have one-second resolution, so two syncs in the same second would share file names.
-
 **Waiting on others:**
 
 - A vendor server ([#32](https://github.com/jeremeybingham/reso_client/issues/32)): run against it, fix what it shows,

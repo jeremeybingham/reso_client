@@ -1,7 +1,7 @@
 //! NDJSON writer, manifest and the streaming pull helper (offline, wiremock)
 
 use reso_client::{ClientConfig, ResoClient, StandardReplication};
-use reso_ingest::{pull_resource, NdjsonWriter, RecordWriter, RunManifest};
+use reso_ingest::{pull_resource, reserve_run_id, NdjsonWriter, RecordWriter, RunManifest};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -199,4 +199,46 @@ async fn a_failing_server_still_gets_a_manifest() {
     assert_eq!(written["resources"][1]["records"], 0);
     assert!(written["resources"][1]["error"].is_string());
     assert_eq!(written["server_failures"][0]["server"], "other");
+}
+
+#[test]
+fn run_ids_reserved_in_one_directory_are_distinct_and_sorted() {
+    let dir = TempDir::new("run-ids");
+    let ids: Vec<String> = (0..5)
+        .map(|_| reserve_run_id(dir.path()).unwrap())
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    // Five calls (almost always inside one second) never repeat an id, and ids sort in call order
+    assert_eq!(sorted.len(), 5, "{ids:?}");
+    assert_eq!(sorted, ids);
+}
+
+#[test]
+fn run_id_skips_one_that_an_old_manifest_holds() {
+    let dir = TempDir::new("run-ids-old");
+    let first = reserve_run_id(dir.path()).unwrap();
+    std::fs::remove_file(dir.path().join(format!(".run.{first}"))).unwrap();
+    std::fs::write(dir.path().join(format!("manifest.{first}.json")), "{}").unwrap();
+    let second = reserve_run_id(dir.path()).unwrap();
+    assert_ne!(first, second);
+}
+
+#[test]
+fn writer_refuses_to_overwrite_an_existing_file() {
+    let dir = TempDir::new("no-overwrite");
+    let mut a = NdjsonWriter::new(dir.path(), "s", "Property", "run1", 1 << 20).unwrap();
+    a.write_batch(&[json!({"k": 1})], "2026-01-01T00:00:00Z")
+        .unwrap();
+    a.finish().unwrap();
+    let before = std::fs::read(dir.path().join("s.Property.run1.0001.ndjson")).unwrap();
+
+    let mut b = NdjsonWriter::new(dir.path(), "s", "Property", "run1", 1 << 20).unwrap();
+    let err = b
+        .write_batch(&[json!({"k": 2})], "2026-01-01T00:00:00Z")
+        .unwrap_err();
+    assert!(err.to_string().contains("already exists"), "{err}");
+    let after = std::fs::read(dir.path().join("s.Property.run1.0001.ndjson")).unwrap();
+    assert_eq!(before, after);
 }

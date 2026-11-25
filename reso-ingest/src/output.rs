@@ -1,6 +1,6 @@
 //! Raw output: NDJSON files, one record per line, wrapped in source tags
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -138,7 +138,7 @@ impl NdjsonWriter {
             self.files.len() + 1
         );
         let path = self.dir.join(&name);
-        let file = File::create(&path).map_err(|e| output_error(&path, e))?;
+        let file = create_new_file(&path)?;
         self.current = Some(BufWriter::new(file));
         self.files.push(FileEntry {
             name,
@@ -268,9 +268,69 @@ pub fn now_rfc3339() -> String {
     format_rfc3339(secs)
 }
 
-/// A run id from the current time, e.g. `20261124T173005Z`; unique per second
+/// A run id from the current time, e.g. `20261124T173005Z`; unique per second only
+///
+/// Runs that write into one directory should use [`reserve_run_id`] instead.
 pub fn new_run_id() -> String {
     now_rfc3339().replace(['-', ':'], "")
+}
+
+/// A run id that no other run in `dir` has, reserved by creating the marker file `.run.{id}`
+///
+/// The id is the timestamp form of [`new_run_id`]; when a run in `dir` already holds it (a marker, or a
+/// `manifest.{id}.json` or `media.{id}.json` from before markers), `-02`, `-03`, … is added, so ids
+/// still sort by start time. The marker is created atomically, so two processes started in the same
+/// second get different ids. `dir` is created if missing.
+///
+/// # Errors
+///
+/// [`IngestError::Output`] when `dir` or the marker cannot be created.
+pub fn reserve_run_id(dir: impl AsRef<Path>) -> Result<String, IngestError> {
+    let dir = dir.as_ref();
+    fs::create_dir_all(dir).map_err(|e| output_error(dir, e))?;
+    let base = new_run_id();
+    for n in 1u32.. {
+        let id = if n == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{n:02}")
+        };
+        let name = sanitize(&id);
+        if dir.join(format!("manifest.{name}.json")).exists()
+            || dir.join(format!("media.{name}.json")).exists()
+        {
+            continue;
+        }
+        let marker = dir.join(format!(".run.{name}"));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(_) => return Ok(id),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(output_error(&marker, e)),
+        }
+    }
+    unreachable!("the run id counter does not run out")
+}
+
+/// Create a new output file, failing rather than overwriting one that exists
+pub(crate) fn create_new_file(path: &Path) -> Result<File, IngestError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                IngestError::Output {
+                    path: path.display().to_string(),
+                    message: "file already exists; another run may share this run id".to_string(),
+                }
+            } else {
+                output_error(path, e)
+            }
+        })
 }
 
 fn format_rfc3339(secs: u64) -> String {
