@@ -83,6 +83,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature)
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore
+  src/sink.rs       FileSink (put_file, exists), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
   src/checkpoint.rs CheckpointStore: checkpoints, key sets, event sequences, schema snapshots as JSON in a StateStore
   src/serve.rs      Daemon, ServeOptions: `reso-ingest serve`, one task per feed (interval, jitter, backoff), axum endpoints
                     (/healthz, /readyz, /metrics, /status); each sync is `cli::sync_server_with` for one resource

@@ -218,7 +218,13 @@ In `--out` (default `reso-out`):
 All of `state/` goes through one key-value interface, `StateStore` (get, put, create-if-absent, replace-if-unchanged,
 delete, list). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
 synced and renamed. A library user can pass another backend (object storage, a database) to `CheckpointStore::with_store`,
-`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85.
+`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85; the S3-compatible one (state and
+output, feature `s3`) is #107.
+
+Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
+`NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
+point (so `sync` saves a checkpoint) only after the sink has it. `LocalDirSink` copies into a directory. The command does
+not select a sink yet (#107).
 
 ## Daemon mode (`serve`)
 

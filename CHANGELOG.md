@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NdjsonWriter::with_sink` and `ParquetWriter::with_sink`. With a sink, the writer stages a file under its directory,
   hands it to the sink when it is full or at `flush`/`finish`, then removes the staged copy; `commit` returns `true`
   only when no file is open, so a checkpoint is saved only after the sink holds the rows (at-least-once). A name the sink
-  already has is never overwritten. Without a sink nothing changes. No new dependencies; the CLI does not select a sink yet.
+  already has is never overwritten. Without a sink nothing changes. No new dependencies; the CLI does not select a sink yet. The S3-compatible backend is #107.
 - `reso-ingest` state backends (#85, first part): `StateStore`, an async key-value trait with conditional writes
   (`get` with a version, `put`, `create`, `replace`, `delete`, `list`; boxed futures, usable as `dyn StateStore`), and
   `FileStateStore`, today's files behind it (same names and contents). Checkpoints, key sets, event sequences, schema
