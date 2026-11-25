@@ -82,7 +82,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/manifest.rs   RunManifest, pull_resource, sync_resource
   src/checkpoint.rs CheckpointStore: JSON files for checkpoints, key sets, event sequences
   src/deletes.rs    reconcile_deletes, EventFeed: delete events by key diff or EntityEvent
-  src/media.rs      sync_media, MediaIndex, MediaManifest: Media files from sync output (`media` command)
+  src/media.rs      sync_media, MediaIndex, MediaManifest, PageMedia: Media files from sync output (`media`) or per page (`sync --media`)
   src/cli.rs, main.rs  the `reso-ingest` binary (sync, media, discover, status); run() takes writers so tests run in-process
   src/error.rs      IngestError
   servers.example.toml, tests/ (wiremock servers, CLI run in-process)

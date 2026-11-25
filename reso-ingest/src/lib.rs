@@ -57,11 +57,12 @@ pub use config::{
 pub use deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;
 pub use manifest::{
-    pull_resource, sync_resource, FileEntry, ResourceEntry, RunManifest, ServerFailure,
+    pull_resource, sync_resource, sync_resource_media, FileEntry, ResourceEntry, RunManifest,
+    ServerFailure,
 };
 pub use media::{
     encode_name, sync_media, MediaEntry, MediaFailure, MediaIndex, MediaManifest, MediaOptions,
-    MediaReport, MEDIA_RESOURCE,
+    MediaReport, PageMedia, DEFAULT_NESTED_FIELD, MEDIA_RESOURCE,
 };
 pub use output::{new_run_id, now_rfc3339, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]

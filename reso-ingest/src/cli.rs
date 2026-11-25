@@ -19,8 +19,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
-use crate::manifest::{sync_resource, ResourceEntry, RunManifest};
-use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport};
+use crate::manifest::{sync_resource_media, ResourceEntry, RunManifest};
+use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
 use crate::output::{new_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
@@ -69,6 +69,16 @@ enum Command {
         /// Without an EntityEvent feed this pulls every key of each resource on each run.
         #[arg(long)]
         deletes: bool,
+        /// Download the media files of each page right after it is written
+        ///
+        /// Takes the Media records (or, for other resources, the `Media` arrays that `expand`
+        /// brings) of each page and downloads the new and changed files into --media-dir, so
+        /// single-use or short-lived URLs are used while fresh. Uses the [server.media] limits.
+        #[arg(long)]
+        media: bool,
+        /// Where files go with --media (default: <out>/media)
+        #[arg(long)]
+        media_dir: Option<PathBuf>,
         /// Delete the saved checkpoints of the selected resources first
         #[arg(long)]
         start_over: bool,
@@ -147,6 +157,7 @@ struct Args {
     out: Option<PathBuf>,
     state: Option<PathBuf>,
     deletes: bool,
+    media: bool,
     start_over: bool,
     max_file_mb: Option<u64>,
     format: Format,
@@ -191,6 +202,8 @@ pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i
             out: out_dir,
             state,
             deletes,
+            media,
+            media_dir,
             start_over,
             max_file_mb,
             format,
@@ -202,6 +215,8 @@ pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i
                 out: Some(out_dir),
                 state,
                 deletes,
+                media,
+                media_dir,
                 start_over,
                 max_file_mb: Some(max_file_mb),
                 format,
@@ -325,6 +340,7 @@ struct SyncOptions {
     run_id: String,
     resources: Vec<String>,
     deletes: bool,
+    media: Option<PathBuf>,
     start_over: bool,
     max_file_bytes: u64,
     format: Format,
@@ -341,6 +357,11 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         run_id: new_run_id(),
         resources: args.resources.clone(),
         deletes: args.deletes,
+        media: args.media.then(|| {
+            args.media_dir
+                .clone()
+                .unwrap_or_else(|| args.out().join("media"))
+        }),
         start_over: args.start_over,
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
@@ -365,19 +386,39 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     };
 
     let mut manifest = RunManifest::new(&options.run_id);
+    let mut media_manifest = MediaManifest::new(&options.run_id);
     for report in reports {
         match report.result {
-            Ok(entries) => entries.into_iter().for_each(|e| manifest.add_resource(e)),
+            Ok((entries, media)) => {
+                entries.into_iter().for_each(|e| manifest.add_resource(e));
+                media_manifest.servers.extend(media);
+            }
             Err(message) => manifest.add_server_failure(report.name, message),
         }
     }
     let manifest_path = manifest.write(&options.out);
     print_summary(&manifest, manifest_path.as_deref().ok(), out);
+    let mut clean = manifest.is_clean();
+    if options.media.is_some() {
+        for r in &media_manifest.servers {
+            let _ = writeln!(out, "  {}", media_line(r));
+        }
+        match media_manifest.write(&options.out) {
+            Ok(p) => {
+                let _ = writeln!(out, "media manifest: {}", p.display());
+            }
+            Err(e) => {
+                let _ = writeln!(err, "error: {e}");
+                clean = false;
+            }
+        }
+        clean &= media_manifest.is_clean();
+    }
     if let Err(e) = &manifest_path {
         let _ = writeln!(err, "error: {e}");
         return 1;
     }
-    i32::from(!manifest.is_clean())
+    i32::from(!clean)
 }
 
 fn send(tx: &UnboundedSender<String>, line: String) {
@@ -388,7 +429,7 @@ async fn sync_server(
     server: ServerConfig,
     options: Arc<SyncOptions>,
     tx: UnboundedSender<String>,
-) -> Result<Vec<ResourceEntry>, String> {
+) -> Result<(Vec<ResourceEntry>, Option<MediaReport>), String> {
     let name = server.name.clone();
     let client = client_for(&server)?;
     let metadata = client
@@ -410,6 +451,20 @@ async fn sync_server(
         return Err("no resources to pull (check include/exclude in the configuration)".into());
     }
 
+    let mut page_media = match &options.media {
+        Some(dir) => Some(
+            PageMedia::new(
+                &client,
+                &name,
+                server.media.download_config(),
+                &options.state,
+                dir,
+                server.media.nested_field.as_deref(),
+            )
+            .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
     let feed = EventFeed::detect(&metadata);
     let store = CheckpointStore::new(&options.state);
     let total = resources.len();
@@ -469,7 +524,7 @@ async fn sync_server(
         }
         let mut entry = if let Some(flag) = &server.deletes.flag_field {
             let mut flagged = FlagDeleteWriter::new(writer.as_mut(), flag, &plan.key);
-            let mut entry = sync_resource(
+            let mut entry = sync_resource_media(
                 &client,
                 &name,
                 resource,
@@ -477,12 +532,13 @@ async fn sync_server(
                 &mut flagged,
                 &store,
                 options.start_over,
+                page_media.as_mut(),
             )
             .await;
             entry.deletes = flagged.deletes();
             entry
         } else {
-            sync_resource(
+            sync_resource_media(
                 &client,
                 &name,
                 resource,
@@ -490,6 +546,7 @@ async fn sync_server(
                 writer.as_mut(),
                 &store,
                 options.start_over,
+                page_media.as_mut(),
             )
             .await
         };
@@ -523,7 +580,7 @@ async fn sync_server(
         );
         entries.push(entry);
     }
-    Ok(entries)
+    Ok((entries, page_media.map(PageMedia::finish)))
 }
 
 fn make_writer(

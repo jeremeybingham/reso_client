@@ -53,3 +53,4 @@ per_second = 4
 bytes_per_day = 50000000000
 timeout_secs = 300
 send_token = "same_host"                     # never, same_host (default) or always
+# nested_field = "Media"                     # `sync --media`: array of media records inside a record

@@ -93,8 +93,7 @@ advises `MlgCanView eq true`: add it to the server's or resource's `filter`. Exp
 record, untouched; they carry no flag and get no events, so a consumer replaces the whole child set each time it stores
 a new copy of the parent.
 
-`reso-ingest media` does not read expanded records yet
-([#67](https://github.com/jeremeybingham/reso_client/issues/67)).
+To download the files of expanded `Media` arrays, use `sync --media` (see [Media files](#media-files)).
 
 ## What it writes
 
@@ -146,6 +145,24 @@ the final name.
 The index of what was read and saved is `state/media/<server>.json`. Downloads have their own limits (`[server.media]`),
 so they do not use up the API's. The API token goes only to the API's own host by default (`send_token = "same_host"`):
 media usually lives on a CDN that does not need it. Downloads run one at a time per server; servers run in parallel.
+
+### Media during sync (`sync --media`)
+
+Some vendors (MLS Grid) have no top-level `Media` resource: media come as an array inside `Property`, `Member` and
+`Office` records (`expand = ["Media"]`), and their URLs are signed, single-use and expire within the hour, so a later
+`reso-ingest media` run cannot use them. `sync --media` downloads the files of each page right after the page is written
+and checkpointed, before the next page is fetched:
+
+- For the `Media` resource each record is a media record; for any other resource the media records in each record's
+  `Media` array are taken (`[server.media] nested_field = "..."` names another field). Each uses its own `MediaKey`,
+  `MediaURL` and `MediaModificationTimestamp`, and the same change rule and index as above.
+- Only files that are new or changed and whose record is in the page are fetched. Files go to `--media-dir` (default
+  `<out>/media`), with the `[server.media]` limits. The run writes `media.<run>.json` and prints one line per server.
+- A failed file stays pending and the run exits `1`. It is tried again only when a later sync sees its parent record
+  again (a changed parent brings a fresh URL); with single-use URLs a pending file otherwise needs `--start-over` for the
+  resource. Re-fetching parents by key for fresh URLs is not done.
+- Delete events and deleted parents do not remove files during `sync --media`; `reso-ingest media` applies delete events
+  of the top-level `Media` resource. `reso-ingest media` still reads only top-level `Media` data files.
 
 Not yet checked against a vendor file host
 ([#32](https://github.com/jeremeybingham/reso_client/issues/32)): signed URLs that expire before the run reaches them
