@@ -241,8 +241,10 @@ directory then (files are removed once the bucket has them; the `.run.<run>` mar
 (`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`) and downloaded media files
 (`--media-dir`). The `media` command refuses `--s3-bucket`, since the data files it reads are in the bucket: use
 `sync --media` instead.
-`cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_ENDPOINT` and
-`RESO_S3_TEST_BUCKET` are set (checked against RustFS 2026-11-25; MinIO no longer publishes binaries or images).
+`cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_BUCKET` is set
+with `RESO_S3_TEST_ENDPOINT` (a non-AWS server) or `RESO_S3_TEST_REGION` (AWS S3, no endpoint); add
+`RESO_S3_TEST_SINGLE_DELETE=1` for GCS. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images);
+AWS S3 and GCS are not confirmed yet (#115).
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
