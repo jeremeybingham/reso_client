@@ -13,6 +13,12 @@ use crate::retry::{
     is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter, RateLimit, RetryPolicy,
 };
 
+/// A successful response: its headers and its complete body
+struct Fetched {
+    headers: reqwest::header::HeaderMap,
+    body: Vec<u8>,
+}
+
 /// Configuration for RESO client
 ///
 /// Holds all configuration needed to connect to a RESO Web API server,
@@ -411,70 +417,65 @@ impl ResoClient {
         }
     }
 
-    /// Send an authenticated GET request, retrying per the [`RetryPolicy`], and handle errors
+    /// Send an authenticated GET request and read its body, retrying per the [`RetryPolicy`]
     ///
     /// 1. Waits for the rate limit, then sends the GET with the Authorization header
     /// 2. On a 401 with client credentials, renews the token and repeats once
-    /// 3. On a network error or 429/502/503/504, waits (`Retry-After` or backoff) and repeats up
-    ///    to `max_retries` times; after that the last error is returned
+    /// 3. On a network error, a body cut off partway, or 429/502/503/504, waits (`Retry-After`
+    ///    or backoff) and repeats up to `max_retries` times; after that the last error is returned
     /// 4. Converts error responses to the matching ResoError variant
-    async fn send_authenticated_request(
-        &self,
-        url: &str,
-        accept: &str,
-    ) -> Result<reqwest::Response> {
+    ///
+    /// The body is read inside the retry loop so a connection closed halfway through a
+    /// response is retried like one closed before it (#125).
+    async fn send_authenticated_request(&self, url: &str, accept: &str) -> Result<Fetched> {
         let policy = &self.config.retry;
         let mut retries = 0u32;
         loop {
-            let outcome = self.attempt(url, accept).await;
-
-            let retryable = match &outcome {
-                Err(ResoError::Network(_)) => true,
-                Err(_) => false,
-                Ok(response) => is_retryable_status(response.status().as_u16()),
-            };
-            if retryable && retries < policy.max_retries {
-                let retry_after = match &outcome {
-                    Ok(response) => response
+            let (error, retry_after) = match self.attempt(url, accept).await {
+                Err(e @ ResoError::Network(_)) => (e, None),
+                Err(e) => return Err(e),
+                Ok(response) if response.status().is_success() => {
+                    let headers = response.headers().clone();
+                    match self.read_bytes(response).await {
+                        Ok(body) => return Ok(Fetched { headers, body }),
+                        Err(e) => (e, None),
+                    }
+                }
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_after = response
                         .headers()
                         .get(reqwest::header::RETRY_AFTER)
                         .and_then(|v| v.to_str().ok())
-                        .and_then(|v| parse_retry_after(v, std::time::SystemTime::now())),
-                    Err(_) => None,
-                };
-                if let Some(delay) = policy.delay_for(retries, retry_after) {
-                    debug!(
-                        "Retry {} of {} in {:?} ({})",
-                        retries + 1,
-                        policy.max_retries,
-                        delay,
-                        match &outcome {
-                            Ok(response) => response.status().to_string(),
-                            Err(_) => "network error".to_string(),
-                        }
-                    );
-                    self.counters.retry();
-                    drop(outcome);
-                    tokio::time::sleep(delay).await;
-                    retries += 1;
-                    continue;
+                        .and_then(|v| parse_retry_after(v, std::time::SystemTime::now()));
+                    let body = self.read_bytes(response).await.unwrap_or_default();
+                    // from_status() parses OData error format if present and maps to appropriate error variant
+                    let error = ResoError::from_status(status, &String::from_utf8_lossy(&body));
+                    if !is_retryable_status(status) {
+                        return Err(error);
+                    }
+                    (error, retry_after)
                 }
-            }
+            };
 
-            let response = outcome?;
-            let status = response.status();
-
-            // Check for error responses and extract the body for detailed error information
-            if !status.is_success() {
-                let body = self.read_bytes(response).await.unwrap_or_default();
-                // from_status() parses OData error format if present and maps to appropriate error variant
-                return Err(ResoError::from_status(
-                    status.as_u16(),
-                    &String::from_utf8_lossy(&body),
-                ));
-            }
-
-            return Ok(response);
+            let delay = if retries < policy.max_retries {
+                policy.delay_for(retries, retry_after)
+            } else {
+                None
+            };
+            let Some(delay) = delay else {
+                return Err(error);
+            };
+            debug!(
+                "Retry {} of {} in {:?} ({})",
+                retries + 1,
+                policy.max_retries,
+                delay,
+                error
+            );
+            self.counters.retry();
+            tokio::time::sleep(delay).await;
+            retries += 1;
         }
     }
 
@@ -513,27 +514,28 @@ impl ResoClient {
     }
 
     /// Read a response body, counting its bytes
+    ///
+    /// A body that cannot be read in full (the connection closed partway) is a
+    /// [`ResoError::Network`] error, so it is retried.
     async fn read_bytes(&self, response: reqwest::Response) -> Result<Vec<u8>> {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| ResoError::Parse(format!("Failed to read response: {}", e)))?;
+            .map_err(|e| ResoError::Network(format!("Failed to read response body: {}", e)))?;
         self.counters.bytes(bytes.len() as u64);
         self.limiter.record_bytes(bytes.len() as u64).await;
         Ok(bytes.to_vec())
     }
 
-    /// Parse JSON response from a successful request
-    async fn parse_json_response(&self, response: reqwest::Response) -> Result<serde_json::Value> {
-        let bytes = self.read_bytes(response).await?;
-        serde_json::from_slice(&bytes)
+    /// Parse a complete JSON body; invalid JSON is a [`ResoError::Parse`] error and not retried
+    fn parse_json_response(fetched: &Fetched) -> Result<serde_json::Value> {
+        serde_json::from_slice(&fetched.body)
             .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e)))
     }
 
-    /// Parse text response from a successful request
-    async fn parse_text_response(&self, response: reqwest::Response) -> Result<String> {
-        let bytes = self.read_bytes(response).await?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    /// A complete body as text
+    fn parse_text_response(fetched: &Fetched) -> String {
+        String::from_utf8_lossy(&fetched.body).into_owned()
     }
 
     /// Execute a query and return raw JSON
@@ -577,7 +579,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/json")
             .await?;
-        let json = self.parse_json_response(response).await?;
+        let json = Self::parse_json_response(&response)?;
 
         debug!(
             "Query result: {} records",
@@ -626,7 +628,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/json")
             .await?;
-        self.parse_json_response(response).await
+        Self::parse_json_response(&response)
     }
 
     /// Execute a count-only query and return the count as an integer
@@ -661,7 +663,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/json")
             .await?;
-        let body = self.parse_json_response(response).await?;
+        let body = Self::parse_json_response(&response)?;
 
         let count = body
             .get("@odata.count")
@@ -706,7 +708,7 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(&url, "application/xml")
             .await?;
-        self.parse_text_response(response).await
+        Ok(Self::parse_text_response(&response))
     }
 
     /// Fetch `$metadata` and parse it into a [`Metadata`](crate::Metadata) model (entity sets, keys, properties,
@@ -947,10 +949,8 @@ impl ResoClient {
         let response = self
             .send_authenticated_request(url, "application/json")
             .await?;
-        // Headers must be copied before the body is read, since reading consumes the response.
-        let headers = response.headers().clone();
-        let json = self.parse_json_response(response).await?;
-        Ok(crate::Page::from_response(json, &headers, url))
+        let json = Self::parse_json_response(&response)?;
+        Ok(crate::Page::from_response(json, &response.headers, url))
     }
 }
 

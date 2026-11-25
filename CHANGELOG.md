@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot be read is `IngestError::SecretFile`, which names the file and never its contents. `reso-client` is unchanged.
 
 ### Changed
+- A response body cut off partway (the connection closed before `Content-Length` bytes arrived) is now a
+  `ResoError::Network` error and retried under the `RetryPolicy`, counted in `ClientStats.retries` (#125). It was a
+  `ResoError::Parse` error ("Failed to read response"), never retried, so one cut body failed the whole resource. A
+  complete body that is not valid JSON is still a `Parse` error and not retried. Found by the load test (#90).
 - `reso-ingest` with a bucket resumes a killed run from its last delivered file (#107, fifth part): the NDJSON writer
   with a sink used to rotate in the middle of a page and open the next file at once, so a file was nearly always open,
   the checkpoint was held until the end of the resource, and a killed initial load started again from the beginning.

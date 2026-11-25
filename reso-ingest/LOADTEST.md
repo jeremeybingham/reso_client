@@ -38,6 +38,7 @@ machine (and in `faults`, the waits for `Retry-After` and backoff).
 | 2026-11-25 | 25b8145 | i9-9900K, WSL2 | clean | 1000000 | 1 | 11.6 | 85935 | 25 | 1002 | 0 | 0 | 0 | ok |
 | 2026-11-25 | 25b8145 | i9-9900K, WSL2 | faults | 1000000 | 9 | 27.8 | 36013 | 24 | 1038 | 44 | 0 | 0 | ok |
 | 2026-11-25 | 25b8145 | i9-9900K, WSL2 | kill | 1000000 | 4 | 11.4 | 87638 | 25 | 1004 | 0 | 2000 | 0 | ok |
+| 2026-11-25 | 9d0e62f + #125 fix | i9-9900K, WSL2 | faults | 1000000 | 1 | 28.8 | 34768 | 26 | 1039 | 44 | 0 | 0 | ok |
 
 Defaults: page size 1000, NDJSON on a local disk, no `--deletes`, no Parquet, no bucket.
 
@@ -48,6 +49,8 @@ Defaults: page size 1000, NDJSON on a local disk, no `--deletes`, no Parquet, no
   (10 of them, all recovered), 503s, 429s and slow pages, but a body that ends early is a `Parse error: Failed to read
   response: error decoding response body`, which fails the resource. Each of the 8 cut bodies cost a failed run; the
   next run resumed from the checkpoint and nothing was lost or repeated. Tracked in #125.
+  Fixed in #125: the cut body is now retried like a network error, and the same run (8 cut bodies among 44 faults)
+  finishes in one sync.
 - **Kills repeat less than the bound:** 2000 records repeated over 3 kills (bound 3000, one page per kill). No torn
   lines were seen, but these kills landed between writes; a kill in the middle of writing a page could leave a partial
   last line in an NDJSON file (#86 documents the delivery guarantee).
