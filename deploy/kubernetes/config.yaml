@@ -1,0 +1,41 @@
+# Shared by the CronJob and the Deployment: the server configuration, its secrets, and the output volume.
+# Replace the example values; nothing here is used by both at once (run one or the other per volume).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reso-ingest-config
+data:
+  servers.toml: |
+    # Secrets are named here, never written: *_env keys name variables from the Secret below.
+    [[server]]
+    name = "mls-one"
+    base_url = "https://api.mls-one.example/odata"
+    include = ["Property", "Member", "Office"]
+    interval = "15m"                  # `serve` only; `sync` ignores it
+
+    [server.auth]
+    type = "client_credentials"
+    token_url = "https://auth.mls-one.example/oauth/token"
+    client_id_env = "MLS_ONE_CLIENT_ID"
+    client_secret_env = "MLS_ONE_CLIENT_SECRET"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reso-ingest-secrets
+type: Opaque
+stringData:
+  MLS_ONE_CLIENT_ID: "replace-me"
+  MLS_ONE_CLIENT_SECRET: "replace-me"
+---
+# Data files, manifests and checkpoints (state/ under it). Checkpoints must survive between runs:
+# a fresh volume means a full load.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: reso-ingest-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

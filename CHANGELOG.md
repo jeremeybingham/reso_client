@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Container image and deployment examples (#84): a `Dockerfile` building `reso-ingest` (with `parquet`) as a static
+  musl binary on `scratch`, about 20 MB, non-root, read-only root filesystem friendly; `deploy/kubernetes/` (ConfigMap,
+  Secret, PVC, CronJob for `sync`, Deployment and Service for `serve` with probes) and `deploy/systemd/` (a hardened
+  unit for `serve`); a `Container` CI workflow that builds the image on tags and on PRs touching it, without pushing.
 - `reso-ingest serve` (#83): daemon mode. Each resource with an `interval` (on the resource, or on the server for
   its `include` list) syncs on its own schedule with start-up and per-run jitter, a per-server `concurrency` cap, one
   shared client per server (so rate limits cover all its feeds) and doubling backoff for failing feeds (up to 15 minutes).

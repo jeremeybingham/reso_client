@@ -107,6 +107,8 @@ tests/              queries_tests.rs (URL building), client_http_tests.rs (wirem
                     retry_tests.rs (retries, Retry-After, counters; limiter timing is in src/retry.rs with a paused clock),
                     auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
+Dockerfile          reso-ingest image: static musl binary on scratch, `parquet` feature (CI: .github/workflows/container.yml)
+deploy/             kubernetes/ (ConfigMap+Secret+PVC, CronJob for sync, Deployment+Service for serve), systemd/ unit
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
 ```
 

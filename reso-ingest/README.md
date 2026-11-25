@@ -261,6 +261,40 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 Unconfirmed against a real server (#32): everything here is tested against mock servers only. With concurrent feeds of one
 server the per-feed request counters in the metrics overlap, because they are differences of one shared client's counters.
 
+## Containers and deployment
+
+The [`Dockerfile`](../Dockerfile) at the repository root builds one image with the `parquet` feature: a static musl
+binary on `scratch`, about 20 MB, running as user 65532. It holds no libc, shell, package manager or CA bundle; the TLS
+roots are built into the binary (webpki-roots). The only C code in it is `ring`, rustls' crypto, compiled in the build
+stage and linked statically.
+
+```sh
+docker build -t reso-ingest .
+docker run --rm -v "$PWD/servers.toml:/config/servers.toml:ro" -v "$PWD/data:/data" -e MLS_ONE_TOKEN \
+  reso-ingest sync --config /config/servers.toml --out /data
+```
+
+Everything comes from arguments, environment variables (the `*_env` secrets, `RUST_LOG`, `RESO_LOG_FORMAT`) and
+mounted files: the configuration read-only, and one writable volume for output and checkpoints (`/data`, the working
+directory). The root filesystem can be read-only. CI builds the image on tags and on pull requests that change it, and
+runs the binary inside it; it pushes nothing (publishing an image is a release decision).
+
+Examples in [`deploy/`](../deploy/):
+
+- [`kubernetes/config.yaml`](../deploy/kubernetes/config.yaml): the configuration as a ConfigMap, secrets as a Secret
+  (passed with `envFrom`), a PersistentVolumeClaim for `/data`.
+- [`kubernetes/cronjob.yaml`](../deploy/kubernetes/cronjob.yaml): one-shot `sync` on a schedule, `concurrencyPolicy:
+  Forbid`, no retries (the next schedule continues from the checkpoints).
+- [`kubernetes/deployment.yaml`](../deploy/kubernetes/deployment.yaml): `serve` with one replica and `Recreate`
+  (one writer per volume), liveness on `/healthz`, readiness on `/readyz`, and a Service for `/metrics` and `/status`.
+- [`systemd/reso-ingest.service`](../deploy/systemd/reso-ingest.service): `serve` on a single host, without containers,
+  with `DynamicUser` and a state directory.
+
+All of them set a stop grace period (120 s) longer than one page request, so a SIGTERM ends with output and checkpoints
+consistent (see [Shutdown](#shutdown)). Smoke-tested against RESO's reference server in a local
+[kind](https://kind.sigs.k8s.io/) cluster (the CronJob and the Deployment, probes, a pod deletion) and with `docker
+run`/`docker stop`; the systemd unit is checked with `systemd-analyze verify` only.
+
 ## Shutdown
 
 On SIGTERM or Ctrl-C a `sync` stops asking for pages. A page request still in flight is dropped (its records were never
