@@ -115,6 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Metadata::parse` reads annotation values written as a `<String>` child element, resolves schema aliases in
   navigation property, property and entity set types, and keeps `RESO.OData.Metadata.StandardName` on enum members
   (new `EnumMember::standard_name`; code that builds `EnumMember` by struct literal must add the field) (#58).
+- `run_servers` aborts its server tasks when its future is dropped before it completes (#116); they were detached
+  and kept running (in-process callers of `cli::run` only; the binary always awaits the run).
 
 ### Documentation
 - README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
