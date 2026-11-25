@@ -34,6 +34,23 @@ field names are plain strings and records are raw JSON, so any server schema wor
 - Media files are not downloaded ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
 - Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md).
 
+### Data Dictionary 2.1
+
+The crates need no change for [DD 2.1](https://dd.reso.org/DD2.1/): they never name a resource or field, and records
+stay raw. Code that hard-codes field names should note:
+
+- **Renamed unit fields.** Twelve fields drop their plural `s`; the plural names are deprecated: `AirRightsUnits`,
+  `AvailableAreaUnits`, `BuildingAreaUnits`, `CommercialAreaUnits`, `FloorAreaRatioUnits`, `HeightUnits`,
+  `LeaseRateUnits`, `MaximumContiguousAreaUnits`, `MinimumDivisibleAreaUnits`, `ParkingRatioUnits`,
+  `PricePerAreaUnits`, `TotalBuildingAreaUnits` (so `AirRightsUnit` and so on). Four expansion fields are also renamed;
+  read a server's `$metadata` (`fetch_metadata_model()`) for the names it uses.
+- **Lookup values arrive as strings,** whether the server declares lookups as strings with a `Lookup` resource or as
+  enum types. Filter with string literals (`StandardStatus eq 'Active Under Contract'`). For multi-value fields use
+  `any()`; `has` failed on RESO's reference server.
+
+Checked on RESO's reference server with DD 2.1 metadata, not yet on a vendor server
+([#17](https://github.com/jeremeybingham/reso_client/issues/17)).
+
 ## Installation
 
 ```toml
@@ -187,8 +204,6 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 - Run against a vendor server and fix what it shows ([#32](https://github.com/jeremeybingham/reso_client/issues/32)),
   then publish `reso-ingest`.
-- Finish the reference-server checks ([#35](https://github.com/jeremeybingham/reso_client/issues/35)) and the
-  Data Dictionary 2.1 notes ([#17](https://github.com/jeremeybingham/reso_client/issues/17)).
 - Optional: media download ([#30](https://github.com/jeremeybingham/reso_client/issues/30)).
 
 The overall plan is tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18).
