@@ -21,8 +21,9 @@ use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
-use crate::manifest::{sync_resource_media, ResourceEntry, RunManifest};
+use crate::manifest::{sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
+use crate::metrics::write_metrics_file;
 use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 use crate::parquet_out::ParquetWriter;
@@ -93,6 +94,12 @@ enum Command {
         /// Data file format
         #[arg(long, value_enum, default_value_t = Format::Ndjson)]
         format: Format,
+        /// Also write the run's metrics (Prometheus text format) to this file
+        ///
+        /// Replaced atomically at the end of the run, for the node_exporter textfile collector.
+        /// The same numbers are in the manifest.
+        #[arg(long)]
+        metrics_file: Option<PathBuf>,
     },
     /// Download the files of the Media records that `sync` wrote
     ///
@@ -168,6 +175,7 @@ struct Args {
     format: Format,
     media_dir: Option<PathBuf>,
     limit: Option<u64>,
+    metrics_file: Option<PathBuf>,
 }
 
 impl Args {
@@ -256,6 +264,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             start_over,
             max_file_mb,
             format,
+            metrics_file,
         } => {
             let args = Args {
                 config: Some(config),
@@ -269,6 +278,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                 start_over,
                 max_file_mb: Some(max_file_mb),
                 format,
+                metrics_file,
                 ..Args::default()
             };
             sync(args, out, err).await
@@ -455,8 +465,15 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         }
     }
     let manifest_path = manifest.write(&options.out);
+    let mut metrics_failed = false;
+    if let Some(path) = &args.metrics_file {
+        if let Err(e) = write_metrics_file(&manifest, path) {
+            let _ = writeln!(err, "error: {e}");
+            metrics_failed = true;
+        }
+    }
     print_summary(&manifest, manifest_path.as_deref().ok(), out);
-    let mut clean = manifest.is_clean();
+    let mut clean = manifest.is_clean() && !metrics_failed;
     if options.media.is_some() {
         for r in &media_manifest.servers {
             let _ = writeln!(out, "  {}", media_line(r));
@@ -570,6 +587,8 @@ async fn sync_server(
                 continue;
             }
         };
+        let started = std::time::Instant::now();
+        let stats_before = client.stats();
         let filter = server.filter_for(resource);
         let mut spec = StandardReplication::new(resource, &plan.key);
         if let Some(n) = server.page_size_for(resource) {
@@ -633,6 +652,7 @@ async fn sync_server(
                 entry.files = deleted.files; // the writer's list is cumulative
             }
         }
+        entry.stats = ResourceStats::new(started.elapsed(), &client.stats().since(&stats_before));
         span.in_scope(|| match &entry.error {
             None => tracing::info!(
                 records = entry.records,
@@ -725,6 +745,7 @@ fn failed_entry(server: &str, resource: &str, error: &str) -> ResourceEntry {
         files: Vec::new(),
         checkpoint: None,
         error: Some(error.to_string()),
+        stats: ResourceStats::default(),
     }
 }
 

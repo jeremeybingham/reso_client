@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reso_client::{Checkpoint, ResoClient, StandardReplication};
+use reso_client::{Checkpoint, ClientStats, ResoClient, StandardReplication};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -23,6 +23,47 @@ pub struct FileEntry {
     pub bytes: u64,
 }
 
+/// How long a resource took and what its requests did (the client's counters over the pull)
+///
+/// The request counters cover the whole resource step: the pull, and delete detection when it ran.
+/// Media downloads use their own client and are not counted here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ResourceStats {
+    /// Wall-clock seconds the resource took
+    pub duration_seconds: f64,
+    /// HTTP requests sent (retries included)
+    pub requests: u64,
+    /// Requests repeated because of a retryable failure
+    pub retries: u64,
+    /// Response body bytes received
+    pub http_bytes: u64,
+    /// Responses with a 2xx or 3xx status
+    pub responses_ok: u64,
+    /// Responses with status 429
+    pub responses_throttled: u64,
+    /// Responses with a 4xx status other than 429
+    pub responses_client_error: u64,
+    /// Responses with a 5xx status
+    pub responses_server_error: u64,
+}
+
+impl ResourceStats {
+    /// Build from the time taken and the client counters over that time (see
+    /// [`ClientStats::since`])
+    pub fn new(duration: std::time::Duration, delta: &ClientStats) -> Self {
+        Self {
+            duration_seconds: duration.as_secs_f64(),
+            requests: delta.requests,
+            retries: delta.retries,
+            http_bytes: delta.bytes,
+            responses_ok: delta.ok,
+            responses_throttled: delta.throttled,
+            responses_client_error: delta.client_errors,
+            responses_server_error: delta.server_errors,
+        }
+    }
+}
+
 /// What happened to one resource of one server
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResourceEntry {
@@ -40,6 +81,8 @@ pub struct ResourceEntry {
     pub checkpoint: Option<Value>,
     /// The error that stopped the pull, if any (records before it are kept)
     pub error: Option<String>,
+    /// Time and request counters; all zero where the caller did not measure them
+    pub stats: ResourceStats,
 }
 
 /// A server that failed as a whole (for example a task error from `run_servers`)
@@ -209,6 +252,7 @@ pub async fn sync_resource_media(
                 files: Vec::new(),
                 checkpoint: None,
                 error: Some(e.to_string()),
+                stats: ResourceStats::default(),
             };
         }
     }
@@ -298,6 +342,7 @@ async fn pull(
         files,
         checkpoint,
         error,
+        stats: ResourceStats::default(),
     }
 }
 

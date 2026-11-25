@@ -356,7 +356,10 @@ impl Limiter {
 ///
 /// `requests` counts every HTTP request to the API (retries and a request repeated after a 401
 /// included; token requests are not). `retries` counts the repeats made by the [`RetryPolicy`].
-/// `bytes` counts response body bytes read, error bodies included.
+/// `bytes` counts response body bytes read, error bodies included. The four response counters
+/// sort every response that arrived by status: `ok` (2xx and 3xx, a 304 included), `throttled`
+/// (429), `client_errors` (other 4xx) and `server_errors` (5xx); requests that got no response
+/// (network errors) are in `requests` only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ClientStats {
     /// HTTP requests sent
@@ -365,6 +368,30 @@ pub struct ClientStats {
     pub retries: u64,
     /// Response body bytes received
     pub bytes: u64,
+    /// Responses with a 2xx or 3xx status
+    pub ok: u64,
+    /// Responses with status 429 (Too Many Requests)
+    pub throttled: u64,
+    /// Responses with a 4xx status other than 429
+    pub client_errors: u64,
+    /// Responses with a 5xx status
+    pub server_errors: u64,
+}
+
+impl ClientStats {
+    /// What happened since `earlier` (a snapshot taken before): each counter minus its old value
+    #[must_use]
+    pub fn since(&self, earlier: &ClientStats) -> ClientStats {
+        ClientStats {
+            requests: self.requests.saturating_sub(earlier.requests),
+            retries: self.retries.saturating_sub(earlier.retries),
+            bytes: self.bytes.saturating_sub(earlier.bytes),
+            ok: self.ok.saturating_sub(earlier.ok),
+            throttled: self.throttled.saturating_sub(earlier.throttled),
+            client_errors: self.client_errors.saturating_sub(earlier.client_errors),
+            server_errors: self.server_errors.saturating_sub(earlier.server_errors),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -372,6 +399,10 @@ pub(crate) struct Counters {
     requests: AtomicU64,
     retries: AtomicU64,
     bytes: AtomicU64,
+    ok: AtomicU64,
+    throttled: AtomicU64,
+    client_errors: AtomicU64,
+    server_errors: AtomicU64,
 }
 
 impl Counters {
@@ -387,11 +418,26 @@ impl Counters {
         self.bytes.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count one response by its status code
+    pub(crate) fn status(&self, code: u16) {
+        let counter = match code {
+            429 => &self.throttled,
+            400..=499 => &self.client_errors,
+            500..=599 => &self.server_errors,
+            _ => &self.ok,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> ClientStats {
         ClientStats {
             requests: self.requests.load(Ordering::Relaxed),
             retries: self.retries.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
+            ok: self.ok.load(Ordering::Relaxed),
+            throttled: self.throttled.load(Ordering::Relaxed),
+            client_errors: self.client_errors.load(Ordering::Relaxed),
+            server_errors: self.server_errors.load(Ordering::Relaxed),
         }
     }
 }
