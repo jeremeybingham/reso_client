@@ -611,9 +611,11 @@ impl ResoClient {
 
     /// Execute a count-only query and return the count as an integer
     ///
-    /// Uses the OData `/$count` endpoint to efficiently get just the count
-    /// without fetching any records. More efficient than using `with_count()`
-    /// when you only need the count.
+    /// Sends `$count=true&$top=0` (plus the query's `$filter`) on the normal resource path and
+    /// reads `@odata.count` from the JSON body, so no records are fetched. This works on
+    /// servers that have no `/Resource/$count` route, such as the RESO reference server. The
+    /// server must support `$count=true`; if it does not return `@odata.count`, a
+    /// [`ResoError::Parse`] is returned.
     ///
     /// # Examples
     ///
@@ -636,13 +638,22 @@ impl ResoClient {
         let url = self.build_url(&query.to_odata_string());
         info!("Executing count query: {}", url);
 
-        let response = self.send_authenticated_request(&url, "text/plain").await?;
-        let text = self.parse_text_response(response).await?;
+        let response = self
+            .send_authenticated_request(&url, "application/json")
+            .await?;
+        let body = self.parse_json_response(response).await?;
 
-        let count = text
-            .trim()
-            .parse::<u64>()
-            .map_err(|e| ResoError::Parse(format!("Failed to parse count '{}': {}", text, e)))?;
+        let count = body
+            .get("@odata.count")
+            .and_then(|c| {
+                c.as_u64()
+                    .or_else(|| c.as_str().and_then(|t| t.trim().parse().ok()))
+            })
+            .ok_or_else(|| {
+                ResoError::Parse(
+                    "Failed to parse count: no numeric @odata.count in response".into(),
+                )
+            })?;
 
         info!("Count result: {}", count);
 

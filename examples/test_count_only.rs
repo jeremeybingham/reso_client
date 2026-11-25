@@ -1,14 +1,12 @@
 use reso_client::{QueryBuilder, ResoClient};
 
-/// Count-only query test - demonstrates the /$count endpoint.
+/// Count-only query test - demonstrates `execute_count`.
 ///
-/// The /$count endpoint returns just a single integer count without
-/// fetching any actual records. This is much more efficient than using
-/// $count=true when you only need the total count.
+/// `execute_count` sends `$count=true&$top=0` and reads `@odata.count`, so no
+/// records are fetched. It works on servers without a `/Resource/$count` route.
 ///
 /// Benefits:
-/// - Minimal network overhead (returns just a number, not JSON)
-/// - Faster response time
+/// - Minimal network overhead (no records)
 /// - Lower server resource usage
 /// - Perfect for dashboards and statistics
 ///
@@ -20,7 +18,7 @@ use reso_client::{QueryBuilder, ResoClient};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔢 RESO Client Count-Only Query Test\n");
-    println!("Testing the /$count endpoint for efficient counting...\n");
+    println!("Testing execute_count ($count=true&$top=0)...\n");
 
     // Create client using environment variables
     let client = ResoClient::from_env()?;
@@ -153,8 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📝 Test 6: Efficiency Comparison");
     println!("{}", "=".repeat(70));
 
-    // Approach 1: Count-only (/$count)
-    println!("Approach 1: Count-only endpoint (/$count)");
+    // Approach 1: Count-only (execute_count)
+    println!("Approach 1: Count-only (execute_count)");
     let query_count_only = QueryBuilder::new("Property")
         .filter("StandardStatus eq 'Active'")
         .count()
@@ -203,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✨ Count-only tests completed!");
     println!();
     println!("💡 Key Takeaways:");
-    println!("   • Use /$count for maximum efficiency when you only need totals");
+    println!("   • Use execute_count for maximum efficiency when you only need totals");
     println!("   • Returns a plain integer, not JSON");
     println!("   • Perfect for dashboards, statistics, and analytics");
     println!("   • Much faster than fetching records with $count=true");

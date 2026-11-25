@@ -122,8 +122,8 @@
 //! # }
 //! ```
 //!
-//! [`ResoClient::execute_count`] uses the `/Resource/$count` path instead, which not every
-//! server has.
+//! [`ResoClient::execute_count`] sends `$count=true&$top=0` and reads `@odata.count`, so it
+//! needs only `$count=true` support, not a `/Resource/$count` route.
 //!
 //! # Errors
 //!

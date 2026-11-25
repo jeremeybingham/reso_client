@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
+  `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
+  route, such as the RESO reference server. `Query::to_odata_string()` for count-only queries changes accordingly (#53).
+
 ### Documentation
 - README, crate docs and AGENTS.md rewritten for the current state; new `reso-ingest/README.md` for the ingest
   command.

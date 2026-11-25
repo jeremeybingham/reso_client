@@ -131,3 +131,28 @@ async fn live_metadata_model() {
     assert!(property.property("ListPrice").is_some());
     assert!(property.navigation.iter().any(|n| n.name == "ListAgent"));
 }
+
+#[tokio::test]
+#[ignore]
+async fn live_execute_count_with_and_without_filter() {
+    // #53: `$count=true&$top=0`, not `/Resource/$count` (the reference server has no such path).
+    let client = live_client();
+    let all = QueryBuilder::new("Lookup").count().build().unwrap();
+    let total = client.execute_count(&all).await.unwrap();
+    assert!(total > 0);
+
+    let with_count = QueryBuilder::new("Lookup")
+        .with_count()
+        .top(1)
+        .build()
+        .unwrap();
+    let page = client.execute_page(&with_count).await.unwrap();
+    assert_eq!(page.count, Some(total));
+
+    let filtered = QueryBuilder::new("Lookup")
+        .filter("LookupKey eq 'no-such-key'")
+        .count()
+        .build()
+        .unwrap();
+    assert_eq!(client.execute_count(&filtered).await.unwrap(), 0);
+}
