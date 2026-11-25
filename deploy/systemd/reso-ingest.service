@@ -1,0 +1,36 @@
+# reso-ingest as a daemon on a single server (`serve`), without containers.
+#
+#   install -m 755 target/release/reso-ingest /usr/local/bin/
+#   install -D -m 644 servers.toml /etc/reso-ingest/servers.toml
+#   install -m 600 /dev/null /etc/reso-ingest/env    # then add KEY=value lines for the *_env variables
+#   cp reso-ingest.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now reso-ingest
+#
+# Output and checkpoints go to /var/lib/reso-ingest. Logs: journalctl -u reso-ingest.
+# Endpoints: curl localhost:9090/status
+[Unit]
+Description=reso-ingest: sync RESO Web API servers into files
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/reso-ingest serve --config /etc/reso-ingest/servers.toml --out /var/lib/reso-ingest --listen 127.0.0.1:9090 --deletes
+EnvironmentFile=/etc/reso-ingest/env
+Environment=RUST_LOG=reso_ingest=info,reso_client=warn
+# On SIGTERM each feed stops after its current page and serve exits 0
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=30
+
+DynamicUser=yes
+StateDirectory=reso-ingest
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

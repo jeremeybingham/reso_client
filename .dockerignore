@@ -1,0 +1,10 @@
+# Build context for the Dockerfile: sources only
+target/
+local-data/
+.git/
+.github/
+Cargo.lock
+SESSION.md
+.env
+.env.*
+*.log

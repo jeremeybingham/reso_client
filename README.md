@@ -184,6 +184,9 @@ cargo run -p reso-ingest -- status --out data/                        # checkpoi
 Configuration (including per-server filters, per-resource `expand` and flag-field deletes), output format, run ids,
 logs (`--log-format json`, `RUST_LOG`), delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
 
+A container image (static binary on an empty base, about 20 MB) and Kubernetes and systemd examples are in
+[`Dockerfile`](Dockerfile) and [`deploy/`](deploy/); see [Containers and deployment](reso-ingest/README.md#containers-and-deployment).
+
 ## Examples
 
 `examples/` holds runnable programs: `cargo run --example <name>` with a `.env` or the variables above set. Most were

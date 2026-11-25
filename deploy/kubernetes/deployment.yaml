@@ -1,0 +1,69 @@
+# Daemon mode: `reso-ingest serve` syncs each resource on its `interval` and serves
+# /healthz, /readyz, /metrics and /status on port 9090 (plain HTTP, no auth: keep it inside the cluster).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reso-ingest
+spec:
+  replicas: 1                        # one writer per volume
+  strategy:
+    type: Recreate                   # the old pod releases the volume and its leases before the new one starts
+  selector:
+    matchLabels: { app: reso-ingest }
+  template:
+    metadata:
+      labels: { app: reso-ingest }
+    spec:
+      # On SIGTERM every feed stops after its current page and serve exits 0; give it longer than one page request
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reso-ingest
+          image: reso-ingest:latest                # your registry path
+          args: ["serve", "--config", "/config/servers.toml", "--out", "/data", "--listen", "0.0.0.0:9090",
+                 "--deletes", "--log-format", "json"]
+          ports:
+            - { name: http, containerPort: 9090 }
+          envFrom:
+            - secretRef:
+                name: reso-ingest-secrets
+          env:
+            - name: RUST_LOG
+              value: reso_ingest=info,reso_client=warn
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          readinessProbe:            # 503 when the state directory cannot be written
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: reso-ingest-config }
+        - name: data
+          persistentVolumeClaim: { claimName: reso-ingest-data }
+---
+# For Prometheus (scrape /metrics) and `kubectl port-forward svc/reso-ingest 9090` to read /status
+apiVersion: v1
+kind: Service
+metadata:
+  name: reso-ingest
+spec:
+  selector: { app: reso-ingest }
+  ports:
+    - { name: http, port: 9090, targetPort: http }

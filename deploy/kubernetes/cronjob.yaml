@@ -1,0 +1,50 @@
+# One-shot mode: `reso-ingest sync` on a schedule. Each run continues from the checkpoints on the volume.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reso-ingest-sync
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid          # never two syncs on one volume (the feed leases would refuse the second anyway)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0                # a failed run is retried by the next schedule, from its checkpoints
+      template:
+        spec:
+          restartPolicy: Never
+          # Longer than one page request: on SIGTERM the sync finishes writing what it has (exit 3)
+          terminationGracePeriodSeconds: 120
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532           # makes the volume writable for the non-root user
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reso-ingest
+              image: reso-ingest:latest            # your registry path
+              args: ["sync", "--config", "/config/servers.toml", "--out", "/data", "--deletes", "--log-format", "json"]
+              envFrom:
+                - secretRef:
+                    name: reso-ingest-secrets
+              env:
+                - name: RUST_LOG
+                  value: reso_ingest=info,reso_client=warn
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }        # Parquet output buffers a row group per file: allow more
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: config, mountPath: /config, readOnly: true }
+                - { name: data, mountPath: /data }
+          volumes:
+            - name: config
+              configMap: { name: reso-ingest-config }
+            - name: data
+              persistentVolumeClaim: { claimName: reso-ingest-data }
