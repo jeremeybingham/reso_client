@@ -293,10 +293,15 @@ server the per-feed request counters in the metrics overlap, because they are di
 
 ## Containers and deployment
 
-The [`Dockerfile`](../Dockerfile) at the repository root builds one image with the `parquet` feature: a static musl
-binary on `scratch`, about 20 MB, running as user 65532. It holds no libc, shell, package manager or CA bundle; the TLS
-roots are built into the binary (webpki-roots). The only C code in it is `ring`, rustls' crypto, compiled in the build
-stage and linked statically.
+The [`Dockerfile`](../Dockerfile) at the repository root builds one image with the `parquet` and `s3` features: a
+static musl binary on `scratch`, about 30 MB, running as user 65532. It holds no libc, shell or package manager. The only
+C code is two crypto libraries, compiled in the build stage and linked statically: `ring` (rustls for RESO servers and
+the webhook) and `aws-lc` (rustls inside `object_store`, used by the `--s3-*` options).
+
+TLS roots: requests to RESO servers and the webhook use roots built into the binary (webpki-roots). The S3 client checks
+certificates against the system CA bundle, so the image carries one at `/etc/ssl/certs/ca-certificates.crt` (Alpine's).
+For a store with a private CA, mount a bundle that includes it over that file. Without any bundle, every S3 request
+fails with `Generic HTTP client error: builder error`.
 
 ```sh
 docker build -t reso-ingest .

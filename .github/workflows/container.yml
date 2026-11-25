@@ -42,6 +42,16 @@ jobs:
           docker run --rm reso-ingest:ci sync --help > /dev/null
           docker image ls reso-ingest:ci
 
+      # The S3 client verifies certificates against the system CA bundle; without it every
+      # S3 request fails with "builder error". Copy the file out (no shell in the image).
+      - name: Check the s3 feature and the CA bundle
+        run: |
+          docker run --rm reso-ingest:ci sync --help | grep -q -- '--s3-bucket'
+          id=$(docker create reso-ingest:ci)
+          docker cp "$id:/etc/ssl/certs/ca-certificates.crt" ca.crt
+          docker rm "$id"
+          grep -c 'BEGIN CERTIFICATE' ca.crt
+
       - name: Check the Kubernetes examples parse
         run: |
           for f in deploy/kubernetes/*.yaml; do
