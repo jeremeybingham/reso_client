@@ -8,13 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `RateLimit::per_day` (requests per rolling 24 hours) and `RateLimit::bytes_per_hour` (#68), with `RESO_RATE_PER_DAY` and
-  `RESO_BYTES_PER_HOUR` in `from_env` and `per_day`, `bytes_per_hour` in `[server.limits]` and `[server.media]`.
-  MLS Grid's published limits (2/s, 7,200/h, 40,000/day, 4 GB/h) can now all be set; unconfirmed against it (#32).
-- `reso-ingest sync --media` (#67): downloads the files of each page's media records right after the page is written,
-  so signed single-use URLs are fresh. Takes top-level `Media` records or the `Media` arrays nested in other records
-  (`[server.media] nested_field`); library API `PageMedia`, `sync_resource_media`, `MediaIndex::add_nested`.
-
 - File downloads (#30): `ResoClient::downloader(DownloadConfig)` returns a `Downloader` with its own `RetryPolicy`,
   `RateLimit`, timeout and counters. `Downloader::download_to(url, dest, &Validators)` sends a conditional GET
   (`If-None-Match`, `If-Modified-Since`), streams the body to `<dest>.part` and renames it when complete, and returns
@@ -22,13 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decides where the API token goes (default: the API's own scheme, host and port only). New error `ResoError::Io`
   (non-breaking: `ResoError` is `#[non_exhaustive]`). The `tokio` dependency gains the `fs` and `io-util` features; no
   new crates.
-
+- `RateLimit::per_day` (requests per rolling 24 hours) and `RateLimit::bytes_per_hour` (#68), with `RESO_RATE_PER_DAY` and
+  `RESO_BYTES_PER_HOUR` in `from_env` and `per_day`, `bytes_per_hour` in `[server.limits]` and `[server.media]`.
+  MLS Grid's published limits (2/s, 7,200/h, 40,000/day, 4 GB/h) can now all be set; unconfirmed against it (#32).
+  The new public fields break code that builds `RateLimit` with a struct literal.
 - `StandardReplication::expand(&[&str])` sends `$expand` on every replication page, for servers that serve related
   records only inline (MLS Grid's `Media`) (#65).
-
-- `reso-ingest`: deletes signalled by a flag field (#66). `deletes = { flag_field = "MlgCanView" }` on a server
-  (`DeletesConfig`); `FlagDeleteWriter` writes a delete event for each record whose flag is `false`, after the record
-  itself, which stays raw. `sync` does this with or without `--deletes` and skips the key comparison for such servers.
 
 ### Changed
 - `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
@@ -46,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README: Data Dictionary 2.1 notes (renamed unit fields, lookup values as strings, `any()` not `has`) (#17).
 - README, AGENTS.md and crate docs describe file downloads (`Downloader`) and `reso-ingest media`; the
   `reso-ingest` README's configuration example no longer excludes `Media`, which `media` needs synced.
+- README, `reso-ingest` README, AGENTS.md, crate docs and `servers.example.toml` brought up to date with #65-#69:
+  vendor differences now supported, `sync --media`, flag deletes, run ids; "What's next" rewritten.
 
 ### reso-ingest (unpublished, in this repository)
 - Server `filter` and per-resource settings `[server.resources.<Name>]` (`filter`, `expand`, `page_size`) (#65). The
@@ -57,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes (not when only a signed URL changes), sends saved validators, removes files on delete events, keeps failures
   pending for the next run, and writes `media.<run>.json`. Per-server `[server.media]` settings (`MediaConfig`);
   library API `sync_media`, `MediaIndex`, `MediaOptions`, `MediaReport`, `MediaManifest`.
+- `sync --media` (#67): downloads the files of each page's media records right after the page is written,
+  so signed single-use URLs are fresh. Takes top-level `Media` records or the `Media` arrays nested in other records
+  (`[server.media] nested_field`); library API `PageMedia`, `sync_resource_media`, `MediaIndex::add_nested`.
+- Deletes signalled by a flag field (#66): `deletes = { flag_field = "MlgCanView" }` on a server
+  (`DeletesConfig`); `FlagDeleteWriter` writes a delete event for each record whose flag is `false`, after the record
+  itself, which stays raw. `sync` does this with or without `--deletes` and skips the key comparison for such servers.
+- Run ids never collide (#69): `reserve_run_id(dir)` reserves an id with a `.run.<id>` marker file in `--out`, adding
+  `-02`, `-03`, … when a run started in the same second already holds it; `sync` and `media` use it. `NdjsonWriter`
+  and `ParquetWriter` create their data files with `create_new`, so an existing file is never overwritten (the write
+  fails instead).
 
 ## [0.3.0] - 2026-11-24
 

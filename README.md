@@ -31,8 +31,13 @@ field names are plain strings and records are raw JSON, so any server schema wor
   [#32](https://github.com/jeremeybingham/reso_client/issues/32).
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
 - `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is finished.
-- Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output); checked against the
-  reference server's `Media` records, not yet against a vendor's file host (signed URLs, media limits).
+- Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output), and
+  `reso-ingest sync --media` downloads them page by page during the sync, including `Media` arrays expanded inside other
+  records. Checked against the reference server's `Media` records, not yet against a vendor's file host (signed
+  single-use URLs, media limits).
+- Vendor differences taken from public documentation (MLS Grid, Trestle) are supported but unconfirmed until #32: a
+  filter required on every request, related records served only by `$expand`, deletes signalled by a flag field
+  (`MlgCanView`), and request and byte limits per second, hour and day.
 - Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md).
 
 ### Data Dictionary 2.1
@@ -112,8 +117,10 @@ What else the client does:
 - Paging by `@odata.nextLink` in the body or by `next` and `Link` headers; relative links are resolved, and a link to
   another host is refused so the token is never sent elsewhere.
 - OAuth2 client credentials: the token is fetched on first use, renewed at 90% of its lifetime and once after a 401.
-- Retries with backoff and `Retry-After` for network errors and 429/502/503/504; client-side limits per second, per
-  hour and bytes per day; request counters (`ResoClient::stats`). Off by default.
+- Retries with backoff and `Retry-After` for network errors and 429/502/503/504; client-side limits on requests per
+  second, hour and day and on response bytes per hour and day; request counters (`ResoClient::stats`). Off by default.
+- `StandardReplication`: keyset paging on `ModificationTimestamp` and key, checkpoints to resume, and `expand` for servers
+  that serve related records only inline.
 - `$metadata` as raw XML (`fetch_metadata`) or a model (`fetch_metadata_model`): entity sets, keys, properties,
   navigation properties, enum types.
 - File downloads (`ResoClient::downloader`): a `Downloader` with its own retries, rate limit, timeout and counters,
@@ -166,12 +173,14 @@ let client = ResoClient::with_config(config)?;
 
 ```sh
 cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server
+cargo run -p reso-ingest -- sync --config servers.toml --media        # same, downloading each page's media files as it goes
 cargo run -p reso-ingest -- media --config servers.toml --out data/   # download new and changed Media files
 cargo run -p reso-ingest -- discover --config servers.toml            # each server's $metadata model as JSON
 cargo run -p reso-ingest -- status --out data/                        # checkpoints and the last run
 ```
 
-Configuration, output format, delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
+Configuration (including per-server filters, per-resource `expand` and flag-field deletes), output format, run ids,
+delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
 
 ## Examples
 
@@ -208,22 +217,20 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 ## What's next
 
-**Can be done now, from vendors' public documentation** (built against mock servers like the rest; confirmed only by
-#32). Read in November 2026, MLS Grid and Trestle differ from the standard in ways `reso-ingest` cannot yet handle (a
-filter on every request and inline `$expand` are now supported, [#65](https://github.com/jeremeybingham/reso_client/issues/65)):
+The vendor differences known from public documentation are all handled
+([#65](https://github.com/jeremeybingham/reso_client/issues/65)-[#69](https://github.com/jeremeybingham/reso_client/issues/69));
+what is left needs a real server or someone else:
 
-- **Media from expanded records** ([#67](https://github.com/jeremeybingham/reso_client/issues/67)), downloaded during sync. `reso-ingest media` reads only a top-level `Media` resource. MLS Grid's media URLs
-  are signed, single-use and expire after an hour, so files must be fetched soon after the sync that saw them.
-
-**Waiting on others:**
-
-- A vendor server ([#32](https://github.com/jeremeybingham/reso_client/issues/32)): run against it, fix what it shows,
-  check media download against its file host, then publish `reso-ingest`.
+- **Release 0.4.0** of `reso-client` (rate limits per day and bytes per hour, `StandardReplication::expand`,
+  `execute_count` by `$count=true`, metadata fixes; see the [changelog](CHANGELOG.md)) when the owner decides.
+- **A vendor server** ([#32](https://github.com/jeremeybingham/reso_client/issues/32)): run against it, fix what it
+  shows (first check whether MLS Grid accepts `$orderby=ModificationTimestamp,<Key>`), check flag deletes, media
+  download against its file host and its published limits, then publish `reso-ingest`.
 - Moving off `chrono` ([#51](https://github.com/jeremeybingham/reso_client/issues/51)) waits on an arrow/parquet release.
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
 
 **Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
-output.
+output, re-fetching parent records by key to get fresh media URLs for files that failed during `sync --media`.
 
 The overall plan is tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18).
 

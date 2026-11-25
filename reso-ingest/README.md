@@ -13,6 +13,7 @@ run locally; not yet run against a vendor server
 ```sh
 cargo run -p reso-ingest -- sync --config servers.toml --out data/
 cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --deletes
+cargo run -p reso-ingest -- sync --config servers.toml --server mlsgrid --media
 cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
 cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
 cargo run -p reso-ingest -- status --out data/
@@ -21,8 +22,10 @@ cargo run -p reso-ingest -- status --out data/
 - **`sync`** pulls each resource the server's `$metadata` lists (after the config's `include`/`exclude` filters),
   continuing from the saved checkpoint; the first run is the full load. `--server` and `--resource` narrow it (each can
   be repeated). `--deletes` also writes delete events. `--start-over` drops the selected checkpoints first.
-  `--max-file-mb` (default 256) starts a new data file after that size.
-- **`media`** downloads the files that the `Media` records from `sync` point at (see [Media files](#media-files)).
+  `--max-file-mb` (default 256) starts a new data file after that size. `--media` downloads each page's media files
+  right after the page is written, into `--media-dir` (see [Media during sync](#media-during-sync-sync---media)).
+- **`media`** downloads the files that the top-level `Media` records from `sync` point at (see
+  [Media files](#media-files)).
 - **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums.
 - **`status`** shows the saved checkpoints and the last run's manifest.
 
@@ -118,6 +121,8 @@ In `--out` (default `reso-out`):
 - Replication is RESO-standard: filter on `ModificationTimestamp`, order by timestamp then key, follow
   `@odata.nextLink`, resume strictly after the last (timestamp, key). Resources without a single-field key or a
   `ModificationTimestamp` are skipped (an error if named with `--resource`).
+- Filters: the server's `filter` and the resource's `filter` are added (by `and`) to the replication filter;
+  `expand` and `page_size` from `[server.resources.<Name>]` go on every page.
 - Deletes (`--deletes`): when `$metadata` declares an `EntityEvent` resource, its feed is read from the last sequence
   number and each named record is looked up; otherwise every key is pulled and compared with the previous run's (the
   first run is the baseline and reports no deletes). With `deletes.flag_field` set, flagged records produce the events
@@ -188,6 +193,15 @@ a `.part` file and resumes from the last finished file, so those pages are fetch
 
 ## As a library
 
-The same pieces are public: `Config` (parse the TOML), `run_servers` (one task per server, capped), `sync_resource`
-and `pull_resource` (one resource into a `RecordWriter`), `NdjsonWriter` / `ParquetWriter`, `CheckpointStore`,
-`RunManifest`, `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, and for media `sync_media`, `MediaIndex` and `MediaManifest`. See the crate docs: `cargo doc -p reso-ingest --open`.
+The same pieces are public:
+
+- Configuration: `Config` (parse the TOML), `ServerConfig` (with `filter_for`, `expand_for`, `page_size_for`),
+  `ResourceConfig`, `DeletesConfig`, `LimitsConfig`, `MediaConfig`.
+- Running: `run_servers` (one task per server, capped), `sync_resource` and `pull_resource` (one resource into a
+  `RecordWriter`), `sync_resource_media` (the same with `PageMedia` downloading each page's files), `reserve_run_id`.
+- Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`.
+- Deletes: `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, `FlagDeleteWriter` (wraps a writer and adds an
+  event after each flagged record).
+- Media: `sync_media`, `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `PageMedia`.
+
+See the crate docs: `cargo doc -p reso-ingest --open`.

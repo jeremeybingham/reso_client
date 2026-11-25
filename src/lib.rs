@@ -90,7 +90,9 @@
 //!
 //! [`StandardReplication`] walks a resource by `ModificationTimestamp` and key. Save
 //! [`ReplicationRun::checkpoint`] after each batch and pass it to
-//! [`StandardReplication::from_checkpoint`] to continue later.
+//! [`StandardReplication::from_checkpoint`] to continue later. [`StandardReplication::expand`]
+//! sends `$expand` on every page, for servers that serve related records (such as `Media`) only
+//! inline.
 //!
 //! ```no_run
 //! # use reso_client::{ResoClient, StandardReplication};
