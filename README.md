@@ -20,7 +20,7 @@ and hand the records over **raw**, tagged with where they came from. Mapping fie
 enforcing data-licence and display rules and choosing a database are left to the application that uses the data.
 `reso-ingest` helps that application comply with licence terms: an append-only access log records what was pulled, when
 and with which credential, and one source's data can be purged when its licence ends
-([#93](https://github.com/jeremeybingham/reso_client/issues/93), being built). Resource and
+([#93](https://github.com/jeremeybingham/reso_client/issues/93); `reso-ingest purge`). Resource and
 field names are plain strings and records are raw JSON, so any server schema works, including
 [Data Dictionary 2.1](https://dd.reso.org/DD2.1/).
 

@@ -201,6 +201,34 @@ enum Command {
         #[arg(long = "resource")]
         resources: Vec<String>,
     },
+    /// Delete one server's data files, media files and state when its licence ends
+    ///
+    /// A dry run by default: lists what would go. With --execute (and --by) it deletes, then writes
+    /// a purge record with its SHA-256 to <out>/audit/ and a line to the access log. Data files are
+    /// found by their source tag and the run manifests. Refuses while another process holds a lease
+    /// on one of the server's feeds. The access log and run manifests are kept. Local storage only.
+    Purge {
+        /// The server to purge (its name in the configuration and the `source` tag)
+        #[arg(long)]
+        server: String,
+        /// Output directory of the data files, manifests and audit log
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// State directory (default: <out>/state)
+        #[arg(long)]
+        state: Option<PathBuf>,
+        /// Media directory (default: <out>/media); the server's files are in <media-dir>/<server>/
+        #[arg(long)]
+        media_dir: Option<PathBuf>,
+        /// Delete; without it nothing changes
+        #[arg(long, requires = "by")]
+        execute: bool,
+        /// Who runs the purge, for the purge record (required with --execute)
+        #[arg(long, requires = "execute")]
+        by: Option<String>,
+        #[command(flatten)]
+        storage: StorageArgs,
+    },
     /// Show the saved checkpoints and the last run's manifest
     Status {
         /// Directory holding the manifests
@@ -555,6 +583,26 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 ..Args::default()
             };
             discover(args, out, err).await
+        }
+        Command::Purge {
+            server,
+            out: out_dir,
+            state,
+            media_dir,
+            execute,
+            by,
+            storage,
+        } => {
+            let args = Args {
+                servers: vec![server],
+                out: Some(out_dir),
+                state,
+                media_dir,
+                storage,
+                ..Args::default()
+            };
+            let by = if execute { by } else { None };
+            purge(args, by, out, err).await
         }
         Command::Status {
             out: out_dir,
@@ -1567,6 +1615,127 @@ fn describe(metadata: &Metadata, resources: &[String]) -> Value {
 }
 
 // ---------------------------------------------------------------- status
+
+/// `purge`: a dry run, or with `by` set, the purge itself
+async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    #[cfg(feature = "s3")]
+    if args.storage.s3_bucket.is_some() {
+        let _ = writeln!(
+            err,
+            "error: purge works on local storage only; a bucket needs delete and list on the sink (#107)"
+        );
+        return 2;
+    }
+    let Some(server) = args.servers.first().cloned() else {
+        return 2;
+    };
+    let out_dir = args.out();
+    let media_dir = args
+        .media_dir
+        .clone()
+        .unwrap_or_else(|| out_dir.join("media"));
+    let state: Arc<dyn StateStore> = Arc::new(FileStateStore::new(args.state()));
+    let Some(by) = by else {
+        let plan =
+            match crate::purge::plan_purge(&server, &out_dir, &media_dir, state.as_ref()).await {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = writeln!(err, "error: {e}");
+                    return 1;
+                }
+            };
+        let _ = writeln!(
+            out,
+            "dry run: nothing deleted; add --execute --by NAME to delete\npurge plan for server {server}"
+        );
+        print_plan(out, &plan);
+        return 0;
+    };
+    match crate::purge::execute_purge(&server, &out_dir, &media_dir, &state, &by).await {
+        Ok(crate::purge::PurgeOutcome::Held(held)) => {
+            for (key, holder) in held {
+                let _ = writeln!(err, "error: {} is {holder}", state.location(&key));
+            }
+            let _ = writeln!(
+                err,
+                "nothing deleted: a sync of {server} is running; try again after it ends"
+            );
+            1
+        }
+        Ok(crate::purge::PurgeOutcome::Done {
+            record,
+            path,
+            sha256,
+        }) => {
+            let _ = writeln!(
+                out,
+                "{} server {server}: {} data files ({} records), {} media files, {} state keys\nrecord {}\nsha256 {sha256}",
+                record.status,
+                record.files.len(),
+                record.records,
+                record.media_files,
+                record.state_keys.len(),
+                path.display()
+            );
+            for name in &record.not_purged {
+                let _ = writeln!(
+                    out,
+                    "not purged (no source tag or manifest names it): {name}"
+                );
+            }
+            if let Some(e) = &record.error {
+                let _ = writeln!(err, "error: {e}");
+                return 1;
+            }
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            1
+        }
+    }
+}
+
+fn print_plan(out: &mut dyn Write, plan: &crate::purge::PurgePlan) {
+    let _ = writeln!(
+        out,
+        "data files: {} ({} records, {} bytes)",
+        plan.files.len(),
+        plan.records(),
+        plan.file_bytes()
+    );
+    for f in &plan.files {
+        let _ = writeln!(
+            out,
+            "  {} ({} records, {} bytes)",
+            f.name, f.records, f.bytes
+        );
+    }
+    let _ = writeln!(
+        out,
+        "media files: {} ({} bytes) in {}",
+        plan.media_files,
+        plan.media_bytes,
+        plan.media_dir.display()
+    );
+    let _ = writeln!(out, "state keys: {}", plan.state_keys.len());
+    for k in &plan.state_keys {
+        let _ = writeln!(out, "  {k}");
+    }
+    for name in &plan.not_purged {
+        let _ = writeln!(
+            out,
+            "not purged (no source tag or manifest names it): {name}"
+        );
+    }
+    for (key, holder) in &plan.held {
+        let _ = writeln!(out, "lease {key} is {holder}: --execute would refuse");
+    }
+    let _ = writeln!(
+        out,
+        "kept: the access log, run manifests and media manifests"
+    );
+}
 
 async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let state = match args.state_store() {

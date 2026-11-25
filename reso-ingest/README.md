@@ -18,6 +18,8 @@ cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
 cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
 cargo run -p reso-ingest -- status --out data/
 cargo run -p reso-ingest -- serve --config servers.toml --out data/ --listen 0.0.0.0:9090
+cargo run -p reso-ingest -- purge --server mls-one --out data/                          # dry run
+cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J. Smith"
 ```
 
 - **`sync`** pulls each resource the server's `$metadata` lists (after the config's `include`/`exclude` filters),
@@ -32,6 +34,8 @@ cargo run -p reso-ingest -- serve --config servers.toml --out data/ --listen 0.0
 - **`status`** shows the saved checkpoints and the last run's manifest.
 - **`serve`** runs as a daemon: each resource syncs on its own interval, and health, metrics and status endpoints answer
   over HTTP (see [Daemon mode](#daemon-mode-serve)).
+- **`purge`** deletes one server's data files, media files and state when its licence ends (see
+  [Purging a source](#purging-a-source)).
 
 Progress lines (`##progress step=N/T label=server/resource`) go to stderr and the summary to stdout. Exit code `0` on
 success, `1` if a server or resource failed (the summary names it), `2` for bad usage or configuration, `3` when a shutdown request ended a `sync` early (see Shutdown). `--help` on
@@ -274,6 +278,38 @@ Finished data files can go to a `FileSink` instead of staying in `--out`: a libr
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
 point (so `sync` saves a checkpoint) only after the sink has it. `LocalDirSink` copies into a directory. The command does
 not select a sink yet (#107).
+
+## Purging a source
+
+When an MLS licence ends, `purge --server NAME` removes what `reso-ingest` wrote for that server (#93):
+
+- the data files in `--out` whose `source` tag is the server (NDJSON files, read line by line, including `.part` files a
+  killed run left), and the files the run manifests list under the server (Parquet files);
+- its media directory, `<media-dir>/<server>/` (default `<out>/media/<server>/`);
+- its state keys: checkpoints, key sets, event sequences, the schema snapshot and leases (`<server>.*`) and the media
+  index (`media/<server>.json`).
+
+Nothing else is touched: other servers' files, the access log, run manifests and media manifests stay (the manifests list
+file names and counts, not records). A file whose name starts like the server's but that neither its tags nor a manifest
+assign to it is listed as *not purged* and left alone.
+
+Without `--execute` it is a dry run that lists what would go. `--execute` requires `--by NAME` (who ran it). It refuses
+(exit 1, nothing deleted) while another process holds a lease on one of the server's feeds, and holds those leases itself
+while deleting, so a sync of the server skips them. After deleting it writes:
+
+- `audit/purge.<id>.json`: server, who, start and end time, status, every data file deleted with its record and byte
+  counts, the media file and byte counts, the state keys removed, and the files not purged;
+- `audit/purge.<id>.json.sha256`: the record's SHA-256 (`sha256sum -c` checks it);
+- one line in `audit/access.ndjson` with `"resource":"*"`, `"status":"purged"` and a `purge` object (who, the record's
+  name and hash, counts).
+
+The hash in the append-only access log makes a later change to the record visible; the record is not signed. If a
+deletion fails, the purge stops, the record lists what was deleted with `"status":"failed"` and the error, and the
+command exits 1. Remove the server from the configuration afterwards: a later `sync` would start a full load again, and
+`media` for it would look for data files that are gone.
+
+`purge` works on local storage only. With `--s3-bucket` it refuses: deleting data files in a bucket needs `list` and
+`delete` on the file sink (#107).
 
 ## Daemon mode (`serve`)
 

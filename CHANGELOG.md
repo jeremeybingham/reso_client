@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest purge --server NAME` (#93, third part): deletes one server's data files (found by their `source` tag and
+  the run manifests), its media directory and its state keys. A dry run unless `--execute`, which requires `--by`.
+  Refuses while another process holds a lease on one of the server's feeds and holds them itself while deleting. Writes
+  `audit/purge.<id>.json` with its SHA-256 beside it (`.sha256`) and in a `purged` line of the access log, which purge
+  never deletes. Local storage only (a bucket needs delete and list on `FileSink`, #107). New public items:
+  `plan_purge`, `execute_purge`, `PurgePlan`, `PurgeRecord`, `PurgedFile`, `PurgeOutcome`, `sha256_hex`, `AUDIT_DIR`,
+  `PurgeNote` and the `AccessEntry::purge` field. New dependency `sha2` in `reso-ingest`.
 - `reso-ingest` access log (#93, second part): each resource step of `sync` and `serve` appends one line to
   `<out>/audit/access.ndjson` (run id, server, resource, credential id, replication window, records, deletes, bytes
   received and written, status and error), also for a failed pull. The credential id names the variable or file the

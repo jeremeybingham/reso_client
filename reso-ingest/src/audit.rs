@@ -58,6 +58,28 @@ pub struct AccessEntry {
     pub status: String,
     /// The error of a failed pull
     pub error: Option<String>,
+    /// Set on the line a purge writes (status `purged` or `failed`); absent on pull lines
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge: Option<PurgeNote>,
+}
+
+/// What a purge removed, on its access-log line (the full list is in the purge record)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgeNote {
+    /// Who ran the purge (`--by`)
+    pub by: String,
+    /// The purge record's file name in the audit directory
+    pub record: String,
+    /// SHA-256 of the purge record file, as hex
+    pub sha256: String,
+    /// Data files removed
+    pub files: u64,
+    /// Media files removed
+    pub media_files: u64,
+    /// State keys removed
+    pub state_keys: u64,
+    /// Bytes removed (data and media files)
+    pub bytes: u64,
 }
 
 impl AccessEntry {
@@ -95,6 +117,7 @@ impl AccessEntry {
             bytes_written: entry.files.iter().map(|f| f.bytes).sum(),
             status: status.to_owned(),
             error: entry.error.clone(),
+            purge: None,
         }
     }
 }
