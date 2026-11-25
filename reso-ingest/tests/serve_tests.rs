@@ -187,11 +187,21 @@ async fn feeds_run_on_their_own_intervals_and_endpoints_answer() {
     );
 
     // The records of the first syncs are written; the empty polls leave no manifests or markers
+    // Property is still polled every 100 ms: a poll in progress holds its `.run.` marker, so take
+    // a listing between polls (each poll removes its marker when it ends)
     let out = dir.0.join("out");
-    let names: Vec<String> = std::fs::read_dir(&out)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let list = || -> Vec<String> {
+        std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let mut names = list();
+    until("a listing between polls", async || {
+        names = list();
+        !names.iter().any(|n| n.starts_with(".run."))
+    })
+    .await;
     assert!(names.iter().any(|n| n.ends_with(".ndjson")), "{names:?}");
     assert_eq!(
         names.iter().filter(|n| n.starts_with("manifest.")).count(),
@@ -283,7 +293,7 @@ async fn readiness_follows_the_state_directory() {
 #[tokio::test]
 async fn server_interval_covers_included_resources() {
     std::env::set_var("SERVE_TEST_TOKEN", "t");
-    let (srv, property, member) = server(false).await;
+    let (srv, _property, member) = server(false).await;
     let dir = TempDir::new("include");
     let config = Config::parse(&format!(
         r#"
@@ -312,9 +322,11 @@ interval = "100ms"
         member.load(Ordering::SeqCst) >= 4
     })
     .await;
-    // Property runs once (after a start-up delay of up to 10 s) and then waits an hour
-    assert!(property.load(Ordering::SeqCst) <= 1);
+    // Property runs once (after a start-up delay of up to 10 s) and then waits an hour. Count its
+    // runs, not its requests: one sync is two requests (the records, then an empty page past them).
     let s = status(&daemon).await;
+    let runs = feed(&s, "Property")["runs"].as_u64().unwrap();
+    assert!(runs <= 1, "Property ran {runs} times");
     assert_eq!(feed(&s, "Property")["interval_secs"], 3600.0);
     assert_eq!(s["feeds"].as_array().unwrap().len(), 2);
     shutdown.trigger();

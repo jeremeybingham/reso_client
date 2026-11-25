@@ -34,6 +34,7 @@ use tokio::sync::{mpsc::unbounded_channel, Semaphore};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
+use crate::audit::AccessLog;
 use crate::cli::{sync_server_with, Format, SyncOptions};
 use crate::config::{Config, ServerConfig, MAX_BACKOFF};
 use crate::error::IngestError;
@@ -412,12 +413,13 @@ async fn sync_once(
         format: options.format,
         sink: options.sink.clone(),
         shutdown: shutdown.clone(),
+        access: AccessLog::new(&options.out),
     });
     // The lines `sync` prints as progress are in the log already
     let (tx, rx) = unbounded_channel::<String>();
     drop(rx);
     let span = tracing::info_span!("run", run_id = %run_id);
-    let result = sync_server_with(client, server.clone(), sync_options, tx)
+    let result = sync_server_with(client, server.clone(), Arc::clone(&sync_options), tx)
         .instrument(span)
         .await;
 
@@ -464,6 +466,10 @@ async fn sync_once(
         if let Err(e) = written {
             tracing::warn!(error = %e, "cannot write the manifest");
             delivered = false;
+        }
+        // With a bucket, the run's access-log lines go next to its manifest
+        if let Err(e) = sync_options.access.deliver(&options.out, &run_id, sink) {
+            tracing::error!(error = %e, "cannot deliver the access log");
         }
     }
     if delivered {

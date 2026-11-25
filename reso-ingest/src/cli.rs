@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tracing::Instrument;
 
+use crate::audit::{credential_id, AccessEntry, AccessLog};
 use crate::checkpoint::CheckpointStore;
 use crate::checks::{count_warning, CheckingWriter, SchemaSnapshot};
 use crate::config::{Config, ServerConfig};
@@ -703,6 +704,8 @@ pub(crate) struct SyncOptions {
     /// Where finished data files go; `None` leaves them in `out`
     pub(crate) sink: Option<Arc<dyn crate::sink::FileSink>>,
     pub(crate) shutdown: Shutdown,
+    /// The access log in `out`; one line per resource step (#93)
+    pub(crate) access: AccessLog,
 }
 
 async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Shutdown) -> i32 {
@@ -736,6 +739,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         start_over: args.start_over,
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
+        access: AccessLog::new(&args.out()),
         sink,
         shutdown,
     });
@@ -778,6 +782,11 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         Ok(p) => runs::deliver_manifest(&p, options.state.as_ref(), sink).await,
         Err(e) => Err(e),
     };
+    let mut access_failed = false;
+    if let Err(e) = options.access.deliver(&options.out, &options.run_id, sink) {
+        let _ = writeln!(err, "error: access log: {e}");
+        access_failed = true;
+    }
     let mut metrics_failed = false;
     if let Some(path) = &args.metrics_file {
         if let Err(e) = write_metrics_file(&manifest, path) {
@@ -803,7 +812,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         }
     }
     print_summary(&manifest, manifest_path.as_deref().ok(), out);
-    let mut clean = manifest.is_clean() && !metrics_failed && !webhook_failed;
+    let mut clean = manifest.is_clean() && !metrics_failed && !webhook_failed && !access_failed;
     if options.media.is_some() {
         for r in &media_manifest.servers {
             let _ = writeln!(out, "  {}", media_line(r));
@@ -861,6 +870,17 @@ pub(crate) async fn sync_server_with(
     tx: UnboundedSender<String>,
 ) -> Result<ServerOutcome, String> {
     let name = server.name.clone();
+    let credential = credential_id(&server.auth);
+    // One access-log line per resource step; a line that cannot be written fails the resource
+    let audit = |entry: &mut ResourceEntry, window_start: Option<String>| {
+        let line = AccessEntry::new(&options.run_id, &credential, window_start, entry);
+        if let Err(e) = options.access.append(&line) {
+            tracing::error!(server = %entry.server, resource = %entry.resource, error = %e, "cannot write the access log");
+            entry
+                .error
+                .get_or_insert_with(|| format!("access log: {e}"));
+        }
+    };
     let mut client = handle.client();
     let metadata = match client.fetch_metadata_model().await {
         Ok(m) => Ok(m),
@@ -891,6 +911,7 @@ pub(crate) async fn sync_server_with(
             )
         })
         .collect();
+    entries.iter_mut().for_each(|e| audit(e, None));
     if resources.is_empty() && entries.is_empty() {
         return Err("no resources to pull (check include/exclude in the configuration)".into());
     }
@@ -935,13 +956,15 @@ pub(crate) async fn sync_server_with(
                 format!("[{label}] skipped: no single key or no {TIMESTAMP_FIELD}"),
             );
             if explicit {
-                entries.push(failed_entry(
+                let mut entry = failed_entry(
                     &name,
                     resource,
                     &format!(
                         "cannot sync: needs a single-field key and a {TIMESTAMP_FIELD} property"
                     ),
-                ));
+                );
+                audit(&mut entry, None);
+                entries.push(entry);
             }
             continue;
         };
@@ -963,7 +986,9 @@ pub(crate) async fn sync_server_with(
             }
             Err(e) => {
                 span.in_scope(|| tracing::warn!(error = %e, "cannot take the feed's lease"));
-                entries.push(failed_entry(&name, resource, &e.to_string()));
+                let mut entry = failed_entry(&name, resource, &e.to_string());
+                audit(&mut entry, None);
+                entries.push(entry);
                 continue;
             }
         };
@@ -978,7 +1003,9 @@ pub(crate) async fn sync_server_with(
             Ok(w) => w,
             Err(e) => {
                 span.in_scope(|| tracing::warn!(error = %e, "cannot open the output file"));
-                entries.push(failed_entry(&name, resource, &e.to_string()));
+                let mut entry = failed_entry(&name, resource, &e.to_string());
+                audit(&mut entry, None);
+                entries.push(entry);
                 lease.release().await;
                 continue;
             }
@@ -1003,8 +1030,12 @@ pub(crate) async fn sync_server_with(
             spec = spec.expand(&expand);
         }
         // A full load when there is no checkpoint to start from
-        let full_load =
-            options.start_over || matches!(store.load(&name, resource).await, Ok(None) | Err(_));
+        let saved = store.load(&name, resource).await;
+        let full_load = options.start_over || matches!(saved, Ok(None) | Err(_));
+        let window_start = match saved {
+            Ok(Some(c)) if !full_load => Some(c.timestamp),
+            _ => None,
+        };
         let mut checked = CheckingWriter::new(writer.as_mut(), &plan.key);
         let mut pull = Pull {
             handle,
@@ -1096,6 +1127,7 @@ pub(crate) async fn sync_server_with(
                     .map_or(String::new(), |e| format!(", FAILED: {e}"))
             ),
         );
+        audit(&mut entry, window_start);
         entries.push(entry);
         lease.release().await;
     }
