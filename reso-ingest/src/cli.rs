@@ -32,6 +32,7 @@ use crate::parquet_out::ParquetWriter;
 use crate::runner::run_servers;
 use crate::serve::{Daemon, ServeOptions};
 use crate::shutdown::Shutdown;
+use crate::state::{FileStateStore, StateStore};
 use crate::webhook::{post_summary, run_summary};
 
 const TIMESTAMP_FIELD: &str = "ModificationTimestamp";
@@ -240,6 +241,11 @@ impl Args {
         self.state
             .clone()
             .unwrap_or_else(|| self.out().join("state"))
+    }
+
+    /// The state directory as a store (the command line only knows files)
+    fn state_store(&self) -> Arc<dyn StateStore> {
+        Arc::new(FileStateStore::new(self.state()))
     }
 }
 
@@ -466,7 +472,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 state,
                 ..Args::default()
             };
-            status(args, out, err)
+            status(args, out, err).await
         }
     }
 }
@@ -548,7 +554,7 @@ async fn serve(
     config.servers = servers;
     let mut options = ServeOptions::new(args.out());
     options.listen = listen;
-    options.state = args.state();
+    options.state = args.state_store();
     options.deletes = args.deletes;
     options.allow_mass_deletes = args.allow_mass_deletes;
     options.media_dir = args.media.then(|| {
@@ -578,7 +584,7 @@ const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(crate) struct SyncOptions {
     pub(crate) out: PathBuf,
-    pub(crate) state: PathBuf,
+    pub(crate) state: Arc<dyn StateStore>,
     pub(crate) run_id: String,
     pub(crate) resources: Vec<String>,
     pub(crate) deletes: bool,
@@ -604,7 +610,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
     };
     let options = Arc::new(SyncOptions {
         out: args.out(),
-        state: args.state(),
+        state: args.state_store(),
         run_id,
         resources: args.resources.clone(),
         deletes: args.deletes,
@@ -735,7 +741,8 @@ pub(crate) async fn sync_server_with(
         .await
         .map_err(|e| format!("cannot read $metadata: {e}"))?;
     let (resources, missing) = select_resources(&server, &metadata, &options.resources);
-    let schema_changes = schema_changes(&server, &metadata, &options.state)?;
+    let store = CheckpointStore::with_store(Arc::clone(&options.state));
+    let schema_changes = schema_changes(&server, &metadata, &store).await?;
     let mut entries: Vec<ResourceEntry> = missing
         .into_iter()
         .map(|r| {
@@ -756,16 +763,16 @@ pub(crate) async fn sync_server_with(
                 client,
                 &name,
                 server.media.download_config(),
-                &options.state,
+                Arc::clone(&options.state),
                 dir,
                 server.media.nested_field.as_deref(),
             )
+            .await
             .map_err(|e| e.to_string())?,
         ),
         None => None,
     };
     let feed = EventFeed::detect(&metadata);
-    let store = CheckpointStore::new(&options.state);
     let total = resources.len();
     for (i, resource) in resources.iter().enumerate() {
         if options.shutdown.is_triggered() {
@@ -802,7 +809,7 @@ pub(crate) async fn sync_server_with(
         };
 
         // One writer per feed: a second process syncing this server and resource skips it
-        let _lease = match Lease::acquire(&options.state, &name, resource, LEASE_TTL) {
+        let lease = match Lease::acquire(&options.state, &name, resource, LEASE_TTL).await {
             Ok(LeaseOutcome::Acquired(lease)) => lease,
             Ok(LeaseOutcome::Held(holder)) => {
                 let message = format!("skipped: another process is syncing this feed ({holder})");
@@ -834,6 +841,7 @@ pub(crate) async fn sync_server_with(
             Err(e) => {
                 span.in_scope(|| tracing::warn!(error = %e, "cannot open the output file"));
                 entries.push(failed_entry(&name, resource, &e.to_string()));
+                lease.release().await;
                 continue;
             }
         };
@@ -857,7 +865,7 @@ pub(crate) async fn sync_server_with(
         }
         // A full load when there is no checkpoint to start from
         let full_load =
-            options.start_over || matches!(store.load(&name, resource), Ok(None) | Err(_));
+            options.start_over || matches!(store.load(&name, resource).await, Ok(None) | Err(_));
         let mut checked = CheckingWriter::new(writer.as_mut(), &plan.key);
         let mut entry = if let Some(flag) = &server.deletes.flag_field {
             let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
@@ -961,6 +969,7 @@ pub(crate) async fn sync_server_with(
             ),
         );
         entries.push(entry);
+        lease.release().await;
     }
     Ok((entries, page_media.map(PageMedia::finish), schema_changes))
 }
@@ -970,17 +979,20 @@ pub(crate) async fn sync_server_with(
 /// The first run has nothing to compare with and only saves. Resources are the ones the
 /// configuration allows, not only the ones this run was asked for, so `--resource` runs do not
 /// make the next full run look like a change.
-fn schema_changes(
+async fn schema_changes(
     server: &ServerConfig,
     metadata: &Metadata,
-    state: &Path,
+    store: &CheckpointStore,
 ) -> Result<Vec<String>, String> {
     let (all, _) = select_resources(server, metadata, &[]);
     let now = SchemaSnapshot::from_metadata(metadata, &all);
-    let store = CheckpointStore::new(state);
-    let before = store.load_schema(&server.name).map_err(|e| e.to_string())?;
+    let before = store
+        .load_schema(&server.name)
+        .await
+        .map_err(|e| e.to_string())?;
     store
         .save_schema(&server.name, &now)
+        .await
         .map_err(|e| e.to_string())?;
     let changes = before.map(|b| b.changes_to(&now)).unwrap_or_default();
     for change in &changes {
@@ -1123,7 +1135,7 @@ async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     };
     let options = Arc::new(MediaOptions {
         out: args.out(),
-        state: args.state(),
+        state: args.state_store(),
         media_dir: args
             .media_dir
             .clone()
@@ -1319,9 +1331,9 @@ fn describe(metadata: &Metadata, resources: &[String]) -> Value {
 
 // ---------------------------------------------------------------- status
 
-fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let store = CheckpointStore::new(args.state());
-    let checkpoints = match store.list() {
+async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let store = CheckpointStore::with_store(args.state_store());
+    let checkpoints = match store.list().await {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(err, "error: {e}");

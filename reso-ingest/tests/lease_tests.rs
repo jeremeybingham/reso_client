@@ -1,10 +1,11 @@
 //! One writer per feed: a sync skips a feed another process holds (offline, wiremock)
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reso_ingest::cli::run;
-use reso_ingest::{Lease, LeaseOutcome};
+use reso_ingest::{FileStateStore, Lease, LeaseOutcome, StateStore};
 use serde_json::{json, Value};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -93,11 +94,12 @@ async fn a_held_feed_is_skipped_and_a_free_one_is_synced() {
 
     // Another process holds mls/Property
     let LeaseOutcome::Acquired(lease) = Lease::acquire(
-        &out.join("state"),
+        &(Arc::new(FileStateStore::new(out.join("state"))) as Arc<dyn StateStore>),
         "mls",
         "Property",
         Duration::from_secs(60),
     )
+    .await
     .unwrap() else {
         panic!("acquire");
     };
@@ -116,7 +118,7 @@ async fn a_held_feed_is_skipped_and_a_free_one_is_synced() {
         .starts_with("skipped"));
 
     // Released: the next run syncs, and releases its own lease when it ends
-    drop(lease);
+    lease.release().await;
     let (code, err) = sync(config, &out).await;
     assert_eq!(code, 0, "{err}");
     assert_eq!(manifest(&out)["resources"][0]["records"], 1);

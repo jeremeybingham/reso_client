@@ -222,7 +222,12 @@ async fn failed_key_pull_never_emits_deletes() {
     assert_eq!(e.deletes, 0);
     assert!(lines(&out).is_empty());
     assert_eq!(
-        store.load_keys("mls", "Property").unwrap().unwrap().len(),
+        store
+            .load_keys("mls", "Property")
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
         5
     );
 
@@ -247,7 +252,12 @@ async fn empty_key_pull_is_refused() {
     assert!(e.error.unwrap().contains("refusing"));
     assert!(lines(&out).is_empty());
     assert_eq!(
-        store.load_keys("mls", "Property").unwrap().unwrap().len(),
+        store
+            .load_keys("mls", "Property")
+            .await
+            .unwrap()
+            .unwrap()
+            .len(),
         2
     );
 }
@@ -270,7 +280,7 @@ async fn event_feed_is_used_instead_of_the_key_diff() {
         "the first run is a baseline"
     );
     assert_eq!(
-        store.load_event_sequence("mls", "Property").unwrap(),
+        store.load_event_sequence("mls", "Property").await.unwrap(),
         Some(2)
     );
 
@@ -294,7 +304,7 @@ async fn event_feed_is_used_instead_of_the_key_diff() {
     keys.sort();
     assert_eq!(keys, ["K3", "K5"], "each gone record once; K4 still exists");
     assert_eq!(
-        store.load_event_sequence("mls", "Property").unwrap(),
+        store.load_event_sequence("mls", "Property").await.unwrap(),
         Some(7)
     );
     assert_eq!(
@@ -338,18 +348,21 @@ fn event_feed_is_detected_from_metadata() {
     );
 }
 
-#[test]
-fn state_files_are_checked_for_owner() {
+#[tokio::test]
+async fn state_files_are_checked_for_owner() {
     let dir = TempDir::new("owner");
     let store = CheckpointStore::new(&dir.0);
-    store.save_keys("a", "Property", &[json!("K1")]).unwrap();
+    store
+        .save_keys("a", "Property", &[json!("K1")])
+        .await
+        .unwrap();
     assert_eq!(
-        store.load_keys("a", "Property").unwrap(),
+        store.load_keys("a", "Property").await.unwrap(),
         Some(vec![json!("K1")])
     );
-    assert_eq!(store.load_keys("b", "Property").unwrap(), None);
+    assert_eq!(store.load_keys("b", "Property").await.unwrap(), None);
     std::fs::write(dir.0.join("c.Property.keys.json"), "{").unwrap();
-    assert!(store.load_keys("c", "Property").is_err());
+    assert!(store.load_keys("c", "Property").await.is_err());
 }
 
 #[tokio::test]
@@ -368,7 +381,7 @@ async fn key_pull_with_a_keyless_record_is_not_trusted() {
     let e = run(&srv, &store, &out, "r1", None).await;
     assert!(e.error.unwrap().contains("not trusted"));
     assert_eq!(e.deletes, 0);
-    assert!(store.load_keys("mls", "Property").unwrap().is_none());
+    assert!(store.load_keys("mls", "Property").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -531,7 +544,7 @@ async fn mass_event_deletes_are_held_and_found_again() {
     let e = run_limited(&srv, &store, &out, "r2", Some(&feed), limit).await;
     assert_eq!((e.error, e.deletes, e.deletes_held), (None, 0, 2));
     assert_eq!(
-        store.load_event_sequence("mls", "Property").unwrap(),
+        store.load_event_sequence("mls", "Property").await.unwrap(),
         Some(1),
         "the sequence stays, so the next pass sees the events again"
     );

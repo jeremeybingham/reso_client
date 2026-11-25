@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reso_ingest::cli::run;
-use reso_ingest::{sync_media, MediaIndex, MediaOptions};
+use reso_ingest::{sync_media, FileStateStore, MediaIndex, MediaOptions};
 use serde_json::{json, Value};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -242,7 +242,9 @@ async fn sync_then_media_downloads_retries_and_skips_unchanged() {
     assert_eq!(file_requests(&requests, "/files/c"), 2);
 
     // The index keeps the newest URL
-    let index = MediaIndex::load(&MediaIndex::path(&out.join("state"), "srv")).unwrap();
+    let index = MediaIndex::load(&FileStateStore::new(out.join("state")), "srv")
+        .await
+        .unwrap();
     assert!(index.entries["B"]
         .url
         .as_deref()
@@ -361,7 +363,7 @@ async fn delete_event_removes_file_and_entry() {
     let dir = TempDir::new("delete");
     let options = MediaOptions {
         out: dir.path("out"),
-        state: dir.path("state"),
+        state: Arc::new(FileStateStore::new(dir.path("state"))),
         media_dir: dir.path("media"),
         limit: None,
     };
@@ -394,7 +396,9 @@ async fn delete_event_removes_file_and_entry() {
         "the first data file is not read again"
     );
     assert_eq!(files_in(&options.media_dir.join("srv")), ["B.png"]);
-    let index = MediaIndex::load(&MediaIndex::path(&options.state, "srv")).unwrap();
+    let index = MediaIndex::load(options.state.as_ref(), "srv")
+        .await
+        .unwrap();
     assert!(!index.entries.contains_key("A"));
 }
 
@@ -403,11 +407,11 @@ async fn damaged_index_stops_the_server_without_downloading() {
     let dir = TempDir::new("damaged");
     let options = MediaOptions {
         out: dir.path("out"),
-        state: dir.path("state"),
+        state: Arc::new(FileStateStore::new(dir.path("state"))),
         media_dir: dir.path("media"),
         limit: None,
     };
-    let path = MediaIndex::path(&options.state, "srv");
+    let path = dir.path("state").join("media").join("srv.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "{not json").unwrap();
     let client = reso_client::ResoClient::with_config(reso_client::ClientConfig::new(
@@ -494,7 +498,7 @@ async fn media_command_names_a_server_that_failed() {
     let dir = TempDir::new("cmdfail");
     let config = write_config(&dir, "http://127.0.0.1:1", "MEDIA_TEST_TOKEN_FAIL");
     let state = dir.path("state");
-    let path = MediaIndex::path(&state, "srv");
+    let path = state.join("media").join("srv.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "{not json").unwrap();
     let (code, stdout, _) = cli(&[

@@ -264,7 +264,7 @@ async fn readiness_follows_the_state_directory() {
     let dir = TempDir::new("ready");
     let config = config(&srv.uri(), "", "interval = \"1h\"", "interval = \"1h\"");
     let opts = options(&dir);
-    let state = opts.state.clone();
+    let state = dir.0.join("out").join("state");
     let shutdown = Shutdown::new();
     let daemon = Daemon::start(config, opts, shutdown.clone()).await.unwrap();
     assert_eq!(get(&daemon, "/readyz").await.0, 200);

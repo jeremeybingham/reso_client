@@ -305,9 +305,9 @@ pub async fn sync_resource_media(
     shutdown: &Shutdown,
 ) -> ResourceEntry {
     let setup = if start_over {
-        store.clear(server, resource).map(|()| None)
+        store.clear(server, resource).await.map(|()| None)
     } else {
-        store.load(server, resource)
+        store.load(server, resource).await
     };
     match setup {
         Ok(Some(cp)) => spec = spec.from_checkpoint(cp),
@@ -382,17 +382,20 @@ async fn pull(
                 if let Some(store) = store {
                     // Save only when every row so far is in a readable file; otherwise hold the
                     // checkpoint back (Parquet keeps one file open across pages)
-                    let saved = writer.commit().and_then(|durable| {
-                        pending = None;
-                        match run.checkpoint() {
-                            Some(cp) if durable => store.save(server, resource, cp),
-                            Some(cp) => {
-                                pending = Some(cp.clone());
-                                Ok(())
+                    let saved = match writer.commit() {
+                        Ok(durable) => {
+                            pending = None;
+                            match run.checkpoint() {
+                                Some(cp) if durable => store.save(server, resource, cp).await,
+                                Some(cp) => {
+                                    pending = Some(cp.clone());
+                                    Ok(())
+                                }
+                                None => Ok(()),
                             }
-                            None => Ok(()),
                         }
-                    });
+                        Err(e) => Err(e),
+                    };
                     if let Err(e) = saved {
                         error = Some(e.to_string());
                         break;
@@ -418,7 +421,7 @@ async fn pull(
         Ok(files) => {
             // The open file is finished: its rows are readable, so the held checkpoint is safe
             if let (Some(store), Some(cp)) = (store, pending.as_ref()) {
-                if let Err(e) = store.save(server, resource, cp) {
+                if let Err(e) = store.save(server, resource, cp).await {
                     error.get_or_insert_with(|| e.to_string());
                 }
             }

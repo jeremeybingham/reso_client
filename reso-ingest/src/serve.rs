@@ -42,6 +42,7 @@ use crate::manifest::{ResourceEntry, RunManifest};
 use crate::metrics::{escape, render_prometheus};
 use crate::output::{now_rfc3339, reserve_run_id};
 use crate::shutdown::Shutdown;
+use crate::state::{FileStateStore, StateStore};
 
 /// How `serve` runs
 #[derive(Debug, Clone)]
@@ -50,8 +51,8 @@ pub struct ServeOptions {
     pub listen: SocketAddr,
     /// Output directory for data files and manifests
     pub out: PathBuf,
-    /// Checkpoint and lease directory
-    pub state: PathBuf,
+    /// Where checkpoints, leases and media indexes are kept
+    pub state: Arc<dyn StateStore>,
     /// Also detect deleted records on every sync
     pub deletes: bool,
     /// Write deletes even when they pass the configured limits
@@ -70,7 +71,7 @@ impl ServeOptions {
         let out = out.into();
         Self {
             listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            state: out.join("state"),
+            state: Arc::new(FileStateStore::new(out.join("state"))),
             out,
             deletes: false,
             allow_mass_deletes: false,
@@ -105,7 +106,7 @@ struct FeedStatus {
 
 struct Shared {
     feeds: Mutex<BTreeMap<(String, String), FeedStatus>>,
-    state_dir: PathBuf,
+    state: Arc<dyn StateStore>,
     started_at: String,
 }
 
@@ -169,14 +170,12 @@ impl Daemon {
                     .into(),
             ));
         }
-        std::fs::create_dir_all(&options.state).map_err(|e| IngestError::Output {
-            path: options.state.display().to_string(),
-            message: e.to_string(),
-        })?;
+        // Fail now rather than at the first sync when state cannot be saved
+        probe(options.state.as_ref()).await?;
 
         let shared = Arc::new(Shared {
             feeds: Mutex::new(BTreeMap::new()),
-            state_dir: options.state.clone(),
+            state: Arc::clone(&options.state),
             started_at: now_rfc3339(),
         });
         let listener = tokio::net::TcpListener::bind(options.listen)
@@ -400,7 +399,7 @@ async fn sync_once(
     };
     let sync_options = Arc::new(SyncOptions {
         out: options.out.clone(),
-        state: options.state.clone(),
+        state: Arc::clone(&options.state),
         run_id: run_id.clone(),
         resources: vec![resource.to_owned()],
         deletes: options.deletes,
@@ -475,22 +474,22 @@ fn sanitize_id(id: &str) -> String {
         .collect()
 }
 
+/// Write and remove a probe value: can state be saved?
+async fn probe(store: &dyn StateStore) -> Result<(), IngestError> {
+    store.put(".readyz", b"ok").await?;
+    store.delete(".readyz", None).await.map(|_| ())
+}
+
 async fn readyz(State(shared): State<Arc<Shared>>) -> (StatusCode, String) {
-    let dir = shared.state_dir.clone();
-    let probe = tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(&dir)?;
-        let file = dir.join(".readyz");
-        std::fs::write(&file, b"ok")?;
-        std::fs::remove_file(&file)
-    })
-    .await;
-    match probe {
-        Ok(Ok(())) => (StatusCode::OK, "ready\n".into()),
-        Ok(Err(e)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("not ready: state directory: {}\n", e.kind()),
-        ),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "not ready\n".into()),
+    match probe(shared.state.as_ref()).await {
+        Ok(()) => (StatusCode::OK, "ready\n".into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "not ready: state cannot be saved");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not ready: state cannot be saved\n".into(),
+            )
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use reso_ingest::cli::run;
-use reso_ingest::MediaIndex;
+use reso_ingest::{FileStateStore, MediaIndex};
 use serde_json::{json, Value};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -221,7 +221,9 @@ async fn nested_media_are_downloaded_during_sync_and_single_use_urls_are_not_ret
     assert_eq!(code, 1, "{stdout}");
     assert!(stdout.contains("1 failed"), "{stdout}");
     assert!(stdout.contains("1 pending"), "{stdout}");
-    let index = MediaIndex::load(&MediaIndex::path(&out.join("state"), "srv")).unwrap();
+    let index = MediaIndex::load(&FileStateStore::new(out.join("state")), "srv")
+        .await
+        .unwrap();
     assert!(index.entries["M1"].pending);
     assert!(!index.entries["M2"].pending);
 }
