@@ -4,7 +4,7 @@
 //! code, so tests drive it in-process. Exit codes: `0` success, `1` a server or resource failed,
 //! `2` bad usage or an unreadable configuration. Progress goes to the error writer, results to the
 //! output writer. Secrets are read from the environment variables named in the configuration and are
-//! never printed.
+//! never printed. [`run_main`] also installs the log subscriber (`--log-format`, `RUST_LOG`).
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -15,10 +15,12 @@ use clap::{error::ErrorKind, Parser, Subcommand};
 use reso_client::{Metadata, ResoClient, StandardReplication};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tracing::Instrument;
 
 use crate::checkpoint::CheckpointStore;
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
+use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
 use crate::manifest::{sync_resource_media, ResourceEntry, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
 use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
@@ -38,6 +40,9 @@ const DEFAULT_MAX_FILE_MB: u64 = 256;
 #[derive(Debug, Parser)]
 #[command(name = "reso-ingest", version)]
 struct Cli {
+    /// Log line format on stderr (default: $RESO_LOG_FORMAT, else text); level from RUST_LOG
+    #[arg(long, value_enum, global = true)]
+    log_format: Option<LogFormat>,
     #[command(subcommand)]
     command: Command,
 }
@@ -181,19 +186,63 @@ impl Args {
 ///
 /// `args` excludes the program name. Output that is the result of a command (summary, JSON, status,
 /// `--help`) goes to `out`; progress lines and errors go to `err`.
+///
+/// It installs no log subscriber (tests and library users choose their own); the binary calls
+/// [`run_main`].
 pub async fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    let argv = std::iter::once("reso-ingest".to_string()).chain(args.iter().cloned());
-    let cli = match Cli::try_parse_from(argv) {
+    match parse(args, out, err) {
+        Ok(cli) => execute(cli, out, err).await,
+        Err(code) => code,
+    }
+}
+
+/// Like [`run`], but first installs the global log subscriber, writing to stderr
+///
+/// The format is `--log-format`, else the `RESO_LOG_FORMAT` variable (`text` or `json`), else
+/// text; the level filter is `RUST_LOG`, else `info`. An invalid `RESO_LOG_FORMAT` is bad usage
+/// (exit code 2).
+pub async fn run_main(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let cli = match parse(args, out, err) {
         Ok(cli) => cli,
+        Err(code) => return code,
+    };
+    let format = match cli.log_format {
+        Some(f) => f,
+        None => match std::env::var(LOG_FORMAT_ENV) {
+            Ok(v) if !v.is_empty() => match v.parse() {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = writeln!(err, "error: {LOG_FORMAT_ENV}: {e}");
+                    return 2;
+                }
+            },
+            _ => LogFormat::default(),
+        },
+    };
+    let subscriber = log_subscriber(format, env_filter(), std::io::stderr);
+    if tracing::subscriber::set_global_default(subscriber).is_err() {
+        let _ = writeln!(err, "warning: a log subscriber is already installed");
+    }
+    execute(cli, out, err).await
+}
+
+/// Parse the arguments; `Err` is the exit code (help and version are printed to `out`)
+fn parse(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> Result<Cli, i32> {
+    let argv = std::iter::once("reso-ingest".to_string()).chain(args.iter().cloned());
+    match Cli::try_parse_from(argv) {
+        Ok(cli) => Ok(cli),
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
             let _ = write!(out, "{e}");
-            return 0;
+            Err(0)
         }
         Err(e) => {
             let _ = write!(err, "{e}");
-            return 2;
+            Err(2)
         }
-    };
+    }
+}
+
+async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     match cli.command {
         Command::Sync {
             config,
@@ -382,7 +431,9 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             let tx = tx.clone();
             async move { sync_server(server, options, tx).await }
         };
-        let run = run_servers(servers, config.max_concurrent_servers, task);
+        tracing::info!(run_id = %options.run_id, servers = servers.len(), "sync started");
+        let run = run_servers(servers, config.max_concurrent_servers, task)
+            .instrument(tracing::info_span!("run", run_id = %options.run_id));
         let progress = async {
             while let Some(line) = rx.recv().await {
                 let _ = writeln!(err, "{line}");
@@ -478,12 +529,17 @@ async fn sync_server(
     for (i, resource) in resources.iter().enumerate() {
         let explicit = !options.resources.is_empty();
         let label = format!("{name}/{resource}");
+        // Events inside carry `resource`; the server and run spans add `server` and `run_id`
+        let span = tracing::info_span!("resource", resource = %resource);
         send(
             &tx,
             format!("##progress step={}/{total} label={label}", i + 1),
         );
 
         let Some(plan) = plan_resource(&metadata, resource) else {
+            span.in_scope(|| {
+                tracing::info!("skipped: no single key or no {TIMESTAMP_FIELD}");
+            });
             send(
                 &tx,
                 format!("[{label}] skipped: no single key or no {TIMESTAMP_FIELD}"),
@@ -509,6 +565,7 @@ async fn sync_server(
         ) {
             Ok(w) => w,
             Err(e) => {
+                span.in_scope(|| tracing::warn!(error = %e, "cannot open the output file"));
                 entries.push(failed_entry(&name, resource, &e.to_string()));
                 continue;
             }
@@ -541,6 +598,7 @@ async fn sync_server(
                 options.start_over,
                 page_media.as_mut(),
             )
+            .instrument(span.clone())
             .await;
             entry.deletes = flagged.deletes();
             entry
@@ -555,6 +613,7 @@ async fn sync_server(
                 options.start_over,
                 page_media.as_mut(),
             )
+            .instrument(span.clone())
             .await
         };
         if options.deletes && entry.error.is_none() && server.deletes.flag_field.is_none() {
@@ -566,6 +625,7 @@ async fn sync_server(
                 writer.as_mut(),
                 &store,
             )
+            .instrument(span.clone())
             .await;
             entry.deletes = deleted.deletes;
             entry.error = deleted.error;
@@ -573,6 +633,19 @@ async fn sync_server(
                 entry.files = deleted.files; // the writer's list is cumulative
             }
         }
+        span.in_scope(|| match &entry.error {
+            None => tracing::info!(
+                records = entry.records,
+                deletes = entry.deletes,
+                "resource synced"
+            ),
+            Some(e) => tracing::warn!(
+                records = entry.records,
+                deletes = entry.deletes,
+                error = %e,
+                "resource failed"
+            ),
+        });
         send(
             &tx,
             format!(
@@ -741,11 +814,19 @@ async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                 let download = server.media.download_config();
                 let progress = |line: String| send(&tx, line);
                 let report = sync_media(&client, &server.name, download, &options, progress).await;
-                send(&tx, media_line(&report));
+                let line = media_line(&report);
+                if report.error.is_some() {
+                    tracing::warn!("{line}");
+                } else {
+                    tracing::info!("{line}");
+                }
+                send(&tx, line);
                 Ok::<MediaReport, String>(report)
             }
         };
-        let run = run_servers(servers, config.max_concurrent_servers, task);
+        tracing::info!(run_id = %manifest.run_id, servers = servers.len(), "media run started");
+        let run = run_servers(servers, config.max_concurrent_servers, task)
+            .instrument(tracing::info_span!("run", run_id = %manifest.run_id));
         let progress = async {
             while let Some(line) = rx.recv().await {
                 let _ = writeln!(err, "{line}");

@@ -16,6 +16,8 @@ toml = "0.8"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
+# Log output of the binary (text or JSON lines on stderr, level from RUST_LOG)
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "env-filter", "std"] }
 clap = { version = "4.6.10", features = ["derive"] }
 # Parquet output (optional feature `parquet`); the client crate does not depend on these
 arrow-array = { version = "60", optional = true }

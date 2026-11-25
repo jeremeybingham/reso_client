@@ -27,6 +27,10 @@
 //! servers whose media URLs are single-use or expire quickly. Downloads use their own limits
 //! ([`MediaConfig`]).
 //!
+//! The crates log through [`tracing`]; [`log_subscriber`] builds the text or JSON subscriber the
+//! binary installs, and the `run`, server and resource spans put `run_id`, `server` and `resource` on
+//! every event.
+//!
 //! # Examples
 //!
 //! ```
@@ -50,6 +54,7 @@ pub mod cli;
 mod config;
 mod deletes;
 mod error;
+mod logging;
 mod manifest;
 mod media;
 mod output;
@@ -63,6 +68,7 @@ pub use config::{
 };
 pub use deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;
+pub use logging::{env_filter, log_subscriber, LogFormat, DEFAULT_FILTER, LOG_FORMAT_ENV};
 pub use manifest::{
     pull_resource, sync_resource, sync_resource_media, FileEntry, ResourceEntry, RunManifest,
     ServerFailure,

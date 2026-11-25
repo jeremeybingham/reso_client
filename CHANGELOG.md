@@ -22,12 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `StandardReplication::expand(&[&str])` sends `$expand` on every replication page, for servers that serve related
   records only inline (MLS Grid's `Media`) (#65).
 
+- `reso-ingest` logs (#96): the binary installs a `tracing` subscriber writing to stderr, text by default or JSON lines
+  with `--log-format json` (or `RESO_LOG_FORMAT=json`), level from `RUST_LOG` (default `info`). `run`, `server` and
+  `resource` spans put `run_id`, `server` and `resource` on every event. Library: `cli::run_main` (installs the
+  subscriber; `cli::run` still does not), `log_subscriber`, `LogFormat`, `env_filter`. New dependency in `reso-ingest`
+  only: `tracing-subscriber` (`fmt`, `json`, `env-filter`).
+
 ### Changed
 - `ResoClient::execute_count` (and `QueryBuilder::count()`) now send `$count=true&$top=0` on the resource path and read
   `@odata.count` from the JSON body, instead of requesting `/Resource/$count`. Works on servers without a `/$count`
   route, such as the RESO reference server. `Query::to_odata_string()` for count-only queries changes accordingly (#53).
 
 ### Fixed
+- Download network errors no longer include the URL (#96): signed media URLs reached the debug log and the media
+  manifest through reqwest's error text.
 - `Metadata::parse` reads annotation values written as a `<String>` child element, resolves schema aliases in
   navigation property, property and entity set types, and keeps `RESO.OData.Metadata.StandardName` on enum members
   (new `EnumMember::standard_name`; code that builds `EnumMember` by struct literal must add the field) (#58).
