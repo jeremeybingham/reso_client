@@ -1,0 +1,11 @@
+# The kit's Prometheus, with a fixed uid the dashboard refers to
+apiVersion: 1
+datasources:
+  - name: Prometheus (reso-ingest)
+    uid: reso-prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9190
+    isDefault: true
+    jsonData:
+      timeInterval: 30s

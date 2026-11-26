@@ -1,0 +1,581 @@
+{
+  "uid": "reso-ingest-serve",
+  "title": "reso-ingest serve",
+  "tags": [
+    "reso-ingest"
+  ],
+  "description": "Feeds of one reso-ingest serve daemon (#161). Filter with Server and Resource; the status pages (serve --ui) link here.",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "server",
+        "label": "Server",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "reso-prometheus"
+        },
+        "query": {
+          "query": "label_values(reso_ingest_feed_runs_total, server)",
+          "refId": "server"
+        },
+        "definition": "label_values(reso_ingest_feed_runs_total, server)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "sort": 1
+      },
+      {
+        "name": "resource",
+        "label": "Resource",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "reso-prometheus"
+        },
+        "query": {
+          "query": "label_values(reso_ingest_feed_runs_total{server=~\"$server\"}, resource)",
+          "refId": "resource"
+        },
+        "definition": "label_values(reso_ingest_feed_runs_total{server=~\"$server\"}, resource)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "sort": 1
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Feeds now",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_feed_consecutive_failures{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_feed_paused{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "time() - reso_ingest_feed_last_success_timestamp_seconds{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_freshness_lag_seconds{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_feed_interval_seconds{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Failures in a row"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 3
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Paused"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "no"
+                      },
+                      "1": {
+                        "text": "paused",
+                        "color": "gray"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Since last success|Freshness lag|Interval"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Failures in a row",
+            "desc": true
+          }
+        ]
+      },
+      "description": "One row per feed. 'Since last success' is empty until the feed has succeeded once since the daemon started.",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "job": true,
+              "instance": true,
+              "__name__": true
+            },
+            "indexByName": {
+              "server": 0,
+              "resource": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6
+            },
+            "renameByName": {
+              "Value #A": "Failures in a row",
+              "Value #B": "Paused",
+              "Value #C": "Since last success",
+              "Value #D": "Freshness lag",
+              "Value #E": "Interval"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Syncs per hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "sum by (server, resource) (increase(reso_ingest_feed_runs_total{server=~\"$server\",resource=~\"$resource\"}[1h]))",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Failed syncs per hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "sum by (server, resource) (increase(reso_ingest_feed_failed_runs_total{server=~\"$server\",resource=~\"$resource\"}[1h]))",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Records written, last sync",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_last_run_records{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Sampled every scrape: a step shows when a sync wrote records."
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Freshness lag (newest ModificationTimestamp written)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_freshness_lag_seconds{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Failures in a row",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_feed_consecutive_failures{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Sync duration, last sync",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 25,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_last_run_duration_seconds{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Rate-limit budget used (fraction of each window)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_rate_limit_used{server=~\"$server\"} / reso_ingest_rate_limit{server=~\"$server\"}",
+          "legendFormat": "{{server}} {{unit}}/{{window}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Responses by class, last sync",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 33,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_last_run_responses{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "{{server}}/{{resource}} {{class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Media files per hour (with --media)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "sum by (server, resource, outcome) (increase(reso_ingest_media_files_total{server=~\"$server\",resource=~\"$resource\"}[1h]))",
+          "legendFormat": "{{server}}/{{resource}} {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Media files still to fetch (with --media)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "reso-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "reso-prometheus"
+          },
+          "expr": "reso_ingest_media_pending{server=~\"$server\",resource=~\"$resource\"}",
+          "legendFormat": "{{server}}/{{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

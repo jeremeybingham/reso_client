@@ -1,0 +1,8 @@
+# Loads the dashboards in $RESO_DASHBOARDS (set by setup.sh and compose.yaml)
+apiVersion: 1
+providers:
+  - name: reso-ingest
+    type: file
+    allowUiUpdates: false
+    options:
+      path: $RESO_DASHBOARDS

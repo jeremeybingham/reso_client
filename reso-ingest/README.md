@@ -515,7 +515,7 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 |---|---|
 | `/healthz` | `200` while the process is up |
 | `/readyz` | `200` when state can be saved (a probe key `.readyz` is written and deleted), `503` when not (config is read before the server starts, so a bad one never gets this far) |
-| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures`, `reso_ingest_feed_interval_seconds` and `reso_ingest_feed_paused` (labels `server`, `resource`); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
+| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures`, `reso_ingest_feed_interval_seconds`, `reso_ingest_feed_paused` and `reso_ingest_feed_last_success_timestamp_seconds` (labels `server`, `resource`; the last one only once the feed has succeeded since start: under `serve`, `reso_ingest_last_success_timestamp_seconds` is not set); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
 | `/status` | JSON: `started_at`, `reloads`, `last_reload`, `last_reload_error` and, per feed, `state` (`waiting`, `queued`, `running`, `paused`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
 | `/` | With `--ui`: an HTML page, one row per feed (state, last run, records, time taken, result, failures in a row, next run, freshness lag); failing and paused rows are highlighted, with a summary line on top |
 | `/feed/<server>/<resource>` | With `--ui`: one feed's last error, checkpoint and its last 20 runs (`404` for an unknown feed) |
@@ -617,6 +617,8 @@ Examples in [`deploy/`](../deploy/):
   (one writer per volume), liveness on `/healthz`, readiness on `/readyz`, and a Service for `/metrics` and `/status`; `--reload-every 1m` picks up an edited ConfigMap.
 - [`systemd/reso-ingest.service`](../deploy/systemd/reso-ingest.service): `serve` on a single host, without containers,
   with `DynamicUser` and a state directory; `systemctl reload` sends SIGHUP to reload the configuration.
+- [`observability/`](../deploy/observability/): Prometheus + Grafana for one `serve` daemon (30-day history, alert
+  rules with runbooks, a dashboard per feed), installed natively with `setup.sh` or with Docker Compose.
 
 All of them set a stop grace period (120 s) longer than one page request, so a SIGTERM ends with output and checkpoints
 consistent (see [Shutdown](#shutdown)). Smoke-tested against RESO's reference server in a local

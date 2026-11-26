@@ -937,3 +937,76 @@ async fn ui_without_the_feature_is_a_startup_error() {
     .to_string();
     assert!(e.contains("`ui` feature"), "{e}");
 }
+
+/// The Prometheus + Grafana kit (`deploy/observability/`, #161) uses only series `serve` exports,
+/// and a feed that succeeded has `reso_ingest_feed_last_success_timestamp_seconds`
+#[tokio::test]
+async fn observability_kit_uses_only_metrics_serve_exports() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let (srv, _, _) = server(false).await;
+    let dir = TempDir::new("kit");
+    let shutdown = Shutdown::new();
+    let daemon = Daemon::start(
+        config(&srv.uri(), "", "interval = \"100ms\"", ""),
+        options(&dir),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap();
+    until("Property succeeded", async || {
+        !feed(&status(&daemon).await, "Property")["last_success"].is_null()
+    })
+    .await;
+    let metrics = get(&daemon, "/metrics").await.1;
+    shutdown.trigger();
+    daemon.wait().await;
+
+    let sample = metrics
+        .lines()
+        .find(|l| {
+            l.starts_with(
+                r#"reso_ingest_feed_last_success_timestamp_seconds{server="mls",resource="Property"} "#,
+            )
+        })
+        .unwrap_or_else(|| panic!("{metrics}"));
+    let t: f64 = sample.rsplit(' ').next().unwrap().parse().unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!((now - t).abs() < 60.0, "{sample}");
+
+    let mut exported: std::collections::BTreeSet<String> = metrics
+        .lines()
+        .filter_map(|l| l.strip_prefix("# TYPE "))
+        .map(|l| l.split(' ').next().unwrap().to_string())
+        .collect();
+    // Only with `--media`, or with rate limits in [server.limits]
+    for name in [
+        "reso_ingest_rate_limit",
+        "reso_ingest_rate_limit_used",
+        "reso_ingest_media_files_total",
+        "reso_ingest_media_bytes_total",
+        "reso_ingest_media_pending",
+        "reso_ingest_media_index_ok",
+    ] {
+        exported.insert(name.into());
+    }
+    let kit = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deploy/observability");
+    let dashboard: Value = serde_json::from_slice(
+        &std::fs::read(kit.join("grafana/dashboards/reso-ingest-serve.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dashboard["uid"], "reso-ingest-serve");
+    let alerts = std::fs::read_to_string(kit.join("alerts.yml")).unwrap();
+    for (what, text) in [("dashboard", dashboard.to_string()), ("alerts", alerts)] {
+        let used: std::collections::BTreeSet<&str> = text
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| w.starts_with("reso_ingest_"))
+            .collect();
+        assert!(!used.is_empty(), "{what} uses no reso_ingest_ metric");
+        for name in used {
+            assert!(exported.contains(name), "{what} uses unknown metric {name}");
+        }
+    }
+}

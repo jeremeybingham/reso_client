@@ -137,7 +137,8 @@ tests/              queries_tests.rs (URL building), client_http_tests.rs (wirem
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 Dockerfile          reso-ingest image: static musl binary on scratch, `parquet` and `s3` features, CA bundle for S3 (CI: .github/workflows/container.yml)
 scripts/profile.sh  timed + callgrind run of one load-test scenario (#162), `profiling` Cargo profile; results in docs/PERFORMANCE.md
-deploy/             kubernetes/ (ConfigMap+Secret+PVC, CronJob for sync, Deployment+Service for serve), systemd/ unit
+deploy/             kubernetes/ (ConfigMap+Secret+PVC, CronJob for sync, Deployment+Service for serve), systemd/ unit,
+                    observability/ (Prometheus + Grafana kit for serve, #161: setup.sh native or compose.yaml; a test checks its metric names and runbooks)
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
 ```
 

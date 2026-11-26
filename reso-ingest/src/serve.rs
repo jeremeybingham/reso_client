@@ -50,7 +50,7 @@ use crate::config::{Config, ResourceConfig, ServerConfig, MAX_BACKOFF};
 use crate::error::IngestError;
 use crate::manifest::{ResourceEntry, RunManifest};
 use crate::media::MediaReport;
-use crate::metrics::{escape, render_media, render_prometheus, MediaCounts};
+use crate::metrics::{escape, parse_rfc3339, render_media, render_prometheus, MediaCounts};
 use crate::output::now_rfc3339;
 use crate::runs;
 use crate::secrets::ClientHandle;
@@ -1060,6 +1060,20 @@ async fn metrics(
         "Configured time between syncs of the feed",
         &|f| f.interval.as_secs(),
     );
+    // Only feeds that have succeeded since the daemon started have a sample
+    text.push_str(
+        "# HELP reso_ingest_feed_last_success_timestamp_seconds End of the feed's last sync without an error, since the daemon started\n\
+         # TYPE reso_ingest_feed_last_success_timestamp_seconds gauge\n",
+    );
+    for f in &feeds {
+        if let Some(t) = f.last_success.as_deref().and_then(parse_rfc3339) {
+            text.push_str(&format!(
+                "reso_ingest_feed_last_success_timestamp_seconds{{server=\"{}\",resource=\"{}\"}} {t:.3}\n",
+                escape(&f.server),
+                escape(&f.resource),
+            ));
+        }
+    }
     (
         [(
             header::CONTENT_TYPE,
