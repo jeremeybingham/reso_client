@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use reso_client::RawRecords;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -23,6 +24,25 @@ pub trait RecordWriter: Send {
     ///
     /// [`IngestError::Output`] when a file cannot be written.
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError>;
+
+    /// [`write_batch`](Self::write_batch) with each record's JSON text as the server sent it
+    ///
+    /// `raw` holds the text of `records`, in the same order. A writer that stores records
+    /// unchanged ([`NdjsonWriter`]) copies the text instead of serializing each record again
+    /// (#162); the default ignores it and calls `write_batch`. Wrappers forward it.
+    ///
+    /// # Errors
+    ///
+    /// As `write_batch`.
+    fn write_raw_batch(
+        &mut self,
+        records: &[Value],
+        raw: &RawRecords,
+        fetched_at: &str,
+    ) -> Result<(), IngestError> {
+        let _ = raw;
+        self.write_batch(records, fetched_at)
+    }
 
     /// Write delete events for records that left the feed, with the same tags as records
     ///
@@ -72,6 +92,28 @@ struct TaggedLine<'a> {
     fetched_at: &'a str,
     run_id: &'a str,
     record: &'a Value,
+}
+
+/// The four tags alone; the raw path appends `,"record":` and the record's text (#162)
+#[derive(Serialize)]
+struct TagsOnly<'a> {
+    source: &'a str,
+    resource: &'a str,
+    fetched_at: &'a str,
+    run_id: &'a str,
+}
+
+/// Append a record's JSON text, dropping line breaks between tokens so it stays one line
+///
+/// Inside a JSON string a line break is always escaped, so a raw `\n` or `\r` byte can only be
+/// whitespace between tokens. Text with a `\n` loses its `\n` and `\r` bytes; a lone `\r` does not
+/// end an NDJSON line and is kept, as other whitespace is (one scan for the common case).
+fn push_one_line(line: &mut Vec<u8>, text: &[u8]) {
+    if text.contains(&b'\n') {
+        line.extend(text.iter().copied().filter(|&b| b != b'\n' && b != b'\r'));
+    } else {
+        line.extend_from_slice(text);
+    }
 }
 
 /// One delete event: the same four tags, then `event` and the key of the record that is gone
@@ -252,6 +294,34 @@ impl RecordWriter for NdjsonWriter {
             })?;
             // With a sink the file is delivered at a page end (see `commit`)
             self.write_line(bytes, self.sink.is_none())?;
+        }
+        Ok(())
+    }
+
+    fn write_raw_batch(
+        &mut self,
+        records: &[Value],
+        raw: &RawRecords,
+        fetched_at: &str,
+    ) -> Result<(), IngestError> {
+        if raw.len() != records.len() {
+            return self.write_batch(records, fetched_at);
+        }
+        // The four tags are the same for every line of the batch: serialize them once
+        let mut prefix = self.serialize(&TagsOnly {
+            source: &self.source,
+            resource: &self.resource,
+            fetched_at,
+            run_id: &self.run_id,
+        })?;
+        prefix.pop(); // the closing brace
+        prefix.extend_from_slice(b",\"record\":");
+        for text in raw.iter() {
+            let mut line = Vec::with_capacity(prefix.len() + text.len() + 2);
+            line.extend_from_slice(&prefix);
+            push_one_line(&mut line, text.as_bytes());
+            line.push(b'}');
+            self.write_line(line, self.sink.is_none())?;
         }
         Ok(())
     }

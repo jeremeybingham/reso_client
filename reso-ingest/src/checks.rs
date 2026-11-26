@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use reso_client::{Metadata, QueryBuilder, ResoClient};
+use reso_client::{Metadata, QueryBuilder, RawRecords, ResoClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -156,8 +156,8 @@ impl<'a> CheckingWriter<'a> {
     }
 }
 
-impl RecordWriter for CheckingWriter<'_> {
-    fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
+impl CheckingWriter<'_> {
+    fn check(&mut self, records: &[Value]) {
         let mut seen = HashSet::with_capacity(records.len());
         for key in records
             .iter()
@@ -167,7 +167,23 @@ impl RecordWriter for CheckingWriter<'_> {
                 self.duplicates += 1;
             }
         }
+    }
+}
+
+impl RecordWriter for CheckingWriter<'_> {
+    fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
+        self.check(records);
         self.inner.write_batch(records, fetched_at)
+    }
+
+    fn write_raw_batch(
+        &mut self,
+        records: &[Value],
+        raw: &RawRecords,
+        fetched_at: &str,
+    ) -> Result<(), IngestError> {
+        self.check(records);
+        self.inner.write_raw_batch(records, raw, fetched_at)
     }
 
     fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {

@@ -1010,6 +1010,18 @@ impl ResoClient {
         self.get_page(url).await
     }
 
+    /// [`fetch_page`](Self::fetch_page) that also keeps each record's JSON text (#162)
+    pub(crate) async fn fetch_page_raw(
+        &self,
+        url: &str,
+    ) -> Result<(crate::Page, crate::paging::RawRecords)> {
+        crate::paging::check_same_origin(&self.config.base_url, url)?;
+        let response = self
+            .send_authenticated_request(url, "application/json")
+            .await?;
+        crate::Page::from_raw_body(response.body, &response.headers, url)
+    }
+
     /// GET a collection URL and build a [`Page`](crate::Page) from the response
     async fn get_page(&self, url: &str) -> Result<crate::Page> {
         let response = self

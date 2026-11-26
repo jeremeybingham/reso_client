@@ -207,11 +207,11 @@ pub use metadata::{
     EntitySet, EntityType, EnumMember, EnumType, Metadata, NavigationProperty, Property,
 };
 pub use network::NetworkOptions;
-pub use paging::Page;
+pub use paging::{Page, RawRecords};
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;
 pub use retry::{count_requests, ClientStats, RateLimit, RateUsage, RetryPolicy, WindowUsage};
-pub use standard_replication::{Checkpoint, ReplicationRun, StandardReplication};
+pub use standard_replication::{Checkpoint, RawBatch, ReplicationRun, StandardReplication};
 
 // Re-export serde_json for convenience
 pub use serde_json::Value as JsonValue;

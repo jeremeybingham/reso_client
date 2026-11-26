@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use reso_client::{Metadata, QueryBuilder, ResoClient};
+use reso_client::{Metadata, QueryBuilder, RawRecords, ResoClient};
 use serde_json::Value;
 
 use crate::checkpoint::{keys_header, CheckpointStore};
@@ -499,9 +499,9 @@ impl<'a> FlagDeleteWriter<'a> {
     }
 }
 
-impl RecordWriter for FlagDeleteWriter<'_> {
-    fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
-        self.inner.write_batch(records, fetched_at)?;
+impl FlagDeleteWriter<'_> {
+    /// Write delete events for the records of a batch whose flag is false
+    fn flagged(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
         let mut keys = Vec::new();
         for record in records {
             if record.get(&self.flag_field) == Some(&Value::Bool(false)) {
@@ -524,6 +524,23 @@ impl RecordWriter for FlagDeleteWriter<'_> {
             self.deletes += keys.len() as u64;
         }
         Ok(())
+    }
+}
+
+impl RecordWriter for FlagDeleteWriter<'_> {
+    fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
+        self.inner.write_batch(records, fetched_at)?;
+        self.flagged(records, fetched_at)
+    }
+
+    fn write_raw_batch(
+        &mut self,
+        records: &[Value],
+        raw: &RawRecords,
+        fetched_at: &str,
+    ) -> Result<(), IngestError> {
+        self.inner.write_raw_batch(records, raw, fetched_at)?;
+        self.flagged(records, fetched_at)
     }
 
     fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {

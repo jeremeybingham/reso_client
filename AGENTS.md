@@ -81,9 +81,9 @@ src/download.rs     Downloader, DownloadConfig, SendToken, DownloadTarget: file 
 src/auth.rs         Auth, ClientCredentials, token fetch, cache and renewal (OAuth2 client credentials)
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/metadata.rs     Metadata model parsed from $metadata (roxmltree): entity sets, types, keys, properties, enums
-src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
+src/paging.rs       Page, RawRecords (each record's JSON text, #162), next-link reading (body, `next` and `Link` headers), relative resolution
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`, vendor mode)
-src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
+src/standard_replication.rs  StandardReplication, ReplicationRun (next_batch, next_batch_raw), RawBatch, Checkpoint (RESO-standard, keyset on timestamp+key)
 src/network.rs      NetworkOptions: proxy, extra CA certificates, User-Agent, connection pool (#91); used by the client and Downloader
 src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter (RateUsage), ClientStats counters, count_requests scopes
 src/error.rs        ResoError and the Result alias
@@ -92,7 +92,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
                     [server.resources.<Name>] (ResourceConfig), flag-field deletes (DeletesConfig), limits, media, network (NetworkConfig)
   src/secrets.rs    ClientHandle: a server's client, rebuilt when its secrets change; retry once after a 401 (#92)
   src/runner.rs     run_servers: one independent task per server, concurrency cap
-  src/output.rs     RecordWriter, NdjsonWriter: tagged lines, size rotation, never overwrite; reserve_run_id (.run.<id>)
+  src/output.rs     RecordWriter (write_raw_batch: record text as sent), NdjsonWriter: tagged lines, size rotation, never overwrite; reserve_run_id (.run.<id>)
   src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature); `partitioned` = Hive folders source=/resource=/date= (#86)
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore

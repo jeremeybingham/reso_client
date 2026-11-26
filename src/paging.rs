@@ -13,9 +13,14 @@
 //!
 //! [`ResoClient::execute_page`]: crate::ResoClient::execute_page
 
+use std::ops::Range;
+
 use reqwest::header::HeaderMap;
 use reqwest::Url;
-use serde_json::Value as JsonValue;
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::Deserializer;
+use serde_json::value::RawValue;
+use serde_json::{Map, Value as JsonValue};
 use tracing::debug;
 
 use crate::error::{ResoError, Result};
@@ -86,6 +91,61 @@ impl Page {
             }
             _ => Vec::new(),
         };
+        Self::from_parts(records, body, headers, url)
+    }
+
+    /// Build a page from a response body and keep each record's JSON text as sent (#162)
+    ///
+    /// Records are parsed as [`from_response`](Self::from_response) parses them; in addition
+    /// the returned [`RawRecords`] holds the text of each record, in the same order.
+    pub(crate) fn from_raw_body(
+        body: Vec<u8>,
+        headers: &HeaderMap,
+        url: &str,
+    ) -> Result<(Self, RawRecords)> {
+        let parse_error =
+            |e: serde_json::Error| ResoError::Parse(format!("Failed to parse JSON: {}", e));
+        let text = String::from_utf8(body)
+            .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e.utf8_error())))?;
+        if !text.trim_start().starts_with('{') {
+            // Not an object (no records): parsed as `from_response` parses it
+            let body = serde_json::from_str(&text).map_err(parse_error)?;
+            return Ok((
+                Self::from_response(body, headers, url),
+                RawRecords::default(),
+            ));
+        }
+        let mut de = serde_json::Deserializer::from_str(&text);
+        let (rest, value) = (&mut de)
+            .deserialize_any(BodyVisitor)
+            .map_err(parse_error)?;
+        de.end().map_err(parse_error)?;
+
+        let Some(items) = value else {
+            // `value` missing or not an array: no records; parsed as `from_response` parses it
+            let body = serde_json::from_str(&text).map_err(parse_error)?;
+            return Ok((
+                Self::from_response(body, headers, url),
+                RawRecords::default(),
+            ));
+        };
+        let mut records = Vec::with_capacity(items.len());
+        let mut spans = Vec::with_capacity(items.len());
+        for item in items {
+            records.push(serde_json::from_str(item.get()).map_err(parse_error)?);
+            let start = item.get().as_ptr() as usize - text.as_ptr() as usize;
+            spans.push(start..start + item.get().len());
+        }
+        let page = Self::from_parts(records, JsonValue::Object(rest), headers, url);
+        Ok((page, RawRecords { text, spans }))
+    }
+
+    fn from_parts(
+        records: Vec<JsonValue>,
+        body: JsonValue,
+        headers: &HeaderMap,
+        url: &str,
+    ) -> Self {
         let count = body.get("@odata.count").and_then(|v| v.as_u64());
         let next_link = next_link_from(&body, headers, url);
         Self {
@@ -113,6 +173,144 @@ impl Page {
     /// ```
     pub fn has_more(&self) -> bool {
         self.next_link.is_some()
+    }
+}
+
+/// The JSON text of each record on a page, exactly as the server sent it
+///
+/// Returned with the parsed records by
+/// [`ReplicationRun::next_batch_raw`](crate::ReplicationRun::next_batch_raw), in the same order,
+/// so a writer can copy a record's bytes instead of serializing the parsed value again. The text
+/// keeps the server's member order, number formatting, string escapes and any whitespace inside
+/// the record.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use reso_client::{ResoClient, StandardReplication};
+/// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+/// let mut run = client.replicate(StandardReplication::new("Property", "ListingKey"));
+/// while let Some(batch) = run.next_batch_raw().await? {
+///     for (record, text) in batch.records.iter().zip(batch.raw.iter()) {
+///         println!("{} -> {}", record["ListingKey"], text);
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct RawRecords {
+    text: String,
+    spans: Vec<Range<usize>>,
+}
+
+impl RawRecords {
+    /// Number of records
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// Whether there are no records
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    /// The text of record `i`, or `None` past the end
+    pub fn get(&self, i: usize) -> Option<&str> {
+        self.spans.get(i).map(|r| &self.text[r.clone()])
+    }
+
+    /// The text of each record, in order
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+        self.spans.iter().map(|r| &self.text[r.clone()])
+    }
+}
+
+/// Reads a response body's top-level members: the `value` array as the raw text of each element
+/// (one scan, no parsing), the rest as values
+///
+/// The second item is `None` when there is no `value` member or it is not an array.
+struct BodyVisitor;
+
+impl<'de> Visitor<'de> for BodyVisitor {
+    type Value = (Map<String, JsonValue>, Option<Vec<&'de RawValue>>);
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut rest = Map::new();
+        let mut value = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "value" {
+                // A repeated member replaces the earlier one, as when parsing into a Value
+                value = map.next_value_seed(RawArraySeed)?;
+            } else {
+                rest.insert(key, map.next_value()?);
+            }
+        }
+        Ok((rest, value))
+    }
+}
+
+/// Reads an array as the raw text of each element; anything else is skipped and gives `None`
+struct RawArraySeed;
+
+impl<'de> DeserializeSeed<'de> for RawArraySeed {
+    type Value = Option<Vec<&'de RawValue>>;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for RawArraySeed {
+    type Value = Option<Vec<&'de RawValue>>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(item) = seq.next_element::<&'de RawValue>()? {
+            items.push(item);
+        }
+        Ok(Some(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> std::result::Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_i64<E>(self, _: i64) -> std::result::Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_u64<E>(self, _: u64) -> std::result::Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_f64<E>(self, _: f64) -> std::result::Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_str<E>(self, _: &str) -> std::result::Result<Self::Value, E> {
+        Ok(None)
+    }
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(None)
     }
 }
 
@@ -442,5 +640,68 @@ mod tests {
         assert!(check_same_origin(base, "http://api.example.com/odata/Property").is_err());
         assert!(check_same_origin(base, "https://api.example.com:8443/odata").is_err());
         assert!(check_same_origin(base, "not a url").is_err());
+    }
+
+    #[test]
+    fn raw_body_keeps_record_text_and_matches_parsed_page() {
+        let body = r#"{"@odata.context":"https://api.example.com/odata/$metadata#Property",
+            "value": [ {"Z":1.50,"A":"café"} ,
+              {"B": [1, 2],
+               "K": 12345678901234567890123} ],
+            "@odata.count": 2,
+            "@odata.nextLink":"Property?$skip=2"}"#;
+        let (page, raw) =
+            Page::from_raw_body(body.as_bytes().to_vec(), &HeaderMap::new(), URL).unwrap();
+        let parsed =
+            Page::from_response(serde_json::from_str(body).unwrap(), &HeaderMap::new(), URL);
+        assert_eq!(page.records, parsed.records);
+        assert_eq!(page.body, parsed.body);
+        assert_eq!(
+            (page.count, page.next_link.clone()),
+            (parsed.count, parsed.next_link)
+        );
+        assert_eq!(raw.len(), 2);
+        // Member order, number text and escapes as sent
+        assert_eq!(raw.get(0), Some(r#"{"Z":1.50,"A":"café"}"#));
+        assert_eq!(
+            raw.get(1),
+            Some("{\"B\": [1, 2],\n               \"K\": 12345678901234567890123}")
+        );
+        assert_eq!(raw.get(2), None);
+        assert_eq!(raw.iter().count(), 2);
+    }
+
+    #[test]
+    fn raw_body_without_a_value_array_matches_parsed_page() {
+        for body in [
+            r#"{"value":{"x":1},"a":2}"#,
+            r#"{"a":2}"#,
+            "[1,2]",
+            r#"{"value":[]}"#,
+        ] {
+            let (page, raw) =
+                Page::from_raw_body(body.as_bytes().to_vec(), &HeaderMap::new(), URL).unwrap();
+            let parsed =
+                Page::from_response(serde_json::from_str(body).unwrap(), &HeaderMap::new(), URL);
+            assert_eq!(
+                (page.records, page.body),
+                (parsed.records, parsed.body),
+                "{body}"
+            );
+            assert!(raw.is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn raw_body_rejects_invalid_json() {
+        for body in [
+            &b"{\"value\":[1,"[..],
+            b"{\"value\":[]} x",
+            b"{\"a\":\"\xff\"}",
+            b"",
+        ] {
+            let err = Page::from_raw_body(body.to_vec(), &HeaderMap::new(), URL).unwrap_err();
+            assert!(matches!(err, ResoError::Parse(_)), "{err:?}");
+        }
     }
 }
