@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use reso_client::{Metadata, QueryBuilder, RawRecords, ResoClient};
+use reso_client::{record_fields, Metadata, QueryBuilder, RawRecords, ResoClient};
 use serde_json::Value;
 
 use crate::checkpoint::{keys_header, CheckpointStore};
@@ -507,18 +507,47 @@ impl FlagDeleteWriter<'_> {
             if record.get(&self.flag_field) == Some(&Value::Bool(false)) {
                 match record.get(&self.key_field).filter(|k| !k.is_null()) {
                     Some(key) => keys.push(key.clone()),
-                    None => {
-                        return Err(IngestError::Output {
-                            path: String::new(),
-                            message: format!(
-                            "a record with `{}` false has no `{}`; its delete cannot be written",
-                            self.flag_field, self.key_field
-                        ),
-                        })
-                    }
+                    None => return Err(self.no_key()),
                 }
             }
         }
+        self.write_flagged(keys, fetched_at)
+    }
+
+    /// [`flagged`](Self::flagged) on the records' text: reads only the flag and key members
+    fn flagged_raw(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
+        let mut keys = Vec::new();
+        for text in raw.iter() {
+            let [flag, key] =
+                record_fields(text, [self.flag_field.as_str(), self.key_field.as_str()]).map_err(
+                    |e| IngestError::Output {
+                        path: String::new(),
+                        message: e.to_string(),
+                    },
+                )?;
+            if flag.map(|f| f.get()) != Some("false") {
+                continue;
+            }
+            let key = key
+                .filter(|k| k.get() != "null")
+                .and_then(|k| serde_json::from_str::<Value>(k.get()).ok())
+                .ok_or_else(|| self.no_key())?;
+            keys.push(key);
+        }
+        self.write_flagged(keys, fetched_at)
+    }
+
+    fn no_key(&self) -> IngestError {
+        IngestError::Output {
+            path: String::new(),
+            message: format!(
+                "a record with `{}` false has no `{}`; its delete cannot be written",
+                self.flag_field, self.key_field
+            ),
+        }
+    }
+
+    fn write_flagged(&mut self, keys: Vec<Value>, fetched_at: &str) -> Result<(), IngestError> {
         if !keys.is_empty() {
             self.inner.write_deletes(&keys, fetched_at)?;
             self.deletes += keys.len() as u64;
@@ -533,14 +562,9 @@ impl RecordWriter for FlagDeleteWriter<'_> {
         self.flagged(records, fetched_at)
     }
 
-    fn write_raw_batch(
-        &mut self,
-        records: &[Value],
-        raw: &RawRecords,
-        fetched_at: &str,
-    ) -> Result<(), IngestError> {
-        self.inner.write_raw_batch(records, raw, fetched_at)?;
-        self.flagged(records, fetched_at)
+    fn write_raw_batch(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
+        self.inner.write_raw_batch(raw, fetched_at)?;
+        self.flagged_raw(raw, fetched_at)
     }
 
     fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {
@@ -567,5 +591,82 @@ mod tests {
     #[test]
     fn quotes_odata_strings() {
         assert_eq!(odata_string("O'Neil"), "'O''Neil'");
+    }
+
+    /// Keeps the delete keys it is given
+    #[derive(Default)]
+    struct Deletes(Vec<Value>);
+
+    impl RecordWriter for Deletes {
+        fn write_batch(&mut self, _: &[Value], _: &str) -> Result<(), IngestError> {
+            Ok(())
+        }
+        fn write_deletes(&mut self, keys: &[Value], _: &str) -> Result<(), IngestError> {
+            self.0.extend_from_slice(keys);
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), IngestError> {
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Run `texts` through a flag-delete writer on the parsed and the text path (#162)
+    fn both_paths(texts: &[&str]) -> [Result<Vec<Value>, String>; 2] {
+        let mut out = [Ok(Vec::new()), Ok(Vec::new())];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let mut inner = Deletes::default();
+            let mut w = FlagDeleteWriter::new(&mut inner, "MlgCanView", "ListingKey");
+            let written = if i == 0 {
+                let values: Vec<Value> = texts
+                    .iter()
+                    .map(|t| serde_json::from_str(t).unwrap())
+                    .collect();
+                w.write_batch(&values, "t")
+            } else {
+                w.write_raw_batch(&RawRecords::from_texts(texts), "t")
+            };
+            let count = w.deletes();
+            *slot = written.map_err(|e| e.to_string()).map(|()| {
+                assert_eq!(count as usize, inner.0.len());
+                inner.0
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn flag_deletes_read_from_text_match_the_parsed_records() {
+        let [parsed, raw] = both_paths(&[
+            r#"{"ListingKey":"K1","MlgCanView":true}"#,
+            r#"{"MlgCanView" : false, "ListingKey":"K\u002f2"}"#,
+            r#"{"ListingKey":"K3"}"#,
+            r#"{"ListingKey":"K4","MlgCanView":0}"#,
+            r#"{"ListingKey":"K5","MlgCanView":"false"}"#,
+            r#"{"ListingKey":7,"MlgCanView":false,"Nested":{"MlgCanView":true}}"#,
+            r#"{"ListingKey":"K8","MlgCanView":true,"MlgCanView":false}"#,
+        ]);
+        let want = [
+            serde_json::json!("K/2"),
+            serde_json::json!(7),
+            serde_json::json!("K8"),
+        ];
+        assert_eq!(parsed.unwrap(), want);
+        assert_eq!(raw.unwrap(), want);
+    }
+
+    #[test]
+    fn a_flagged_record_without_its_key_fails_on_both_paths() {
+        for text in [
+            r#"{"MlgCanView":false}"#,
+            r#"{"MlgCanView":false,"ListingKey":null}"#,
+        ] {
+            let [parsed, raw] = both_paths(&[text]);
+            let (parsed, raw) = (parsed.unwrap_err(), raw.unwrap_err());
+            assert!(parsed.contains("has no `ListingKey`"), "{parsed}");
+            assert_eq!(parsed, raw, "{text}");
+        }
     }
 }

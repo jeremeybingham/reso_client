@@ -25,23 +25,22 @@ pub trait RecordWriter: Send {
     /// [`IngestError::Output`] when a file cannot be written.
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError>;
 
-    /// [`write_batch`](Self::write_batch) with each record's JSON text as the server sent it
+    /// [`write_batch`](Self::write_batch) for records given as their JSON text as the server sent
+    /// it (what `sync` uses, #162)
     ///
-    /// `raw` holds the text of `records`, in the same order. A writer that stores records
-    /// unchanged ([`NdjsonWriter`]) copies the text instead of serializing each record again
-    /// (#162); the default ignores it and calls `write_batch`. Wrappers forward it.
+    /// A writer that stores records unchanged ([`NdjsonWriter`]) copies the text, so no record is
+    /// parsed into a `Value`. The default parses every record and calls `write_batch` (Parquet).
+    /// Wrappers forward it and read the members they need with [`reso_client::record_fields`].
     ///
     /// # Errors
     ///
-    /// As `write_batch`.
-    fn write_raw_batch(
-        &mut self,
-        records: &[Value],
-        raw: &RawRecords,
-        fetched_at: &str,
-    ) -> Result<(), IngestError> {
-        let _ = raw;
-        self.write_batch(records, fetched_at)
+    /// As `write_batch`, and [`IngestError::Output`] when a record is not valid JSON.
+    fn write_raw_batch(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
+        let records = raw.values().map_err(|e| IngestError::Output {
+            path: String::new(),
+            message: e.to_string(),
+        })?;
+        self.write_batch(&records, fetched_at)
     }
 
     /// Write delete events for records that left the feed, with the same tags as records
@@ -298,15 +297,7 @@ impl RecordWriter for NdjsonWriter {
         Ok(())
     }
 
-    fn write_raw_batch(
-        &mut self,
-        records: &[Value],
-        raw: &RawRecords,
-        fetched_at: &str,
-    ) -> Result<(), IngestError> {
-        if raw.len() != records.len() {
-            return self.write_batch(records, fetched_at);
-        }
+    fn write_raw_batch(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
         // The four tags are the same for every line of the batch: serialize them once
         let mut prefix = self.serialize(&TagsOnly {
             source: &self.source,

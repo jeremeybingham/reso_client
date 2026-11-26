@@ -94,17 +94,17 @@ impl Page {
         Self::from_parts(records, body, headers, url)
     }
 
-    /// Build a page from a response body and keep each record's JSON text as sent (#162)
+    /// Build a page from a response body, keeping each record's JSON text as sent instead of
+    /// parsing it (#162)
     ///
-    /// Records are parsed as [`from_response`](Self::from_response) parses them; in addition
-    /// the returned [`RawRecords`] holds the text of each record, in the same order.
+    /// The returned page has no `records`; the returned [`RawRecords`] holds the text of each
+    /// record, in order. The body is scanned once; records are checked to be valid JSON but no
+    /// `Value` is built for them.
     pub(crate) fn from_raw_body(
         body: Vec<u8>,
         headers: &HeaderMap,
         url: &str,
     ) -> Result<(Self, RawRecords)> {
-        let parse_error =
-            |e: serde_json::Error| ResoError::Parse(format!("Failed to parse JSON: {}", e));
         let text = String::from_utf8(body)
             .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {}", e.utf8_error())))?;
         if !text.trim_start().starts_with('{') {
@@ -129,14 +129,14 @@ impl Page {
                 RawRecords::default(),
             ));
         };
-        let mut records = Vec::with_capacity(items.len());
-        let mut spans = Vec::with_capacity(items.len());
-        for item in items {
-            records.push(serde_json::from_str(item.get()).map_err(parse_error)?);
-            let start = item.get().as_ptr() as usize - text.as_ptr() as usize;
-            spans.push(start..start + item.get().len());
-        }
-        let page = Self::from_parts(records, JsonValue::Object(rest), headers, url);
+        let spans = items
+            .iter()
+            .map(|item| {
+                let start = item.get().as_ptr() as usize - text.as_ptr() as usize;
+                start..start + item.get().len()
+            })
+            .collect();
+        let page = Self::from_parts(Vec::new(), JsonValue::Object(rest), headers, url);
         Ok((page, RawRecords { text, spans }))
     }
 
@@ -178,21 +178,22 @@ impl Page {
 
 /// The JSON text of each record on a page, exactly as the server sent it
 ///
-/// Returned with the parsed records by
-/// [`ReplicationRun::next_batch_raw`](crate::ReplicationRun::next_batch_raw), in the same order,
-/// so a writer can copy a record's bytes instead of serializing the parsed value again. The text
-/// keeps the server's member order, number formatting, string escapes and any whitespace inside
-/// the record.
+/// Returned by [`ReplicationRun::next_batch_raw`](crate::ReplicationRun::next_batch_raw), so a
+/// writer can copy a record's bytes instead of parsing it and serializing it again. The text keeps
+/// the server's member order, number formatting, string escapes and any whitespace inside the
+/// record. Read a few members with [`record_fields`] or parse every record with
+/// [`values`](Self::values).
 ///
 /// # Examples
 ///
 /// ```no_run
-/// # use reso_client::{ResoClient, StandardReplication};
+/// # use reso_client::{record_fields, ResoClient, StandardReplication};
 /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
 /// let mut run = client.replicate(StandardReplication::new("Property", "ListingKey"));
-/// while let Some(batch) = run.next_batch_raw().await? {
-///     for (record, text) in batch.records.iter().zip(batch.raw.iter()) {
-///         println!("{} -> {}", record["ListingKey"], text);
+/// while let Some(records) = run.next_batch_raw().await? {
+///     for text in records.iter() {
+///         let [key] = record_fields(text, ["ListingKey"])?;
+///         println!("{} -> {}", key.map(|k| k.get()).unwrap_or("?"), text);
 ///     }
 /// }
 /// # Ok(())
@@ -205,6 +206,35 @@ pub struct RawRecords {
 }
 
 impl RawRecords {
+    /// Records from their JSON text, one string per record, in order
+    ///
+    /// For feeding a writer records read elsewhere (a file, a test). The text is not checked
+    /// here: [`values`](Self::values) and [`record_fields`] report a record that is not valid
+    /// JSON.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::RawRecords;
+    /// let records = RawRecords::from_texts([r#"{"ListingKey":"L1"}"#, r#"{"ListingKey":"L2"}"#]);
+    /// assert_eq!(records.len(), 2);
+    /// assert_eq!(records.get(1), Some(r#"{"ListingKey":"L2"}"#));
+    /// ```
+    pub fn from_texts<I, S>(texts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut text = String::new();
+        let mut spans = Vec::new();
+        for t in texts {
+            let start = text.len();
+            text.push_str(t.as_ref());
+            spans.push(start..text.len());
+        }
+        Self { text, spans }
+    }
+
     /// Number of records
     pub fn len(&self) -> usize {
         self.spans.len()
@@ -223,6 +253,141 @@ impl RawRecords {
     /// The text of each record, in order
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
         self.spans.iter().map(|r| &self.text[r.clone()])
+    }
+
+    /// Parse every record into a `serde_json::Value`, in order
+    ///
+    /// For consumers that need whole records. Costs what parsing the page into values costs; copy
+    /// the text or use [`record_fields`] where that is enough.
+    ///
+    /// # Errors
+    ///
+    /// [`ResoError::Parse`] when a record is not valid JSON (the page was checked when it was
+    /// read, so this does not happen for records from
+    /// [`next_batch_raw`](crate::ReplicationRun::next_batch_raw)).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::RawRecords;
+    /// let records = RawRecords::default();
+    /// assert!(records.values().unwrap().is_empty());
+    /// ```
+    pub fn values(&self) -> Result<Vec<JsonValue>> {
+        self.iter()
+            .map(|text| serde_json::from_str(text).map_err(parse_error))
+            .collect()
+    }
+}
+
+fn parse_error(e: serde_json::Error) -> ResoError {
+    ResoError::Parse(format!("Failed to parse JSON: {}", e))
+}
+
+/// Read some top-level members of one record's JSON text without parsing the rest
+///
+/// Returns the text of each named member's value, in the order of `names`, or `None` for a
+/// member the record does not have. The other members are skipped without building values, which
+/// is much cheaper than parsing the record into a `serde_json::Value` (#162). When a member
+/// appears twice, the last one wins, as when parsing into a `Value`. Parse a returned value with
+/// `serde_json::from_str(raw.get())`, or compare its text.
+///
+/// # Errors
+///
+/// [`ResoError::Parse`] when the text is not a JSON object.
+///
+/// # Examples
+///
+/// ```
+/// # use reso_client::record_fields;
+/// let text = r#"{"ListingKey":"L1","ListPrice":1.50,"Media":[{"MediaKey":"M1"}]}"#;
+/// let [key, price, missing] = record_fields(text, ["ListingKey", "ListPrice", "City"])?;
+/// assert_eq!(key.unwrap().get(), r#""L1""#);
+/// assert_eq!(price.unwrap().get(), "1.50");
+/// assert!(missing.is_none());
+/// # Ok::<(), reso_client::ResoError>(())
+/// ```
+pub fn record_fields<'a, const N: usize>(
+    text: &'a str,
+    names: [&str; N],
+) -> Result<[Option<&'a RawValue>; N]> {
+    let mut de = serde_json::Deserializer::from_str(text);
+    let fields = (&mut de)
+        .deserialize_map(FieldsVisitor { names })
+        .map_err(|e| ResoError::Parse(format!("Record is not a JSON object: {}", e)))?;
+    de.end().map_err(parse_error)?;
+    Ok(fields)
+}
+
+/// The text of a JSON string value, unescaped; `None` when the value is not a string
+///
+/// Borrows the text when the string has no escapes.
+pub(crate) fn raw_str(raw: &RawValue) -> Option<std::borrow::Cow<'_, str>> {
+    let text = raw.get();
+    if !text.starts_with('"') {
+        return None;
+    }
+    match serde_json::from_str::<&str>(text) {
+        Ok(s) => Some(std::borrow::Cow::Borrowed(s)),
+        Err(_) => serde_json::from_str::<String>(text)
+            .ok()
+            .map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Reads the members named in `names` as raw text and skips the rest (see [`record_fields`])
+struct FieldsVisitor<'n, const N: usize> {
+    names: [&'n str; N],
+}
+
+impl<'de, const N: usize> Visitor<'de> for FieldsVisitor<'_, N> {
+    type Value = [Option<&'de RawValue>; N];
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut out = [None; N];
+        while let Some(key) = map.next_key_seed(KeySeed)? {
+            match self.names.iter().position(|n| *n == key) {
+                Some(i) => out[i] = Some(map.next_value::<&'de RawValue>()?),
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// A member name, borrowed from the text unless it has escapes
+struct KeySeed;
+
+impl<'de> DeserializeSeed<'de> for KeySeed {
+    type Value = std::borrow::Cow<'de, str>;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Self::Value, D::Error> {
+        d.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for KeySeed {
+    type Value = std::borrow::Cow<'de, str>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a member name")
+    }
+
+    fn visit_borrowed_str<E>(self, v: &'de str) -> std::result::Result<Self::Value, E> {
+        Ok(std::borrow::Cow::Borrowed(v))
+    }
+
+    fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E> {
+        Ok(std::borrow::Cow::Owned(v.to_string()))
     }
 }
 
@@ -654,7 +819,9 @@ mod tests {
             Page::from_raw_body(body.as_bytes().to_vec(), &HeaderMap::new(), URL).unwrap();
         let parsed =
             Page::from_response(serde_json::from_str(body).unwrap(), &HeaderMap::new(), URL);
-        assert_eq!(page.records, parsed.records);
+        // No values are built: the records are only in `raw`
+        assert!(page.records.is_empty());
+        assert_eq!(raw.values().unwrap(), parsed.records);
         assert_eq!(page.body, parsed.body);
         assert_eq!(
             (page.count, page.next_link.clone()),
@@ -689,6 +856,24 @@ mod tests {
                 "{body}"
             );
             assert!(raw.is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn record_fields_reads_named_members_and_skips_the_rest() {
+        let text = r#"{"A":{"K":"inner"},"K":"L\"1","n":[1,{"K":2}],"K":"last","e\u0078":1.50}"#;
+        let [k, ex, missing] = record_fields(text, ["K", "ex", "none"]).unwrap();
+        assert_eq!(k.unwrap().get(), r#""last""#);
+        assert_eq!(ex.unwrap().get(), "1.50");
+        assert!(missing.is_none());
+        assert_eq!(raw_str(k.unwrap()).as_deref(), Some("last"));
+        let [esc] = record_fields(r#"{"K":"L\"1"}"#, ["K"]).unwrap();
+        assert_eq!(raw_str(esc.unwrap()).as_deref(), Some("L\"1"));
+        assert_eq!(raw_str(ex.unwrap()), None);
+
+        for bad in ["[1]", "1", r#"{"K":}"#, r#"{"K":1} x"#, ""] {
+            let err = record_fields(bad, ["K"]).unwrap_err();
+            assert!(matches!(err, ResoError::Parse(_)), "{bad}: {err:?}");
         }
     }
 

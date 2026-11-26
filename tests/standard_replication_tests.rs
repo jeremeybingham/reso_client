@@ -6,7 +6,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use reso_client::{Checkpoint, ClientConfig, ResoClient, ResoError, StandardReplication};
+use reso_client::{
+    record_fields, Checkpoint, ClientConfig, ResoClient, ResoError, StandardReplication,
+};
 use serde_json::{json, Value};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -120,7 +122,23 @@ async fn start(fake: FakeServer) -> (MockServer, ResoClient) {
     (server, client)
 }
 
+/// Walk a run with `next_batch` and again with `next_batch_raw`; both must give the same keys,
+/// final checkpoint and error, so every test here covers both paths (#162)
 async fn pull(client: &ResoClient, spec: StandardReplication) -> Result<Vec<String>, ResoError> {
+    let parsed = pull_parsed(client, spec.clone()).await;
+    let raw = pull_raw(client, spec).await;
+    match (&parsed, &raw) {
+        (Ok(a), Ok(b)) => assert_eq!(a, b, "keys from next_batch and next_batch_raw"),
+        (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "errors"),
+        _ => panic!("next_batch gave {parsed:?}, next_batch_raw gave {raw:?}"),
+    }
+    parsed.map(|(keys, _)| keys)
+}
+
+async fn pull_parsed(
+    client: &ResoClient,
+    spec: StandardReplication,
+) -> Result<(Vec<String>, Option<Checkpoint>), ResoError> {
     let mut run = client.replicate(spec);
     let mut keys = Vec::new();
     while let Some(batch) = run.next_batch().await? {
@@ -130,7 +148,22 @@ async fn pull(client: &ResoClient, spec: StandardReplication) -> Result<Vec<Stri
                 .map(|r| r["ListingKey"].as_str().unwrap().to_string()),
         );
     }
-    Ok(keys)
+    Ok((keys, run.checkpoint().cloned()))
+}
+
+async fn pull_raw(
+    client: &ResoClient,
+    spec: StandardReplication,
+) -> Result<(Vec<String>, Option<Checkpoint>), ResoError> {
+    let mut run = client.replicate(spec);
+    let mut keys = Vec::new();
+    while let Some(records) = run.next_batch_raw().await? {
+        for text in records.iter() {
+            let [key] = record_fields(text, ["ListingKey"])?;
+            keys.push(serde_json::from_str(key.unwrap().get()).unwrap());
+        }
+    }
+    Ok((keys, run.checkpoint().cloned()))
 }
 
 fn spec() -> StandardReplication {
@@ -341,4 +374,63 @@ async fn another_timestamp_field_drives_order_and_checkpoint() {
         .1
         .into_owned();
     assert!(orderby.starts_with("PhotosChangeTimestamp"), "{orderby}");
+}
+
+#[tokio::test]
+async fn escaped_text_numeric_keys_and_repeated_members_read_alike_on_both_paths() {
+    // Escapes in member names and values, a number key, a member given twice (the last wins) and
+    // a nested object holding the same names: next_batch_raw reads them as a parse would (#162)
+    let body = r#"{"value":[
+        {"ListingKey":"A/1","ModificationTimestamp":"2026-01-01T00:00:00Z",
+         "Nested":{"ListingKey":"X","ModificationTimestamp":"2030-01-01T00:00:00Z"}},
+        {"ListingKey":"B","ModificationTimestamp":"2026-01-02T00:00:00Z","ListingKey":"C"}
+    ]}"#;
+    let server = MockServer::start().await;
+    // The first request of each run; the re-query from the checkpoint has a $filter
+    Mock::given(wiremock::matchers::query_param_is_missing("$filter"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": []})))
+        .mount(&server)
+        .await;
+    let client = ResoClient::with_config(ClientConfig::new(server.uri(), "t")).unwrap();
+    let keys = pull(&client, spec()).await.unwrap();
+    assert_eq!(keys, ["A/1", "C"]);
+
+    let (_s, client) = serving(json!([
+        {"MemberKey": 7, "ModificationTimestamp": "2026-01-01T00:00:00Z"},
+        {"MemberKey": -8.5, "ModificationTimestamp": "2026-01-01T00:00:01Z"},
+    ]))
+    .await;
+    for raw in [false, true] {
+        let mut run = client.replicate(StandardReplication::new("Member", "MemberKey"));
+        let n = if raw {
+            run.next_batch_raw().await.unwrap().unwrap().len()
+        } else {
+            run.next_batch().await.unwrap().unwrap().len()
+        };
+        assert_eq!(n, 2);
+        assert_eq!(
+            run.checkpoint().unwrap(),
+            &Checkpoint::new("2026-01-01T00:00:01Z", json!(-8.5)),
+            "raw={raw}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_record_that_is_not_an_object_or_has_a_boolean_key_is_a_parse_error() {
+    for records in [
+        json!([1]),
+        json!([{"ListingKey": true, "ModificationTimestamp": "2026-01-01T00:00:00Z"}]),
+        json!([{"ListingKey": "A", "ModificationTimestamp": 20260101}]),
+    ] {
+        let (_s, client) = serving(records.clone()).await;
+        let parsed = pull_parsed(&client, spec()).await.unwrap_err();
+        let raw = pull_raw(&client, spec()).await.unwrap_err();
+        assert!(matches!(parsed, ResoError::Parse(_)), "{records}: {parsed}");
+        assert!(matches!(raw, ResoError::Parse(_)), "{records}: {raw}");
+    }
 }

@@ -34,12 +34,16 @@
 //!
 //! Not confirmed against a real MLS: the crate's tests use invented data and a mock server (#32).
 
+use std::borrow::Cow;
+use std::fmt;
+
+use serde_json::value::RawValue;
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
 use crate::client::ResoClient;
 use crate::error::{ResoError, Result};
-use crate::paging::RawRecords;
+use crate::paging::{raw_str, record_fields, RawRecords};
 
 /// Where a replication run stopped: the last record's timestamp and key
 ///
@@ -251,14 +255,29 @@ pub struct ReplicationRun<'a> {
     done: bool,
 }
 
-/// One batch from [`ReplicationRun::next_batch_raw`]: the parsed records and their JSON text
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct RawBatch {
-    /// The records, parsed (as [`ReplicationRun::next_batch`] returns them)
-    pub records: Vec<JsonValue>,
-    /// The JSON text of each record as the server sent it, in the same order as `records`
-    pub raw: RawRecords,
+/// The key of one record as the order check reads it: a parsed value or the record's text
+enum KeyRef<'r> {
+    Value(&'r JsonValue),
+    Raw(&'r RawValue),
+}
+
+impl KeyRef<'_> {
+    fn to_value(&self) -> Result<JsonValue> {
+        match self {
+            KeyRef::Value(v) => Ok((*v).clone()),
+            KeyRef::Raw(r) => serde_json::from_str(r.get())
+                .map_err(|e| ResoError::Parse(format!("Failed to parse JSON: {e}"))),
+        }
+    }
+}
+
+impl fmt::Display for KeyRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyRef::Value(v) => write!(f, "{v}"),
+            KeyRef::Raw(r) => f.write_str(r.get()),
+        }
+    }
 }
 
 impl ResoClient {
@@ -295,14 +314,17 @@ impl ReplicationRun<'_> {
     /// [`ResoError::Parse`] when a record has no usable timestamp or key; and the errors of
     /// [`ResoClient::fetch_page`].
     pub async fn next_batch(&mut self) -> Result<Option<Vec<JsonValue>>> {
-        Ok(self.next(false).await?.map(|b| b.records))
+        Ok(self.next(false).await?.map(|(records, _)| records))
     }
 
-    /// [`next_batch`](Self::next_batch) that also returns each record's JSON text as the server
-    /// sent it
+    /// [`next_batch`](Self::next_batch) that returns each record's JSON text as the server sent
+    /// it, without parsing the records into values
     ///
-    /// For writers that store records unchanged: copying [`RawBatch::raw`] keeps the server's
-    /// member order and number formatting and avoids serializing each record again (#162).
+    /// For writers that store records unchanged: copying the text keeps the server's member order
+    /// and number formatting, and skips building and dropping a `Value` per record, which is most
+    /// of a sync's CPU time (#162). The order check and the checkpoint read only the timestamp
+    /// and key members. Read other members with [`record_fields`](crate::record_fields) or parse
+    /// whole records with [`RawRecords::values`].
     ///
     /// # Errors
     ///
@@ -314,19 +336,22 @@ impl ReplicationRun<'_> {
     /// # use reso_client::{ResoClient, StandardReplication};
     /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut run = client.replicate(StandardReplication::new("Property", "ListingKey"));
-    /// while let Some(batch) = run.next_batch_raw().await? {
-    ///     for line in batch.raw.iter() {
+    /// while let Some(records) = run.next_batch_raw().await? {
+    ///     for line in records.iter() {
     ///         println!("{line}");
     ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn next_batch_raw(&mut self) -> Result<Option<RawBatch>> {
-        self.next(true).await
+    pub async fn next_batch_raw(&mut self) -> Result<Option<RawRecords>> {
+        Ok(self.next(true).await?.map(|(_, raw)| raw))
     }
 
-    async fn next(&mut self, keep_raw: bool) -> Result<Option<RawBatch>> {
+    /// The next non-empty page: parsed records, or (with `keep_raw`) the records' text only
+    async fn next(&mut self, keep_raw: bool) -> Result<Option<(Vec<JsonValue>, RawRecords)>> {
+        let ts_field = self.spec.timestamp_field.clone();
+        let key_field = self.spec.key_field.clone();
         while !self.done {
             let url = match self.next_link.take() {
                 Some(link) => link,
@@ -348,50 +373,59 @@ impl ReplicationRun<'_> {
             }
             self.next_link = page.next_link.clone();
 
-            if page.records.is_empty() {
+            let len = if keep_raw {
+                raw.len()
+            } else {
+                page.records.len()
+            };
+            if len == 0 {
                 // An empty page with a next link is odd but legal; follow it.
                 self.done = self.next_link.is_none();
                 continue;
             }
 
-            self.accept(&page.records)?;
+            if keep_raw {
+                self.accept(
+                    raw.iter()
+                        .map(|text| fields_of_text(text, &ts_field, &key_field)),
+                )?;
+            } else {
+                self.accept(
+                    page.records
+                        .iter()
+                        .map(|record| fields_of_value(record, &ts_field, &key_field)),
+                )?;
+            }
             debug!(
                 "replication batch of {} records, checkpoint {:?}",
-                page.records.len(),
-                self.checkpoint
+                len, self.checkpoint
             );
-            return Ok(Some(RawBatch {
-                records: page.records,
-                raw,
-            }));
+            return Ok(Some((page.records, raw)));
         }
         Ok(None)
     }
 
     /// Check a page's order and move the checkpoint to its last record
-    fn accept(&mut self, records: &[JsonValue]) -> Result<()> {
+    ///
+    /// `records` gives each record's timestamp text and key, or the error for a record without
+    /// them.
+    fn accept<'r>(
+        &mut self,
+        records: impl Iterator<Item = Result<(Cow<'r, str>, KeyRef<'r>)>>,
+    ) -> Result<()> {
         let ts_field = &self.spec.timestamp_field;
         let key_field = &self.spec.key_field;
         let start_key = self.checkpoint.as_ref().and_then(|c| c.key.clone());
         let start_ts = self.checkpoint.as_ref().map(|c| c.timestamp.clone());
 
-        let mut last: Option<(String, JsonValue)> = None;
+        let mut last: Option<(Cow<'r, str>, KeyRef<'r>)> = None;
         for record in records {
-            let ts_text = record
-                .get(ts_field)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ResoError::Parse(format!("Record has no {ts_field} string")))?;
-            let ts = parse_timestamp(ts_text).ok_or_else(|| {
+            let (ts_text, key) = record?;
+            let ts = parse_timestamp(&ts_text).ok_or_else(|| {
                 ResoError::Parse(format!(
                     "{ts_field} is not an RFC 3339 timestamp: {ts_text}"
                 ))
             })?;
-            let key = record
-                .get(key_field)
-                .filter(|v| v.is_string() || v.is_number())
-                .ok_or_else(|| {
-                    ResoError::Parse(format!("Record has no string or number {key_field}"))
-                })?;
 
             if let Some(newest) = self.newest {
                 if ts < newest {
@@ -402,23 +436,70 @@ impl ReplicationRun<'_> {
                 }
             }
             // A page that starts at the checkpoint itself would loop forever.
-            if start_ts.as_deref() == Some(ts_text) && start_key.as_ref() == Some(key) {
+            if start_ts.as_deref() == Some(&*ts_text)
+                && start_key.is_some()
+                && start_key == Some(key.to_value()?)
+            {
                 return Err(ResoError::OutOfOrder(format!(
                     "{key_field} {key} at {ts_text} was returned again after the checkpoint"
                 )));
             }
             self.newest = Some(ts);
-            last = Some((ts_text.to_string(), key.clone()));
+            last = Some((ts_text, key));
         }
 
         if let Some((timestamp, key)) = last {
             self.checkpoint = Some(Checkpoint {
-                timestamp,
-                key: Some(key),
+                timestamp: timestamp.into_owned(),
+                key: Some(key.to_value()?),
             });
         }
         Ok(())
     }
+}
+
+/// The timestamp text and key of a parsed record
+fn fields_of_value<'r>(
+    record: &'r JsonValue,
+    ts_field: &str,
+    key_field: &str,
+) -> Result<(Cow<'r, str>, KeyRef<'r>)> {
+    let ts = record
+        .get(ts_field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| no_timestamp(ts_field))?;
+    let key = record
+        .get(key_field)
+        .filter(|v| v.is_string() || v.is_number())
+        .ok_or_else(|| no_key(key_field))?;
+    Ok((Cow::Borrowed(ts), KeyRef::Value(key)))
+}
+
+/// The timestamp text and key of a record's JSON text, read without parsing the rest
+fn fields_of_text<'r>(
+    text: &'r str,
+    ts_field: &str,
+    key_field: &str,
+) -> Result<(Cow<'r, str>, KeyRef<'r>)> {
+    let [ts, key] = record_fields(text, [ts_field, key_field])?;
+    let ts = ts.and_then(raw_str).ok_or_else(|| no_timestamp(ts_field))?;
+    let key = key
+        .filter(|k| {
+            k.get()
+                .as_bytes()
+                .first()
+                .is_some_and(|c| *c == b'"' || *c == b'-' || c.is_ascii_digit())
+        })
+        .ok_or_else(|| no_key(key_field))?;
+    Ok((ts, KeyRef::Raw(key)))
+}
+
+fn no_timestamp(field: &str) -> ResoError {
+    ResoError::Parse(format!("Record has no {field} string"))
+}
+
+fn no_key(field: &str) -> ResoError {
+    ResoError::Parse(format!("Record has no string or number {field}"))
 }
 
 /// Parse `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)` into (seconds, nanoseconds) since

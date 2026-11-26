@@ -8,12 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `reso-client`: `ReplicationRun::next_batch_raw` returns a `RawBatch`: the parsed records plus `RawRecords`, each
-  record's JSON text as the server sent it (#162, lead 4). `next_batch` is unchanged. Turns on `serde_json`'s
-  `raw_value` feature (no new crate).
-- `reso-ingest`: `RecordWriter::write_raw_batch` (default: `write_batch`). `NdjsonWriter` copies each record's text
-  instead of serializing the parsed record again, and `sync` uses it. In the 100k-record load test: see
-  `docs/PERFORMANCE.md`.
+- `reso-client`: `ReplicationRun::next_batch_raw` returns `RawRecords`, each record's JSON text as the server sent
+  it, without parsing the records into `serde_json::Value`s (#162, lead 4); the order check and checkpoint read only
+  the timestamp and key members. `RawRecords::values` parses them when needed, `RawRecords::from_texts` builds one,
+  and `record_fields` reads a few top-level members of a record's text without parsing the rest. `next_batch` is
+  unchanged. Turns on `serde_json`'s `raw_value` feature (no new crate).
+- `reso-ingest`: `RecordWriter::write_raw_batch(raw, fetched_at)` (default: parse, then `write_batch`), and `sync`
+  uses it. `NdjsonWriter` copies each record's text; the repeated-key check and flag deletes read only their members
+  from it, so an NDJSON sync builds no `Value` per record. Parquet and `sync --media` parse the records as before. In
+  the 100k-record load test: see `docs/PERFORMANCE.md`.
 - `reso-ingest`: feature `mimalloc`, on by default, makes mimalloc the global allocator of the binary and the
   container image (#162, lead 3). In the 100k-record load test the sync uses about 25% less CPU and about twice the
   peak RSS (about 55 MiB instead of 24); see `docs/PERFORMANCE.md`. It adds C code (built by `cc`, linked statically).
