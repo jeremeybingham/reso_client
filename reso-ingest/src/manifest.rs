@@ -354,7 +354,7 @@ pub async fn sync_resource_media(
     client: &ResoClient,
     server: &str,
     resource: &str,
-    mut spec: StandardReplication,
+    spec: StandardReplication,
     writer: &mut dyn RecordWriter,
     store: &CheckpointStore,
     start_over: bool,
@@ -366,6 +366,26 @@ pub async fn sync_resource_media(
     } else {
         store.load(server, resource).await
     };
+    sync_from(
+        client, server, resource, spec, writer, store, setup, media, shutdown,
+    )
+    .await
+}
+
+/// [`sync_resource_media`] from a checkpoint the caller has already read (or cleared): `setup`
+/// is what [`CheckpointStore::load`] returned, so the store is not read twice per run (#162)
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_from(
+    client: &ResoClient,
+    server: &str,
+    resource: &str,
+    mut spec: StandardReplication,
+    writer: &mut dyn RecordWriter,
+    store: &CheckpointStore,
+    setup: Result<Option<Checkpoint>, IngestError>,
+    media: Option<&mut PageMedia>,
+    shutdown: &Shutdown,
+) -> ResourceEntry {
     match setup {
         Ok(Some(cp)) => spec = spec.from_checkpoint(cp),
         Ok(None) => {}

@@ -91,7 +91,7 @@ pub(crate) async fn reserve(
                 .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            if let Err(e) = sweep_stale(state, now, STALE_AFTER).await {
+            if let Err(e) = sweep_stale(state, now, STALE_AFTER, Some(&key)).await {
                 tracing::warn!(error = %e, "cannot look for stale run id reservations");
             }
         }
@@ -109,13 +109,15 @@ pub(crate) async fn sweep_stale(
     state: &dyn StateStore,
     now: u64,
     max_age: u64,
+    fresh: Option<&str>,
 ) -> Result<usize, IngestError> {
     let mut removed = 0;
-    for key in state.list().await? {
+    for key in state.list_dir("runs").await? {
         let Some(name) = key.strip_prefix("runs/") else {
             continue;
         };
-        if name.contains('/') || !name.ends_with(".reserved") {
+        // `fresh` is the reservation just made: no need to read it
+        if name.contains('/') || !name.ends_with(".reserved") || fresh == Some(key.as_str()) {
             continue;
         }
         let Some(found) = state.get(&key).await? else {
@@ -379,7 +381,7 @@ mod tests {
         state.put("mls.Property.json", b"{}").await.unwrap();
         state.put("runs/x/deep.reserved", b"").await.unwrap();
 
-        assert_eq!(sweep_stale(&state, at, STALE_AFTER).await.unwrap(), 1);
+        assert_eq!(sweep_stale(&state, at, STALE_AFTER, None).await.unwrap(), 1);
         assert!(state.get("runs/old.reserved").await.unwrap().is_none());
         assert!(
             state.get(&key).await.unwrap().is_some(),
@@ -389,7 +391,7 @@ mod tests {
         let legacy = state.get("runs/legacy.reserved").await.unwrap().unwrap();
         assert_eq!(reserved_at(&legacy.bytes), Some(at as f64));
         assert_eq!(
-            sweep_stale(&state, at + STALE_AFTER + 1, STALE_AFTER)
+            sweep_stale(&state, at + STALE_AFTER + 1, STALE_AFTER, None)
                 .await
                 .unwrap(),
             2

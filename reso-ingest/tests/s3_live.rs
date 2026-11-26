@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use reso_ingest::{FileSink, Provider, S3FileSink, S3Options, S3StateStore, StateStore};
+use reso_ingest::{FileSink, Provider, S3FileSink, S3Options, S3StateStore, StateStore, Written};
 
 fn options(tag: &str) -> Option<S3Options> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
@@ -69,6 +69,22 @@ async fn state_store_conditional_writes_on_a_real_server() {
     assert!(s.delete("a.json", Some(&v2.version)).await.unwrap());
     assert!(s.delete("media/x@1.json", None).await.unwrap());
     assert!(s.list().await.unwrap().is_empty());
+
+    // The version a write reports is the one a read sees, so a lease is released by one
+    // conditional delete (#162 lead 6); and a one-level listing leaves deeper keys out
+    let Written::Stored(Some(c)) = s.create_versioned("b.lock", b"one").await.unwrap() else {
+        panic!("create must report a version");
+    };
+    assert_eq!(s.get("b.lock").await.unwrap().unwrap().version, c);
+    let Written::Stored(Some(r)) = s.replace_versioned("b.lock", b"two", &c).await.unwrap() else {
+        panic!("replace must report a version");
+    };
+    assert_eq!(s.get("b.lock").await.unwrap().unwrap().version, r);
+    s.put("runs/x.reserved", b"{}").await.unwrap();
+    assert_eq!(s.list_dir("").await.unwrap(), ["b.lock"]);
+    assert_eq!(s.list_dir("runs").await.unwrap(), ["runs/x.reserved"]);
+    assert!(s.delete("b.lock", Some(&r)).await.unwrap());
+    assert!(s.delete("runs/x.reserved", None).await.unwrap());
 
     // Eight racing creators: exactly one wins
     let tasks: Vec<_> = (0..8)

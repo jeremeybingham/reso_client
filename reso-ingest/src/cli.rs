@@ -26,7 +26,7 @@ use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWrite
 use crate::error::IngestError;
 use crate::lease::{live_leases, Lease, LeaseHolder, LeaseOutcome};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
-use crate::manifest::{sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
+use crate::manifest::{sync_from, sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
 use crate::media::{
     page_pipeline, sync_media, MediaManifest, MediaOptions, MediaReport, PipelineOptions,
     DEFAULT_WORKERS,
@@ -1619,6 +1619,8 @@ pub(crate) async fn sync_server_with(
                     spec,
                     store: &store,
                     start_over: options.start_over,
+                    // The checkpoint read above, so the first try does not read it again
+                    loaded: saved.as_ref().ok().cloned(),
                     media: page_media.as_mut(),
                     shutdown: &options.shutdown,
                     span: &span,
@@ -1880,6 +1882,9 @@ struct Pull<'a> {
     spec: StandardReplication,
     store: &'a CheckpointStore,
     start_over: bool,
+    /// The checkpoint already read for this run; taken by the first try (a retry reads again,
+    /// since the first try may have saved one)
+    loaded: Option<Option<reso_client::Checkpoint>>,
     media: Option<&'a mut crate::media::PageMedia>,
     shutdown: &'a Shutdown,
     span: &'a tracing::Span,
@@ -1905,23 +1910,44 @@ impl Pull<'_> {
     }
 
     async fn once(&mut self, writer: &mut dyn RecordWriter, start_over: bool) -> ResourceEntry {
-        sync_resource_media(
-            self.client,
-            self.server,
-            self.resource,
-            self.spec.clone(),
-            writer,
-            self.store,
-            start_over,
-            self.media.as_deref_mut(),
-            self.shutdown,
-        )
-        .instrument(self.span.clone())
-        .await
+        let loaded = self.loaded.take();
+        match loaded {
+            Some(saved) if !start_over => {
+                sync_from(
+                    self.client,
+                    self.server,
+                    self.resource,
+                    self.spec.clone(),
+                    writer,
+                    self.store,
+                    Ok(saved),
+                    self.media.as_deref_mut(),
+                    self.shutdown,
+                )
+                .instrument(self.span.clone())
+                .await
+            }
+            _ => {
+                sync_resource_media(
+                    self.client,
+                    self.server,
+                    self.resource,
+                    self.spec.clone(),
+                    writer,
+                    self.store,
+                    start_over,
+                    self.media.as_deref_mut(),
+                    self.shutdown,
+                )
+                .instrument(self.span.clone())
+                .await
+            }
+        }
     }
 }
 
 /// Compare the server's `$metadata` with the snapshot of the previous run and save the new one
+/// when it differs
 ///
 /// The first run has nothing to compare with and only saves. Resources are the ones the
 /// configuration allows, not only the ones this run was asked for, so `--resource` runs do not
@@ -1937,10 +1963,13 @@ async fn schema_changes(
         .load_schema(&server.name)
         .await
         .map_err(|e| e.to_string())?;
-    store
-        .save_schema(&server.name, &now)
-        .await
-        .map_err(|e| e.to_string())?;
+    // Written only when it differs: a bucket write per run saved (#162)
+    if before.as_ref() != Some(&now) {
+        store
+            .save_schema(&server.name, &now)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     let changes = before.map(|b| b.changes_to(&now)).unwrap_or_default();
     for change in &changes {
         tracing::warn!(server = %server.name, %change, "schema changed");

@@ -18,7 +18,7 @@ use crate::output::RecordWriter;
 /// The shape of a server's `$metadata` that matters for downstream tables: for each resource
 /// its fields and their types, and the members of each enum type
 ///
-/// Saved after every run (see [`CheckpointStore::save_schema`](crate::CheckpointStore::save_schema))
+/// Saved by the first run and by any run that finds it changed (see [`CheckpointStore::save_schema`](crate::CheckpointStore::save_schema))
 /// and compared with the next one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaSnapshot {
