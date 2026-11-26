@@ -11,7 +11,8 @@
 #   loadtest-callgrind.txt        the callgrind run's loadtest output
 #   callgrind.out.<pid>           raw profile (open in kcachegrind/qcachegrind if wanted)
 #   annotate-self.txt, annotate-inclusive.txt   top functions by self and inclusive cost
-# PROFILE_FEATURES="a,b" builds with those reso-ingest features (e.g. mimalloc); they are added to the folder name.
+# PROFILE_FEATURES="a,b" builds with those reso-ingest features (e.g. parquet); they are added to the folder name.
+# PROFILE_NO_DEFAULT=1 adds --no-default-features (system allocator instead of mimalloc); folder name gets -nodefault.
 # Load-test output goes to $PROFILE_WORKDIR (default /dev/shm/reso-profile, keeps writes off disk) and is deleted.
 set -euo pipefail
 
@@ -26,11 +27,12 @@ workdir=${PROFILE_WORKDIR:-/dev/shm/reso-profile}
 commit=$(git rev-parse --short HEAD)
 dirty=$(git diff --quiet HEAD -- . ':!*.md' || echo "-dirty")
 features=${PROFILE_FEATURES:-}
-out="target/profile/$(date +%F)-${commit}${dirty}-${scenario}-${records}${features:+-${features//,/-}}"
+no_default=${PROFILE_NO_DEFAULT:+--no-default-features}
+out="target/profile/$(date +%F)-${commit}${dirty}-${scenario}-${records}${features:+-${features//,/-}}${no_default:+-nodefault}"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-cargo build --profile profiling -p reso-ingest --example loadtest ${features:+--features "$features"}
+cargo build --profile profiling -p reso-ingest --example loadtest ${no_default:+"$no_default"} ${features:+--features "$features"}
 bin="target/profiling/examples/loadtest"
 
 echo "== timed run: $scenario, $records records -> $out" >&2

@@ -8,9 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `reso-ingest`: optional feature `mimalloc` makes mimalloc the global allocator of the binary (#162, lead 3). In the
-  100k-record load test the sync uses about 25% less CPU and about twice the peak RSS (about 55 MiB instead of 24);
-  see `docs/PERFORMANCE.md`. Off by default; it adds C code (built by `cc`, linked statically).
+- `reso-ingest`: feature `mimalloc`, on by default, makes mimalloc the global allocator of the binary and the
+  container image (#162, lead 3). In the 100k-record load test the sync uses about 25% less CPU and about twice the
+  peak RSS (about 55 MiB instead of 24); see `docs/PERFORMANCE.md`. It adds C code (built by `cc`, linked statically).
+  Build with `--no-default-features` for the system allocator.
 
 ### Changed
 - `reso-client`: breaking: `Page::body` no longer holds the `value` array; the records are moved out of the body into

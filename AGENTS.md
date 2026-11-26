@@ -69,7 +69,7 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
   before 1.0 but are recorded in `CHANGELOG.md` with a version bump.
 - **No new dependencies without discussion.** Keep `reso-client` lean (its XML parser is `roxmltree`; OAuth2 and rate
   limiting are hand-written; its only test-only TLS crate is `rustls`, already in the tree via reqwest); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, `reqwest` for the webhook, `axum` for `serve`, `sha2` for purge records, `object_store` (`aws` and `gcp`) behind the `s3` feature, and
-  `arrow`/`parquet` behind the `parquet` feature, `mimalloc` behind the `mimalloc` feature).
+  `arrow`/`parquet` behind the `parquet` feature, `mimalloc` behind the default `mimalloc` feature).
 - Every bug fixed gets a regression test. Docs change in the same commit as the behaviour they describe.
 
 ## Where things are

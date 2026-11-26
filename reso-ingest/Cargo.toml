@@ -32,11 +32,12 @@ parquet = { version = "60", default-features = false, features = ["arrow", "snap
 # S3-compatible object storage and native GCS (optional feature `s3`)
 object_store = { version = "0.14", default-features = false, features = ["aws", "gcp"], optional = true }
 futures = { version = "0.3", default-features = false, optional = true }
-# Global allocator of the binary (optional feature `mimalloc`, #162 lead 3); C code, built by cc and linked statically
+# Global allocator of the binary (feature `mimalloc`, on by default, #162 lead 3); C code, built by cc and linked statically
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [features]
-default = []
+# `--no-default-features` builds with the system allocator
+default = ["mimalloc"]
 # Write Parquet files (`ParquetWriter`, `reso-ingest sync --format parquet`)
 parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-json", "dep:arrow-schema"]
 # Object storage for state and output: S3-compatible (AWS S3, R2, MinIO, RustFS) and native GCS; `object_store` with rustls, no OpenSSL

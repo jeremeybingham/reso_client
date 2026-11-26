@@ -65,8 +65,9 @@ serializing) are unchanged in absolute terms and are now the two big items: lead
 
 ## Lead 3: mimalloc (2026-11-26)
 
-`--features mimalloc` makes mimalloc the global allocator of the `reso-ingest` binary (and of the load test, so the
-sync child runs it). Run it with `PROFILE_FEATURES=mimalloc scripts/profile.sh clean 100000`. Timed runs, five of each,
+The `mimalloc` feature makes mimalloc the global allocator of the `reso-ingest` binary (and of the load test, so the
+sync child runs it). It is on by default (owner's decision, 2026-11-26), also in the container image; for the system
+allocator run `PROFILE_NO_DEFAULT=1 scripts/profile.sh clean 100000`. Timed runs, five of each,
 interleaved (100k) and one of each (1M), sync child only:
 
 | records | allocator | wall s | child CPU s (user + sys) | peak RSS MiB |
@@ -89,7 +90,7 @@ interleaved (100k) and one of each (1M), sync child only:
 - Cost: a new dependency (`mimalloc` and `libmimalloc-sys`, MIT), and C code compiled by `cc` and linked statically,
   like `ring` and `aws-lc` already are. cargo-deny passes; MSRV 1.89 check passes.
 
-The feature is off by default. Turning it on by default (or in the `Dockerfile` build) is the owner's decision.
+Rows above dated before this change used the system allocator; rows after it use mimalloc unless marked.
 
 ## Leads
 
@@ -99,8 +100,8 @@ Ranked by expected saving for the cost of the change. Sub-issues of #162 are lis
    the body. Saved more than the 11% expected (see above).
 2. **Done (#166).** The repeated-key check allocated a `String` per record (`reso-ingest/src/checks.rs`); it now
    hashes the borrowed string key. From about 6% to about 2%.
-3. **Allocator. Measured (above).** mimalloc behind the `mimalloc` feature: about 25 to 30% less CPU, about twice the
-   peak RSS. On by default or in the image: the owner's call.
+3. **Allocator. Measured (above).** mimalloc, default feature `mimalloc` (also in the image): about 25 to 30% less CPU,
+   about twice the peak RSS.
 4. **Parse and serialize round trip for NDJSON.** Parsing into `Value` (32%) and serializing again (17%) could become a
    pass-through of each record's raw bytes (`serde_json` `raw_value`). A larger change: the writers, checks and
    checkpoint code read fields from `Value`. Parquet needs the parsed values anyway.
