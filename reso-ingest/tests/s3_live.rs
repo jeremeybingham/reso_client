@@ -113,6 +113,27 @@ async fn sink_uploads_small_and_multipart_files_on_a_real_server() {
         .unwrap()
         .unwrap();
     assert!(back.bytes == data);
+
+    // List, read and delete, as `purge` does (#139); deeper keys are not listed
+    let store = S3StateStore::new(&o).unwrap();
+    assert!(store.create("sub/deeper.json", b"{}").await.unwrap());
+    assert_eq!(
+        sink.list().unwrap(),
+        vec![
+            ("big.ndjson".to_string(), data.len() as u64),
+            ("small.ndjson".to_string(), 8)
+        ]
+    );
+    let copy = dir.join("copy");
+    assert!(sink.get_file("small.ndjson", &copy).unwrap());
+    assert_eq!(std::fs::read(&copy).unwrap(), b"{\"a\":1}\n");
+    assert!(!sink.get_file("missing.ndjson", &copy).unwrap());
+    for name in ["small.ndjson", "big.ndjson"] {
+        assert!(sink.delete(name).unwrap());
+        assert!(!sink.exists(name).unwrap());
+    }
+    assert!(sink.list().unwrap().is_empty());
+    store.delete("sub/deeper.json", None).await.unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

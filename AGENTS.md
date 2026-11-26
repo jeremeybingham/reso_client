@@ -86,10 +86,10 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature)
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore
-  src/sink.rs       FileSink (put_file, exists), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
+  src/sink.rs       FileSink (put_file, exists; list, get_file, delete for purge, #139), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
   src/s3.rs         S3Options, Provider, S3StateStore, S3FileSink: state and data files in an S3-compatible or GCS bucket via `object_store` (feature `s3`; `--s3-*` and `--gcs-bucket` options, #107, #130)
   src/audit.rs      AccessLog, AccessEntry: append-only `audit/access.ndjson`, one line per resource pull (#93); per-run copy to the sink
-  src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93)
+  src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93); in a bucket too (#139)
   src/runs.rs       run id reservation in the state store (stale ones swept after 7 days), manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
   src/checkpoint.rs CheckpointStore: checkpoints, key sets (sorted lines, `.keys.ndjson`), event sequences, schema snapshots in a StateStore
   src/keyset.rs     ExternalSorter, diff: key sets at millions of keys, sorted in spilled chunks and diffed by merge (#87); stale scratch sweep (#134)
@@ -110,7 +110,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/error.rs      IngestError
   examples/loadtest.rs  load-test harness (#90): fake server with 1M records, faults, kill and resume; results in LOADTEST.md
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
-  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
+  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a `purge` in the bucket, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
                     log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; audit_tests.rs for the access log; purge_tests.rs for purge; lease_tests.rs for held feeds; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon;
                     secret_rotation.rs for rotated secret files and no secrets in logs, own binary)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),

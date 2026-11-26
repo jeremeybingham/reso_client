@@ -206,7 +206,8 @@ enum Command {
     /// A dry run by default: lists what would go. With --execute (and --by) it deletes, then writes
     /// a purge record with its SHA-256 to <out>/audit/ and a line to the access log. Data files are
     /// found by their source tag and the run manifests. Refuses while another process holds a lease
-    /// on one of the server's feeds. The access log and run manifests are kept. Local storage only.
+    /// on one of the server's feeds. The access log and run manifests are kept. With a bucket, data
+    /// files and state are deleted there (media files stay local) and the record is copied to it.
     Purge {
         /// The server to purge (its name in the configuration and the `source` tag)
         #[arg(long)]
@@ -363,18 +364,6 @@ impl Args {
             allow_http: s.s3_allow_http,
             single_delete: s.s3_single_delete,
         })
-    }
-
-    /// Whether state and data files are in a bucket
-    fn in_bucket(&self) -> bool {
-        #[cfg(feature = "s3")]
-        {
-            self.storage.s3_bucket.is_some() || self.storage.gcs_bucket.is_some()
-        }
-        #[cfg(not(feature = "s3"))]
-        {
-            false
-        }
     }
 
     /// The state store: the bucket with `--s3-bucket` or `--gcs-bucket`, else the state directory
@@ -1685,13 +1674,6 @@ fn describe(metadata: &Metadata, resources: &[String]) -> Value {
 
 /// `purge`: a dry run, or with `by` set, the purge itself
 async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    if args.in_bucket() {
-        let _ = writeln!(
-            err,
-            "error: purge works on local storage only; a bucket needs delete and list on the sink (#139)"
-        );
-        return 2;
-    }
     let Some(server) = args.servers.first().cloned() else {
         return 2;
     };
@@ -1700,10 +1682,20 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
         .media_dir
         .clone()
         .unwrap_or_else(|| out_dir.join("media"));
-    let state: Arc<dyn StateStore> = Arc::new(FileStateStore::new(args.state()));
+    // With a bucket, state and data files are there; media files and the audit log stay local
+    let (state, sink) = match (args.state_store(), args.file_sink()) {
+        (Ok(state), Ok(sink)) => (state, sink),
+        (Err(e), _) | (_, Err(e)) => {
+            let _ = writeln!(err, "error: {e}");
+            return 2;
+        }
+    };
+    let files = sink.as_deref();
     let Some(by) = by else {
         let plan =
-            match crate::purge::plan_purge(&server, &out_dir, &media_dir, state.as_ref()).await {
+            match crate::purge::plan_purge(&server, &out_dir, files, &media_dir, state.as_ref())
+                .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = writeln!(err, "error: {e}");
@@ -1717,7 +1709,7 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
         print_plan(out, &plan);
         return 0;
     };
-    match crate::purge::execute_purge(&server, &out_dir, &media_dir, &state, &by).await {
+    match crate::purge::execute_purge(&server, &out_dir, files, &media_dir, &state, &by).await {
         Ok(crate::purge::PurgeOutcome::Held(held)) => {
             for (key, holder) in held {
                 let _ = writeln!(err, "error: {} is {holder}", state.location(&key));
@@ -1732,6 +1724,8 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
             record,
             path,
             sha256,
+            delivered,
+            delivery_error,
         }) => {
             let _ = writeln!(
                 out,
@@ -1743,17 +1737,26 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
                 record.state_keys.len(),
                 path.display()
             );
+            for at in &delivered {
+                let _ = writeln!(out, "copy {at}");
+            }
             for name in &record.not_purged {
                 let _ = writeln!(
                     out,
                     "not purged (no source tag or manifest names it): {name}"
                 );
             }
+            if let Some(e) = &delivery_error {
+                let _ = writeln!(
+                    err,
+                    "error: copying the purge record to the bucket: {e} (the local record and access line are written)"
+                );
+            }
             if let Some(e) = &record.error {
                 let _ = writeln!(err, "error: {e}");
                 return 1;
             }
-            0
+            i32::from(delivery_error.is_some())
         }
         Err(e) => {
             let _ = writeln!(err, "error: {e}");

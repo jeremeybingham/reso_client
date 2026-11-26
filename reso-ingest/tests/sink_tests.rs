@@ -175,3 +175,38 @@ fn local_dir_sink_copies_and_refuses_to_overwrite() {
         .put_file("mls.Property.r1.0001.ndjson", &again)
         .is_err());
 }
+
+#[test]
+fn a_directory_sink_lists_reads_and_deletes() {
+    let dir = TempDir::new("list");
+    let sink = LocalDirSink::new(dir.0.join("d")).unwrap();
+    let src = dir.0.join("src");
+    std::fs::write(&src, b"abc").unwrap();
+    sink.put_file("b.ndjson", &src).unwrap();
+    sink.put_file("a.json", &src).unwrap();
+    std::fs::create_dir_all(dir.0.join("d/sub")).unwrap();
+    assert_eq!(
+        sink.list().unwrap(),
+        vec![("a.json".to_string(), 3), ("b.ndjson".to_string(), 3)]
+    );
+    let copy = dir.0.join("copy");
+    assert!(sink.get_file("a.json", &copy).unwrap());
+    assert_eq!(std::fs::read(&copy).unwrap(), b"abc");
+    assert!(!sink.get_file("missing", &copy).unwrap());
+    assert!(sink.delete("a.json").unwrap());
+    assert!(!sink.delete("a.json").unwrap());
+    assert_eq!(sink.local_path("b.ndjson"), Some(dir.0.join("d/b.ndjson")));
+    // A directory that does not exist lists nothing and is not created
+    let missing = LocalDirSink::existing(dir.0.join("nope"));
+    assert!(missing.list().unwrap().is_empty());
+    assert!(!dir.0.join("nope").exists());
+}
+
+#[test]
+fn a_sink_that_only_takes_files_refuses_to_list_or_delete() {
+    let sink = MemorySink::default();
+    assert!(sink.list().is_err());
+    assert!(sink.delete("x").is_err());
+    assert!(sink.get_file("x", Path::new("/nonexistent")).is_err());
+    assert_eq!(sink.local_path("x"), None);
+}
