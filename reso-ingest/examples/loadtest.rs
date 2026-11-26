@@ -27,6 +27,10 @@
 //!   Member` runs every second against a small feed that grows. Checks every record, the
 //!   `##progress` lines and the resumed count, that the backfill keeps to its share of the
 //!   requests, and that the Member syncs used the rest and kept finishing. Not in `all`.
+//! - `incremental`: one full sync, then `--quiet-runs` syncs that find nothing new, each timed
+//!   as a whole process: the fixed cost of a scheduled run (start-up, `$metadata`, lease, state and
+//!   manifest writes, and bucket round trips with `--sync-args "--s3-bucket ..."`) (#162). Not in
+//!   `all`.
 //! - `media-index`: the media index alone (#149), in this process, no server: `--records` media
 //!   records arrive in pages of `--page-size`; after each page the downloads of the page before
 //!   finish and the index is saved, as `sync --media` does. Prints the save time and bytes per
@@ -76,7 +80,7 @@ struct Args {
     /// Bytes of invented remarks text per record (record size)
     #[arg(long, default_value_t = 400)]
     remarks_bytes: usize,
-    /// clean, faults, kill or all
+    /// clean, faults, kill or all; deletes, backfill, incremental and media-index run alone
     #[arg(long, default_value = "all")]
     scenario: String,
     /// Share of /Property requests that get a fault in the `faults` scenario, in percent
@@ -109,9 +113,18 @@ struct Args {
     /// `backfill`: Member records the server adds each second
     #[arg(long, default_value_t = 50)]
     members_per_second: u64,
+    /// `incremental`: syncs after the first pull that find nothing new, each timed
+    #[arg(long, default_value_t = 10)]
+    quiet_runs: u32,
     /// Seed of the fault sequence
     #[arg(long, default_value_t = 7)]
     seed: u64,
+    /// Extra `sync` options for every run of `clean`, `faults` and `kill`, split on spaces, e.g.
+    /// `--sync-args "--format parquet"` (needs the `parquet` feature) (#162). `{unique}` becomes a
+    /// new value per scenario, for a fresh bucket prefix: `--s3-bucket B --s3-prefix lt/{unique}`
+    /// (needs the `s3` feature); the data files are then read back from the bucket for the check
+    #[arg(long, default_value = "", allow_hyphen_values = true)]
+    sync_args: String,
 }
 
 // Same allocator as the binary, so the sync child measures what `reso-ingest` would run
@@ -139,7 +152,7 @@ fn main() {
     }
     let scenarios: Vec<&str> = match args.scenario.as_str() {
         "all" => vec!["clean", "faults", "kill"],
-        s @ ("clean" | "faults" | "kill" | "deletes" | "backfill") => vec![s],
+        s @ ("clean" | "faults" | "kill" | "deletes" | "backfill" | "incremental") => vec![s],
         other => {
             eprintln!("unknown scenario {other}");
             std::process::exit(2);
@@ -799,15 +812,169 @@ struct Check {
     files: u64,
 }
 
+/// The `incremental` scenario after its first full pull: `--quiet-runs` syncs that find nothing
+/// new, each timed (whole child process: start-up, `$metadata`, lease, state and manifest writes,
+/// bucket round trips with a bucket). Prints and returns the times and server requests per run.
+async fn quiet_runs(args: &Args, fake: &Fake, dir: &Path, extra: &[&str]) -> Value {
+    let mut walls = Vec::new();
+    let mut requests = Vec::new();
+    let mut failed = 0;
+    for _ in 0..args.quiet_runs {
+        let before = fake.counters.requests.load(Ordering::Relaxed);
+        let started = Instant::now();
+        let r = run_sync(dir, fake, None, extra).await;
+        walls.push(started.elapsed().as_secs_f64());
+        requests.push(fake.counters.requests.load(Ordering::Relaxed) - before);
+        failed += u32::from(r.code != Some(0));
+    }
+    let mut sorted = walls.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+    eprintln!(
+        "   {} quiet runs: median {median:.3} s, min {:.3} s, max {:.3} s, {failed} failed, requests per run {:?}",
+        walls.len(),
+        sorted.first().copied().unwrap_or(0.0),
+        sorted.last().copied().unwrap_or(0.0),
+        requests
+    );
+    json!({
+        "runs": walls.len(),
+        "failed": failed,
+        "median_seconds": median,
+        "seconds": walls,
+        "requests": requests,
+    })
+}
+
+/// The value after `flag` in the sync options
+fn option<'a>(extra: &[&'a str], flag: &str) -> Option<&'a str> {
+    extra
+        .iter()
+        .position(|a| *a == flag)
+        .and_then(|i| extra.get(i + 1).copied())
+}
+
+/// When the sync wrote to a bucket (`--s3-bucket` or `--gcs-bucket` in `extra`), copy its data
+/// files into `out`, so `check_output` reads them as it reads local output
+#[cfg(feature = "s3")]
+fn fetch_bucket(extra: &[&str], out: &Path) {
+    use reso_ingest::{FileSink, Provider, S3FileSink, S3Options};
+    let (bucket, provider) = match (option(extra, "--s3-bucket"), option(extra, "--gcs-bucket")) {
+        (Some(b), _) => (b, Provider::S3),
+        (None, Some(b)) => (b, Provider::Gcs),
+        (None, None) => return,
+    };
+    // `sync` puts data files under `<prefix>/data/`
+    let prefix = option(extra, "--s3-prefix").unwrap_or("").trim_matches('/');
+    let data = if prefix.is_empty() {
+        "data".to_string()
+    } else {
+        format!("{prefix}/data")
+    };
+    let mut options = S3Options::new(bucket, data);
+    options.provider = provider;
+    options.endpoint = option(extra, "--s3-endpoint").map(str::to_string);
+    options.region = option(extra, "--s3-region").map(str::to_string);
+    options.allow_http = extra.contains(&"--s3-allow-http");
+    let sink = S3FileSink::new(&options).unwrap();
+    let started = Instant::now();
+    let mut n = 0;
+    tokio::task::block_in_place(|| {
+        for (name, _) in sink.list().unwrap() {
+            let access_log = name.starts_with("access."); // the access-log copy (#123)
+            if !access_log && (name.ends_with(".ndjson") || name.ends_with(".parquet")) {
+                let dest = out.join(&name);
+                std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                sink.get_file(&name, &dest).unwrap();
+                n += 1;
+            }
+        }
+    });
+    eprintln!(
+        "   fetched {n} data files from the bucket in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+#[cfg(not(feature = "s3"))]
+fn fetch_bucket(extra: &[&str], _out: &Path) {
+    assert!(
+        option(extra, "--s3-bucket").is_none() && option(extra, "--gcs-bucket").is_none(),
+        "bucket output: build the load test with --features s3"
+    );
+}
+
+/// Every file in `dir` and in its `--partition` tree (`source=`, `resource=`, `date=` folders), sorted
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if e.file_name().to_string_lossy().contains('=') {
+                    stack.push(p);
+                }
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `ListingKey` of every row of a Parquet output file (`record.ListingKey`)
+#[cfg(feature = "parquet")]
+fn parquet_keys(path: &Path) -> Vec<Option<String>> {
+    use arrow_array::{Array, StringArray, StructArray};
+    let file = std::fs::File::open(path).unwrap();
+    let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut keys = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        let record = batch
+            .column_by_name("record")
+            .and_then(|c| c.as_any().downcast_ref::<StructArray>())
+            .unwrap();
+        let col = record
+            .column_by_name("ListingKey")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        for i in 0..batch.num_rows() {
+            keys.push(
+                col.filter(|c| c.is_valid(i))
+                    .map(|c| c.value(i).to_string()),
+            );
+        }
+    }
+    keys
+}
+
+#[cfg(not(feature = "parquet"))]
+fn parquet_keys(_path: &Path) -> Vec<Option<String>> {
+    panic!("Parquet output found; build the load test with --features parquet")
+}
+
 fn check_output(out: &Path, n: u64) -> Check {
     let mut seen = vec![0u8; n as usize];
     let mut c = Check::default();
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(out)
-        .map(|r| r.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    paths.sort();
-    for path in paths {
+    for path in files_under(out) {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if name.ends_with(".parquet") {
+            c.files += 1;
+            c.bytes += std::fs::metadata(&path).map_or(0, |m| m.len());
+            for key in parquet_keys(&path) {
+                c.lines += 1;
+                match key.and_then(|k| k.trim_start_matches('L').parse::<u64>().ok()) {
+                    Some(k) if k < n => seen[k as usize] = seen[k as usize].saturating_add(1),
+                    _ => c.torn += 1,
+                }
+            }
+            continue;
+        }
         if !name.ends_with(".ndjson") {
             continue;
         }
@@ -923,6 +1090,9 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
     } else {
         vec![]
     };
+    let unique = format!("{}-{}", today(), std::process::id());
+    let sync_args = args.sync_args.replace("{unique}", &unique);
+    let extra: Vec<&str> = sync_args.split_whitespace().collect();
     let started = Instant::now();
     let mut runs = 0u32;
     let mut kills = 0u64;
@@ -933,7 +1103,7 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
     while runs < args.max_runs {
         runs += 1;
         let kill_at = kill_points.get(kills as usize).copied();
-        let r = run_sync(&dir, &fake, kill_at, &[]).await;
+        let r = run_sync(&dir, &fake, kill_at, &extra).await;
         peak = peak.max(r.peak_kib);
         if r.killed {
             kills += 1;
@@ -953,9 +1123,15 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
         eprintln!("   run {runs}: exit {:?}, running again", r.code);
     }
     let wall = started.elapsed().as_secs_f64();
+    fetch_bucket(&extra, &dir.join("out"));
     let check = check_output(&dir.join("out"), args.records);
     let repeat_bound = kills * args.page_size.min(args.server_cap);
-    let exact = scenario == "clean";
+    let quiet = if scenario == "incremental" && finished {
+        quiet_runs(args, &fake, &dir, &extra).await
+    } else {
+        Value::Null
+    };
+    let exact = scenario == "clean" || scenario == "incremental";
     let ok = finished
         && check.missing == 0
         && check.torn == 0
@@ -985,6 +1161,7 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
         "repeat_bound": if exact { 0 } else { repeat_bound },
         "torn_lines": check.torn,
         "server": fake.counters.json(),
+        "quiet_runs": quiet,
         "ok": ok,
     });
     let row = format!(

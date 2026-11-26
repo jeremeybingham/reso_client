@@ -43,6 +43,7 @@ Instructions are the sync child's, from callgrind. Top 5 by self cost name the f
 | 2026-11-26 | 5fbac1e (rerun, mimalloc default) | clean | 100000 | local (/dev/shm) | NDJSON | 0.52 | 192000 | 0.24 | 40.7 | 2.66 G | serde_json `format_escaped_str` 20.2%, `memcpy` 8.8%, `from_utf8` 5.7%, `memcmp` 5.4%, serde_json `skip_to_escape` 4.5% |
 | 2026-11-26 | 5fbac1e + raw NDJSON (lead 4) | clean | 100000 | local (/dev/shm) | NDJSON | 0.50 | 200000 | 0.23 | 72.9 | 2.19 G | serde_json `skip_to_escape` 11.0%, `memcpy` 8.5%, `memcmp` 6.5%, `skip_to_escape` (slice) 3.8%, `memchr` 3.2% |
 | 2026-11-26 | a56e62e, no `Value` (lead 4) | clean | 100000 | local (/dev/shm) | NDJSON | 0.43 | 233000 | 0.15 | 45.1 | 1.47 G | serde_json `skip_to_escape` 17.2%, `memcpy` 10.7%, `skip_to_escape` (slice) 6.0%, `ignore_str` 5.8%, `memchr` 4.8% |
+| 2026-11-26 | 8b07928 | clean | 100000 | local (/dev/shm) | Parquet | 0.71 | 141000 | 0.43 | 121.5 | 4.56 G | `memcpy` 9.4%, serde_json `skip_to_escape` 8.2%, `memcmp` 7.5%, `skip_to_escape` (slice) 2.9%, serde_json `parse_str` 2.5% |
 
 ## Baseline findings (2026-11-26, clean, 100k records, NDJSON, local)
 
@@ -163,6 +164,86 @@ interleaved, sync child only:
   splits records and reads their timestamp and key in one pass; small gain for a hand-rolled JSON reader, not planned.
 - Output is unchanged from the serialize half. Unconfirmed against a real server (#32).
 
+## Parquet, buckets and quiet runs (2026-11-26)
+
+The load test can now pass `sync` options (`--sync-args`): `--format parquet`, and an S3 or GCS bucket, with the
+output read back from the bucket for the check; and an `incremental` scenario times syncs that find nothing new
+(`reso-ingest/LOADTEST.md`). Same machine, main at 8b07928, `profiling` profile, mimalloc, sync child only.
+
+### Parquet
+
+| records | format | wall s | child CPU s (user + sys) | peak RSS MiB | output |
+|---|---|---|---|---|---|
+| 100000 | NDJSON | 0.41 to 0.43 | 0.15 to 0.16 | 49 to 51 | 76 MB, 1 file |
+| 100000 | Parquet | 0.69 to 0.71 | 0.42 to 0.44 | 121 to 149 | 2.9 MB, 1 file |
+| 1000000 | NDJSON | 4.07 | 1.45 | 57 | 759 MB, 3 files |
+| 1000000 | Parquet | 6.59 | 3.89 | 133 | 20 MB, 1 file |
+
+- A Parquet sync uses about 2.7 times the CPU of an NDJSON one (4.56 G instructions against 1.47 G at 100k). Where
+  they go, inclusive: 24% parsing each record into a `Value` (`RawRecords::values`; NDJSON skips this since lead 4),
+  10% serializing the rows into arrow-json's tape (`Row::serialize`), 10% turning the tape into columns
+  (`Decoder::flush`), and about 23% Parquet encoding (dictionary and plain byte arrays, Snappy). The rest is the copy
+  of each record in `record_value`, dropping the `Value` trees and the two scans the sync shares with NDJSON (not
+  broken down further).
+- Peak RSS is about 2.5 times NDJSON's: a row group is held until it is written.
+- The invented records repeat the same remarks, so Parquet compresses them 38 times; real records will compress far
+  less (#163 would make the data realistic). The NDJSON size is realistic for about 750-byte records.
+
+### Buckets
+
+100000 records, two runs of each, AWS S3 `us-east-1` and GCS `us-east1` test buckets, from this machine over a home
+connection. Every record was read back from the bucket and checked.
+
+| sink | format | wall s | child CPU s | peak RSS MiB |
+|---|---|---|---|---|
+| local (/dev/shm) | NDJSON | 0.41 to 0.43 | 0.15 to 0.16 | 49 to 51 |
+| AWS S3 | NDJSON | 18.98 to 19.20 | 0.58 | 127 to 139 |
+| GCS | NDJSON | 18.84 to 19.27 | 0.41 to 0.45 | 146 to 154 |
+| local (/dev/shm) | Parquet | 0.69 to 0.70 | 0.42 to 0.44 | 123 to 149 |
+| AWS S3 | Parquet | 3.18 to 3.20 | 0.54 to 0.55 | 148 to 161 |
+| GCS | Parquet | 4.12 to 4.26 | 0.54 | 163 to 167 |
+
+- The upload is all of the difference: 76 MB in about 18.5 s is about 4 MB/s, this connection's upload speed, not
+  the code's. The 2.9 MB Parquet runs take 2.5 to 3.5 s more than local, mostly the per-run round trips below. A
+  cloud VM near the bucket should upload much faster; not measured.
+- The pull waits while a file goes up (`FileSink::put_file` is synchronous, through `block_in_place`). With one file
+  per run that costs nothing that could be overlapped; at 1M records (three 256 MB NDJSON files) each rotation stalls
+  the pull for its upload. Overlapping them would save up to the shorter of pull and upload time, which matters only
+  when both are long; not done.
+- Peak RSS with a bucket is about 80 to 100 MiB above local for NDJSON, likely the multipart upload's 16 MiB parts in
+  flight (not checked).
+- NDJSON repeats every field name on every line, so compressed NDJSON (`.ndjson.gz` or zstd) would cut upload
+  time and bucket storage several times on a slow link. It needs a compression crate and changes the file names
+  readers expect: an owner decision, not done.
+
+### Quiet runs (incremental)
+
+`--scenario incremental --records 2000 --quiet-runs 10`: a sync that finds nothing new, as a whole process.
+
+| state and data | median s | least s | most s | server requests |
+|---|---|---|---|---|
+| local (/dev/shm) | 0.021 | 0.021 | 0.022 | 1 |
+| AWS S3 `us-east-1` | 1.76 | 1.72 | 2.73 | 1 |
+| GCS `us-east1` | 2.29 | 2.16 | 2.57 | 1 |
+
+Locally a quiet run is nothing. With a bucket it is round trips, one after another. Counted through a logging proxy
+in front of the local RustFS server, a quiet `sync` of one resource makes 24 bucket requests:
+
+| requests | what |
+|---|---|
+| 6 | the conditional-write check at start-up (`check_conditional_writes`: create, create again, replace with a wrong version, delete with a wrong version, head, delete) |
+| 4 | run id: reserve, head `manifest.<id>.json` and `media.<id>.json` in the sink, and at the end head + delete the reservation |
+| 2 | stale-reservation sweep: list all of `state/`, read each reservation (`runs::sweep_stale`; once an hour per process, so every run of a `sync` CronJob) |
+| 1 | list all of `state/` again to look for a running backfill's lease (`apply_rate_share`) |
+| 2 | schema snapshot: read, then written back even when unchanged |
+| 3 | lease: create, then read + conditional delete at release |
+| 2 | checkpoint read twice |
+| 3 | `runs/last.json`, the manifest and the access-log copy |
+| 1 | (first run only) the data file, after a head |
+
+1.76 s over 24 requests is about 70 ms each, sequential. In `serve` the start-up check runs once per process, so a
+quiet sync there is about 18 requests. Lead 6 below lists what could go.
+
 ## Leads
 
 Ranked by expected saving for the cost of the change. Sub-issues of #162 are listed in the issue as they open.
@@ -175,5 +256,18 @@ Ranked by expected saving for the cost of the change. Sub-issues of #162 are lis
    about twice the peak RSS.
 4. **Done: parse and serialize round trip for NDJSON (above).** The NDJSON writer copies each record's text (2.66 G
    to 2.19 G instructions), and no `Value` is built per record (2.19 G to 1.47 G). Parquet still parses.
-5. Not measured yet: Parquet conversion, bucket uploads (S3, GCS), many small incremental runs, `$metadata` and
-   startup. Those need the bucket targets and per-phase timings listed in #162.
+5. **Measured (above): Parquet.** 2.7 times NDJSON's CPU. The arrow-json decoder can read JSON text itself
+   (`Decoder::decode`), so each row could be handed over as the NDJSON line already built from the record's text,
+   skipping the `Value` parse, the copy, the drop and the tape serialization (about 45% of a Parquet sync's
+   instructions). Records whose values do not fit the declared column type (an object or array in a `Utf8` column,
+   which `conform` turns into JSON text today) would fall back to the current path, so the output stays the same.
+6. **Measured (above): bucket round trips per run.** 24 requests for a quiet sync. Could go without changing what is
+   checked: the second read of the checkpoint, the schema snapshot write when it has not changed, and the lease read
+   before its release (the version from the create is enough); the two listings of all of `state/` could list
+   `state/runs/` and the lease keys only, which matters once a bucket holds many feeds' key sets. Skipping the
+   start-up conditional-write check (6 requests) for a bucket that passed it recently would trade a safety check for
+   time: an owner decision.
+7. Bucket uploads: bound by the connection here, not the code (above). Overlapping uploads with the pull and
+   compressed NDJSON are possible later; not planned without a need from a real deployment.
+8. Not measured: `sync --media` (needs a fake file server in the load test), backfill client CPU against its pacing,
+   the musl image, and per-phase timings from log spans (the round-trip count above answers the incremental case).

@@ -21,7 +21,14 @@ are not a whole record.
 | `kill` | The sync gets SIGKILL `--kills` times (default 3) at even points of the pull; each time a new sync resumes | no record missing; at most one page repeated per kill |
 | `backfill` | `sync --backfill --resource Property` (#88) with `per_second = --limit-rps` (default 100) and `rate_percent = --rate-percent` (default 50), killed once halfway and resumed, while `sync --resource Member` runs every second against a Member feed that grows by `--members-per-second` (default 50). Not in `all` | every record, at most one page repeated; a `##progress` line with `sub=` and `eta=` per page, ending complete; the resumed run counts only the records left; Property requests within the backfill's share; every Member sync succeeds, using the rest of the limits |
 | `media-index` | The media index alone (#149), in the harness process with no server: `--records` media records arrive in pages of `--page-size`; after each page the page before is marked downloaded (file name, hash, ETag, size) and the index is saved with `save_changes`, as `sync --media` does. At each tenth of the run the whole index is also serialized and written once, which is what every save cost before #149. State goes to `--workdir` (use a tmpfs such as `/dev/shm/loadtest` to keep about 1.3 GB of writes per 1M records off the disk). Not in `all`; prints its own table | a fresh `MediaIndex::load` equals the index in memory |
+| `incremental` | One full sync, then `--quiet-runs` (default 10) syncs that find nothing new, each timed as a whole process: the fixed cost of a scheduled run (start-up, `$metadata`, lease, state and manifest writes, bucket round trips with a bucket). Prints the median, least and most seconds and the server requests per run (#162). Not in `all` | every record exactly once; every quiet run exits 0 |
 | `deletes` | `sync --deletes` key comparison only (a checkpoint at the last record is seeded, so no records are pulled): a baseline run, a run after every `--gone-every`-th record (default 100, so 1%) left the server, and a run with nothing new. Not in `all` | each gone key exactly once as a delete event, no other key |
+
+`--sync-args "..."` adds `sync` options to every run of `clean`, `faults`, `kill` and `incremental` (#162):
+`--format parquet` (build with `--features parquet`; the check reads the Parquet rows, in the `--partition` tree too),
+or a bucket, `--s3-bucket B --s3-region R --s3-prefix lt/{unique}` or `--gcs-bucket B --s3-prefix lt/{unique}` (build
+with `--features s3`; credentials from the environment as for `sync`). `{unique}` becomes a new value per scenario, so
+each starts with empty state. With a bucket the check downloads the data files from `<prefix>/data/` first.
 
 `--server-rps N` makes the server answer 429 above N requests a second. The configuration it writes uses
 `max_retries = 6`, `initial_backoff_ms = 100`, `max_backoff_ms = 2000`. Output goes to `target/loadtest/<scenario>`
