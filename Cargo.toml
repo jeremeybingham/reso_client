@@ -59,3 +59,10 @@ wiremock = "0.6"
 serial_test = "3.0"
 # TLS test server for the extra-CA test (#91); already in the tree through reqwest
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+# Profiling builds (#162, scripts/profile.sh): release code with line tables and symbols kept,
+# so callgrind and samples name functions and lines
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
