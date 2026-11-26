@@ -46,6 +46,10 @@ The script:
 Running it again re-copies the configuration and restarts both services. This is also how to pick up an edited rule or
 dashboard. The downloads are kept, so a re-run doesn't fetch them again.
 
+The install takes about 2.3 GB of disk (amd64, Prometheus 3.16.0 and Grafana 13.3.2), including the kept downloads.
+Prometheus data grows from there over its 30 days. `setup.sh remove` leaves all of it in place; delete the directory to
+free the space.
+
 ```sh
 systemctl --user status reso-prometheus reso-grafana
 journalctl --user -u reso-grafana
