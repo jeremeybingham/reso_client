@@ -42,6 +42,7 @@ Instructions are the sync child's, from callgrind. Top 5 by self cost name the f
 | 2026-11-26 | 6a04ded + mimalloc (lead 3) | clean | 100000 | local (/dev/shm) | NDJSON | 0.53 | 189000 | 0.27 | 55.2 | 2.66 G | serde_json `format_escaped_str` 20.2%, `memcpy` 8.8%, `from_utf8` 5.7%, `memcmp` 5.4%, serde_json `skip_to_escape` 4.5% |
 | 2026-11-26 | 5fbac1e (rerun, mimalloc default) | clean | 100000 | local (/dev/shm) | NDJSON | 0.52 | 192000 | 0.24 | 40.7 | 2.66 G | serde_json `format_escaped_str` 20.2%, `memcpy` 8.8%, `from_utf8` 5.7%, `memcmp` 5.4%, serde_json `skip_to_escape` 4.5% |
 | 2026-11-26 | 5fbac1e + raw NDJSON (lead 4) | clean | 100000 | local (/dev/shm) | NDJSON | 0.50 | 200000 | 0.23 | 72.9 | 2.19 G | serde_json `skip_to_escape` 11.0%, `memcpy` 8.5%, `memcmp` 6.5%, `skip_to_escape` (slice) 3.8%, `memchr` 3.2% |
+| 2026-11-26 | a56e62e, no `Value` (lead 4) | clean | 100000 | local (/dev/shm) | NDJSON | 0.43 | 233000 | 0.15 | 45.1 | 1.47 G | serde_json `skip_to_escape` 17.2%, `memcpy` 10.7%, `skip_to_escape` (slice) 6.0%, `ignore_str` 5.8%, `memchr` 4.8% |
 
 ## Baseline findings (2026-11-26, clean, 100k records, NDJSON, local)
 
@@ -99,8 +100,9 @@ Rows above dated before this change used the system allocator; rows after it use
 `sync` now takes each page from `ReplicationRun::next_batch_raw`, which returns the parsed records and each record's
 JSON text as the server sent it (`RawRecords`: spans into the page body, read with serde_json's `raw_value`, one scan
 of the `value` array). `NdjsonWriter::write_raw_batch` serializes the four tags once per batch and copies each
-record's text after them, instead of serializing every parsed record again. The records are still parsed: the
-replication order check, the checkpoint, the repeated-key check, flag deletes, media and Parquet read them.
+record's text after them, instead of serializing every parsed record again. The records were still parsed (until the
+parse half below): the replication order check, the checkpoint, the repeated-key check, flag deletes, media and
+Parquet read them.
 
 Same scenario as lead 3 (mimalloc on), main (5fbac1e) and the change built with the `profiling` profile, runs
 interleaved, sync child only:
@@ -125,10 +127,41 @@ interleaved, sync child only:
   on one line. Parquet output is unchanged.
 - Parquet syncs also use `next_batch_raw` and ignore the text; parsing did not get dearer, so they pay about nothing.
 
-Next for this lead: skip building `Value` trees for NDJSON. The consumers that read fields (order check and checkpoint:
-timestamp and key; repeated keys; flag deletes; media) would read them from the record text with a small borrowed
-deserializer instead. Parsing is 68% of the instructions now, and most of it is building and dropping the trees, so this
-could save up to about half the remaining CPU. It touches reso-client's replication API and every consumer above.
+### Parse half: no `Value` per record (2026-11-26)
+
+An NDJSON sync no longer builds a `serde_json::Value` for any record. `next_batch_raw` returns only `RawRecords` (the
+page body and each record's span); the readers that need a field read it from the record's text with
+`record_fields`, a deserializer that borrows the named top-level members as `&RawValue` and skips the rest:
+
+- the order check and checkpoint read the timestamp and key; only an escaped string, or a key whose timestamp ties with
+  the checkpoint's, is parsed;
+- the repeated-key check reuses the key spans the replication already found (`RawRecords::field`), so it does not
+  scan the records again;
+- flag deletes read the flag and key, only when configured.
+
+Each record is now scanned twice (the body split and the timestamp and key read) instead of being parsed into a tree
+and dropped. Parquet and `sync --media` still parse (`RawRecords::values`). A first version scanned a third time for
+the repeated-key check (1.93 G instructions, `record_fields` 26% of them); keeping the key spans removed it.
+
+Same scenario, main (e3832ad, with the serialize half) and the change (a56e62e), `profiling` profile, runs
+interleaved, sync child only:
+
+| records | build | runs | wall s | child CPU s (user + sys) | peak RSS MiB |
+|---|---|---|---|---|---|
+| 100000 | main | 5 | 0.81 to 0.93 | 0.24 to 0.30 | 47 to 77 |
+| 100000 | no `Value` | 5 | 0.72 to 0.80 | 0.16 to 0.20 | 47 to 49 |
+| 1000000 | main | 3 | 8.32 to 8.47 | 2.53 to 2.59 | 45 to 49 |
+| 1000000 | no `Value` | 3 | 7.93 to 8.12 | 1.92 to 1.93 | 45 to 51 |
+
+- Instructions fell from 2.19 G to 1.47 G (33%); child CPU about 30% at 100k and 25% at 1M. Since the baseline
+  (4.61 G, 0.42 s) that is 68% fewer instructions and about 60% less CPU.
+- Wall times in this set are higher than in the tables above for both builds (8.3 s against 5.1 s for main at 1M):
+  the machine was busier. The runs were interleaved, so compare the two builds within this table only.
+- Peak RSS stays in mimalloc's range; no `Value` trees means less to hold per page, but the page text dominates.
+- Left in the profile: serde_json's string scanning (`skip_to_escape`, `ignore_str`, about 30%) in the two scans,
+  copying text (`memcpy`, 11%) and the line-break check (`memchr`, 5%). Fewer scans would need a deserializer that
+  splits records and reads their timestamp and key in one pass; small gain for a hand-rolled JSON reader, not planned.
+- Output is unchanged from the serialize half. Unconfirmed against a real server (#32).
 
 ## Leads
 
@@ -140,7 +173,7 @@ Ranked by expected saving for the cost of the change. Sub-issues of #162 are lis
    hashes the borrowed string key. From about 6% to about 2%.
 3. **Allocator. Measured (above).** mimalloc, default feature `mimalloc` (also in the image): about 25 to 30% less CPU,
    about twice the peak RSS.
-4. **Parse and serialize round trip for NDJSON. Serialize half done (above).** The NDJSON writer copies each record's
-   text (2.66 G to 2.19 G instructions). Left: parsing into `Value` (68% now), see "Next for this lead".
+4. **Done: parse and serialize round trip for NDJSON (above).** The NDJSON writer copies each record's text (2.66 G
+   to 2.19 G instructions), and no `Value` is built per record (2.19 G to 1.47 G). Parquet still parses.
 5. Not measured yet: Parquet conversion, bucket uploads (S3, GCS), many small incremental runs, `$metadata` and
    startup. Those need the bucket targets and per-phase timings listed in #162.
