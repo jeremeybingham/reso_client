@@ -126,7 +126,7 @@ pub use runner::{run_servers, ServerReport};
 #[cfg(feature = "s3")]
 pub use s3::{Provider, S3FileSink, S3MediaStore, S3Options, S3StateStore};
 pub use secrets::ClientHandle;
-pub use serve::{Daemon, ServeOptions};
+pub use serve::{Daemon, ReloadSummary, ServeOptions};
 pub use shutdown::Shutdown;
 pub use sink::{FileSink, LocalDirSink};
 pub use state::{FileStateStore, StateStore, StoreFuture, Versioned};

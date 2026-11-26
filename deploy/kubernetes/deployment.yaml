@@ -26,8 +26,10 @@ spec:
       containers:
         - name: reso-ingest
           image: reso-ingest:latest                # your registry path
+          # --reload-every: an edited ConfigMap reaches the mounted file within a minute or so (not with
+          # subPath); serve then adds, removes, pauses or resumes feeds without a restart
           args: ["serve", "--config", "/config/servers.toml", "--out", "/data", "--listen", "0.0.0.0:9090",
-                 "--deletes", "--log-format", "json"]
+                 "--deletes", "--log-format", "json", "--reload-every", "1m"]
           ports:
             - { name: http, containerPort: 9090 }
           envFrom:

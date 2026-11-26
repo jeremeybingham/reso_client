@@ -22,6 +22,7 @@ exclude = ["OpenHouse"]                      # wins over include
 # deletes = { max_deletes = 5000, max_percent = 20 }   # hold a --deletes pass over these limits for review
 # interval = "1h"                            # `serve` only: how often to sync included resources with no interval of their own
 # concurrency = 2                            # `serve` only: feeds of this server syncing at once
+# paused = true                              # leave the whole server out of `sync` and `serve`
 
 # Settings for one resource (optional)
 # [server.resources.Property]
@@ -29,6 +30,7 @@ exclude = ["OpenHouse"]                      # wins over include
 # expand = ["Media"]                         # $expand on sync pulls
 # page_size = 1000                           # overrides the server's
 # interval = "2m"                            # `serve` only: how often to sync this resource
+# paused = true                              # leave this resource out
 
 [server.auth]
 type = "client_credentials"

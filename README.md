@@ -290,8 +290,9 @@ what is left needs a real server or someone else:
   ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
   ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
   ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), rate-limit budget and per-feed request counts
-  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)). Open: operating many feeds
-  ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness
+  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds: config directories,
+  pausing, `serve` reload, `reset`/`replay`/`history`, onboarding
+  ([#94](https://github.com/jeremeybingham/reso_client/issues/94)). Open: product readiness
   ([#95](https://github.com/jeremeybingham/reso_client/issues/95)). Built only on request: a Postgres state store, a
   stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"

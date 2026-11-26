@@ -242,6 +242,10 @@ enum Command {
         /// Only this resource; repeat for several (default: all the config allows)
         #[arg(long = "resource")]
         resources: Vec<String>,
+        /// Onboarding: instead of the model, check that the credentials can read each resource
+        /// (one record and its count) and print a starter configuration block in TOML
+        #[arg(long)]
+        starter: bool,
     },
     /// Delete one server's data files, media files and state when its licence ends
     ///
@@ -269,6 +273,76 @@ enum Command {
         /// Who runs the purge, for the purge record (required with --execute)
         #[arg(long, requires = "execute")]
         by: Option<String>,
+        #[command(flatten)]
+        storage: StorageArgs,
+    },
+    /// Delete one feed's checkpoint, so its next sync is a full load
+    ///
+    /// Takes the feed's lease while it works, so it refuses while a sync or `serve` is pulling
+    /// that feed. Prints the checkpoint it removed; exit code 1 when there was none.
+    Reset {
+        /// The server's name in the configuration
+        #[arg(long)]
+        server: String,
+        /// The resource (`Property`, `Member`, ...)
+        #[arg(long)]
+        resource: String,
+        /// Output directory (the state is in <out>/state)
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// Checkpoint directory (default: <out>/state)
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[command(flatten)]
+        storage: StorageArgs,
+    },
+    /// Move one feed's checkpoint back, so its next sync pulls again every record modified after
+    /// a time
+    ///
+    /// Sets the checkpoint to `--after` with no key: the next run asks for records whose
+    /// ModificationTimestamp is strictly later. Refuses a time later than the saved checkpoint
+    /// (that would skip records); with no checkpoint it sets the starting point of the first run.
+    /// Takes the feed's lease like `reset`. To pull a closed window of time without moving the
+    /// checkpoint, use `sync --backfill --from --to`.
+    Replay {
+        /// The server's name in the configuration
+        #[arg(long)]
+        server: String,
+        /// The resource (`Property`, `Member`, ...)
+        #[arg(long)]
+        resource: String,
+        /// RFC 3339 time, e.g. 2026-11-01T00:00:00Z; records modified after it are pulled again
+        #[arg(long)]
+        after: String,
+        /// Output directory (the state is in <out>/state)
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// Checkpoint directory (default: <out>/state)
+        #[arg(long)]
+        state: Option<PathBuf>,
+        #[command(flatten)]
+        storage: StorageArgs,
+    },
+    /// List past runs from their manifests, newest first, one line per feed
+    ///
+    /// Reads `manifest.*.json` in `--out`, or in the bucket's `<prefix>/data/` with a bucket.
+    /// `serve` keeps a manifest only for runs that pulled, deleted or failed something.
+    History {
+        /// Only this server
+        #[arg(long)]
+        server: Option<String>,
+        /// Only this resource
+        #[arg(long)]
+        resource: Option<String>,
+        /// How many runs to show (of those that match)
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Directory holding the manifests
+        #[arg(long, default_value = DEFAULT_OUT)]
+        out: PathBuf,
+        /// Not used: history reads no state. Present because the bucket options conflict with it
+        #[arg(long, hide = true)]
+        state: Option<PathBuf>,
         #[command(flatten)]
         storage: StorageArgs,
     },
@@ -703,6 +777,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             config,
             servers,
             resources,
+            starter,
         } => {
             let args = Args {
                 config: Some(config),
@@ -710,7 +785,11 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 resources,
                 ..Args::default()
             };
-            discover(args, out, err).await
+            if starter {
+                onboard(args, out, err).await
+            } else {
+                discover(args, out, err).await
+            }
         }
         Command::Purge {
             server,
@@ -731,6 +810,59 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             };
             let by = if execute { by } else { None };
             purge(args, by, out, err).await
+        }
+        Command::Reset {
+            server,
+            resource,
+            out: out_dir,
+            state,
+            storage,
+        } => {
+            let args = Args {
+                out: Some(out_dir),
+                state,
+                storage,
+                ..Args::default()
+            };
+            move_checkpoint(args, &server, &resource, None, out, err).await
+        }
+        Command::Replay {
+            server,
+            resource,
+            after,
+            out: out_dir,
+            state,
+            storage,
+        } => {
+            let args = Args {
+                out: Some(out_dir),
+                state,
+                storage,
+                ..Args::default()
+            };
+            move_checkpoint(args, &server, &resource, Some(&after), out, err).await
+        }
+        Command::History {
+            server,
+            resource,
+            limit,
+            out: out_dir,
+            state: _,
+            storage,
+        } => {
+            let args = Args {
+                out: Some(out_dir),
+                storage,
+                ..Args::default()
+            };
+            history(
+                args,
+                server.as_deref(),
+                resource.as_deref(),
+                limit,
+                out,
+                err,
+            )
         }
         Command::Status {
             out: out_dir,
@@ -2122,6 +2254,136 @@ async fn discover(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     i32::from(failed)
 }
 
+/// What `discover --starter` found about one resource
+struct Probe {
+    name: String,
+    key: Vec<String>,
+    /// The resource has a `ModificationTimestamp`, so it can be synced incrementally
+    incremental: bool,
+    /// `Ok(record count, when the server gave one)` or why the read failed
+    read: Result<Option<u64>, String>,
+}
+
+/// `discover --starter`: read $metadata and one record of each resource with the configured
+/// credentials, then print a starter `[[server]]` block per server
+async fn onboard(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let (config, servers) = match load_servers(&args, err) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let requested = args.resources.clone();
+    let reports = run_servers(servers, config.max_concurrent_servers, move |server| {
+        let requested = requested.clone();
+        async move {
+            let client = client_for(&server)?;
+            let metadata = client
+                .fetch_metadata_model()
+                .await
+                .map_err(|e| format!("cannot read $metadata: {e}"))?;
+            let (resources, missing) = select_resources(&server, &metadata, &requested);
+            if let Some(name) = missing.first() {
+                return Err(format!("resource `{name}` not available on this server"));
+            }
+            let mut probes = Vec::new();
+            for name in resources {
+                let ty = metadata.resource(&name);
+                let mut query = reso_client::QueryBuilder::new(&name).top(1).with_count();
+                if let Some(filter) = server.filter_for(&name) {
+                    query = query.filter(filter);
+                }
+                let read = match query.build() {
+                    Ok(q) => client
+                        .execute_page(&q)
+                        .await
+                        .map(|page| page.count)
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                probes.push(Probe {
+                    key: ty.map(|t| t.key.clone()).unwrap_or_default(),
+                    incremental: ty
+                        .is_some_and(|t| t.properties.iter().any(|p| p.name == TIMESTAMP_FIELD)),
+                    read,
+                    name,
+                });
+            }
+            Ok::<(ServerConfig, Vec<Probe>), String>((server, probes))
+        }
+    })
+    .await;
+
+    let mut failed = false;
+    for report in reports {
+        match report.result {
+            Ok((server, probes)) => {
+                failed |= probes.iter().all(|p| p.read.is_err());
+                let _ = write!(out, "{}", starter_block(&server, &probes));
+            }
+            Err(message) => {
+                failed = true;
+                let _ = writeln!(err, "[{}] FAILED: {message}", report.name);
+            }
+        }
+    }
+    i32::from(failed)
+}
+
+/// The starter TOML for one server: the readable, incremental resources in `include`, the others
+/// in comments with the reason
+fn starter_block(server: &ServerConfig, probes: &[Probe]) -> String {
+    let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
+    let readable = probes.iter().filter(|p| p.read.is_ok()).count();
+    let mut text = format!(
+        "# {}: $metadata read; {readable} of {} resources readable with these credentials\n",
+        server.name,
+        probes.len()
+    );
+    text.push_str(
+        "# Servers do not publish their rate limits in a standard way: copy the vendor's numbers\n\
+         # into [server.limits]. Keep the [server.auth] table of your draft (secrets are not printed).\n",
+    );
+    text.push_str(&format!(
+        "[[server]]\nname = {}\nbase_url = {}\n",
+        quote(&server.name),
+        quote(&server.base_url)
+    ));
+    if let Some(id) = &server.dataset_id {
+        text.push_str(&format!("dataset_id = {}\n", quote(id)));
+    }
+    if let Some(filter) = &server.filter {
+        text.push_str(&format!("filter = {}\n", quote(filter)));
+    }
+    let include: Vec<String> = probes
+        .iter()
+        .filter(|p| p.read.is_ok() && p.incremental)
+        .map(|p| quote(&p.name))
+        .collect();
+    if include.is_empty() {
+        // An empty include means every resource, so leave it out with the reason
+        text.push_str("# include = []: no resource is both readable and incremental\n");
+    } else {
+        text.push_str(&format!("include = [{}]\n", include.join(", ")));
+    }
+    for p in probes {
+        let key = if p.key.is_empty() {
+            "no key".to_string()
+        } else {
+            format!("key {}", p.key.join(", "))
+        };
+        let note = match &p.read {
+            Err(e) => format!("left out, not readable: {e}"),
+            Ok(_) if !p.incremental => {
+                format!("left out, no {TIMESTAMP_FIELD} to sync from")
+            }
+            Ok(Some(n)) => format!("{n} records"),
+            Ok(None) => "record count not given".to_string(),
+        };
+        text.push_str(&format!("# {}: {key}; {note}\n", p.name));
+    }
+    text.push_str("\n[server.limits]\n# per_second = 2\n# per_hour = 5000\n# per_day = 40000\n\n");
+    text
+}
+
 fn describe(metadata: &Metadata, resources: &[String]) -> Value {
     let resources: Vec<Value> = resources
         .iter()
@@ -2403,6 +2665,303 @@ async fn status(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     0
 }
 
+// ---------------------------------------------------------------- reset, replay, history
+
+/// `reset` (`after` is `None`) or `replay`: clear or move back one feed's checkpoint under its lease
+async fn move_checkpoint(
+    args: Args,
+    server: &str,
+    resource: &str,
+    after: Option<&str>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    if let Some(after) = after {
+        if crate::metrics::parse_rfc3339(after).is_none() {
+            let _ = writeln!(
+                err,
+                "error: --after `{after}` is not an RFC 3339 time (e.g. 2026-11-01T00:00:00Z)"
+            );
+            return 2;
+        }
+    }
+    let state = match args.writable_state_store().await {
+        Ok(v) => v,
+        Err(e) => return usage_error(err, &e),
+    };
+    let lease = match Lease::acquire(&state, server, resource, LEASE_TTL).await {
+        Ok(LeaseOutcome::Acquired(lease)) => lease,
+        Ok(LeaseOutcome::Held(holder)) => {
+            let _ = writeln!(
+                err,
+                "error: {server}/{resource} is being pulled ({holder}); try again when it is done"
+            );
+            return 1;
+        }
+        Err(e) => {
+            let _ = writeln!(err, "error: {e}");
+            return 1;
+        }
+    };
+    let store = CheckpointStore::with_store(Arc::clone(&state));
+    let code = match change_checkpoint(&store, server, resource, after).await {
+        Ok((old, message)) => {
+            let old = old.map_or("none".to_string(), |c| describe_checkpoint(&c));
+            let _ = writeln!(out, "{server}/{resource}: checkpoint was {old}");
+            let _ = writeln!(out, "{server}/{resource}: {message}");
+            0
+        }
+        Err((code, message)) => {
+            let _ = writeln!(err, "error: {server}/{resource}: {message}");
+            code
+        }
+    };
+    lease.release().await;
+    code
+}
+
+/// The change itself: `Ok((old checkpoint, what was done))` or `Err((exit code, message))`
+async fn change_checkpoint(
+    store: &CheckpointStore,
+    server: &str,
+    resource: &str,
+    after: Option<&str>,
+) -> Result<(Option<reso_client::Checkpoint>, String), (i32, String)> {
+    let old = store
+        .load(server, resource)
+        .await
+        .map_err(|e| (1, e.to_string()))?;
+    let Some(after) = after else {
+        if old.is_none() {
+            return Err((1, "no checkpoint to reset".to_string()));
+        }
+        store
+            .clear(server, resource)
+            .await
+            .map_err(|e| (1, e.to_string()))?;
+        return Ok((
+            old,
+            "checkpoint removed; the next sync is a full load".to_string(),
+        ));
+    };
+    if let Some(current) = &old {
+        let later = crate::metrics::parse_rfc3339(&current.timestamp)
+            .zip(crate::metrics::parse_rfc3339(after))
+            .is_some_and(|(current, after)| after > current);
+        if later {
+            return Err((
+                1,
+                format!(
+                    "--after {after} is later than the checkpoint {}; replay only moves back",
+                    current.timestamp
+                ),
+            ));
+        }
+    }
+    let checkpoint = reso_client::Checkpoint {
+        timestamp: after.to_string(),
+        key: None,
+    };
+    store
+        .save(server, resource, &checkpoint)
+        .await
+        .map_err(|e| (1, e.to_string()))?;
+    Ok((
+        old,
+        format!("checkpoint set to {after}; the next sync pulls records modified after it"),
+    ))
+}
+
+fn describe_checkpoint(c: &reso_client::Checkpoint) -> String {
+    match &c.key {
+        Some(key) => format!("{} key {key}", c.timestamp),
+        None => c.timestamp.clone(),
+    }
+}
+
+/// `history`: past runs from the manifests, newest first
+fn history(
+    args: Args,
+    server: Option<&str>,
+    resource: Option<&str>,
+    limit: usize,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> i32 {
+    let sink = match args.file_sink() {
+        Ok(v) => v,
+        Err(e) => return usage_error(err, &e),
+    };
+    let manifests = match read_manifests(&args.out(), sink.as_deref()) {
+        Ok(v) => v,
+        Err(message) => {
+            let _ = writeln!(err, "error: {message}");
+            return 1;
+        }
+    };
+    let mut shown = 0;
+    for (name, manifest) in manifests.iter().rev() {
+        if shown == limit {
+            break;
+        }
+        let lines = history_lines(manifest, server, resource);
+        if lines.is_empty() {
+            continue;
+        }
+        shown += 1;
+        let run = manifest
+            .get("run_id")
+            .and_then(Value::as_str)
+            .unwrap_or(name);
+        let started = manifest
+            .get("started_at")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let finished = match manifest.get("finished_at").and_then(Value::as_str) {
+            Some(f) => format!("finished {f}"),
+            None => "not finished".to_string(),
+        };
+        let _ = writeln!(out, "{run}: started {started}, {finished}");
+        for line in lines {
+            let _ = writeln!(out, "  {line}");
+        }
+    }
+    if shown == 0 {
+        let _ = writeln!(out, "no runs found");
+    }
+    0
+}
+
+/// One line per feed (and per failed server) of `manifest` that matches the filters
+fn history_lines(manifest: &Value, server: Option<&str>, resource: Option<&str>) -> Vec<String> {
+    let text = |v: &Value, field: &str| {
+        v.get(field)
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    let mut lines = Vec::new();
+    for r in manifest
+        .get("resources")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (s, res) = (text(r, "server"), text(r, "resource"));
+        if server.is_some_and(|f| f != s) || resource.is_some_and(|f| f != res) {
+            continue;
+        }
+        let outcome = match r.get("error").and_then(Value::as_str) {
+            Some(e) => format!("FAILED: {e}"),
+            None if r.get("interrupted").and_then(Value::as_bool) == Some(true) => {
+                "interrupted".to_string()
+            }
+            None => "ok".to_string(),
+        };
+        let count = |field: &str| r.get(field).and_then(Value::as_u64).unwrap_or(0);
+        let backfill = if r.get("backfill").is_some_and(|b| !b.is_null()) {
+            " (backfill)"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "{s}/{res}{backfill}: {} records, {} deletes, {outcome}",
+            count("records"),
+            count("deletes")
+        ));
+    }
+    if resource.is_none() {
+        for f in manifest
+            .get("server_failures")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let s = text(f, "server");
+            if server.is_some_and(|filter| filter != s) {
+                continue;
+            }
+            lines.push(format!("{s}: FAILED: {}", text(f, "error")));
+        }
+    }
+    lines
+}
+
+/// Every run manifest, oldest first (run ids sort by time): from the sink when there is one, else
+/// from `dir`. Each is `(file name, parsed JSON)`
+fn read_manifests(
+    dir: &Path,
+    sink: Option<&dyn crate::sink::FileSink>,
+) -> Result<Vec<(String, Value)>, String> {
+    let is_manifest = |n: &str| manifest_run_id(n).is_some();
+    let mut found = Vec::new();
+    if let Some(sink) = sink {
+        let names: Vec<String> = sink
+            .list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|n| is_manifest(n))
+            .collect();
+        let scratch =
+            std::env::temp_dir().join(format!("reso-ingest-history-{}", std::process::id()));
+        for name in names {
+            let read = sink
+                .get_file(&name, &scratch)
+                .map_err(|e| e.to_string())
+                .and_then(|got| {
+                    if got {
+                        std::fs::read_to_string(&scratch)
+                            .map(Some)
+                            .map_err(|e| format!("cannot read {name}: {}", e.kind()))
+                    } else {
+                        Ok(None)
+                    }
+                });
+            let _ = std::fs::remove_file(&scratch);
+            if let Some(text) = read? {
+                found.push((name, text));
+            }
+        }
+    } else {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("cannot read {}: {}", dir.display(), e.kind())),
+        };
+        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+            let Some(name) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if !is_manifest(&name) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {}", path.display(), e.kind()))?;
+            found.push((name, text));
+        }
+    }
+    // By run id, not file name: `manifest.X-02.json` sorts before `manifest.X.json`
+    found.sort_by(|a, b| manifest_run_id(&a.0).cmp(&manifest_run_id(&b.0)));
+    found
+        .into_iter()
+        .map(|(name, text)| {
+            serde_json::from_str(&text)
+                .map(|value| (name.clone(), value))
+                .map_err(|e| format!("{name} is not valid JSON: {e}"))
+        })
+        .collect()
+}
+
+/// The run id of a manifest file name `manifest.<run id>.json`; `None` for other files
+fn manifest_run_id(name: &str) -> Option<&str> {
+    name.strip_prefix("manifest.")?.strip_suffix(".json")
+}
+
 /// The newest `manifest.*.json` in `dir` (run ids sort by time), parsed
 fn last_manifest(dir: &Path) -> Result<Option<(String, Value)>, String> {
     let entries = match std::fs::read_dir(dir) {
@@ -2410,16 +2969,20 @@ fn last_manifest(dir: &Path) -> Result<Option<(String, Value)>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot read {}: {}", dir.display(), e.kind())),
     };
+    // By run id, not file name: `manifest.X-02.json` sorts before `manifest.X.json`
     let newest = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("manifest.") && n.ends_with(".json"))
+        .filter_map(|p| {
+            let id = p
+                .file_name()?
+                .to_str()
+                .and_then(manifest_run_id)?
+                .to_string();
+            Some((id, p))
         })
         .max();
-    let Some(path) = newest else {
+    let Some((_, path)) = newest else {
         return Ok(None);
     };
     let text = std::fs::read_to_string(&path)
