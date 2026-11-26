@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `S3StateStore::check_conditional_writes` creates a throwaway object, tries to create it again and to replace it with
   a stale version, and deletes it; if either second write succeeds the command stops with exit code 2.
   `--s3-unsafe-no-conditional-writes` skips the check.
+- `reso-ingest`: run id reservations in the state store (`runs/<run>.reserved`) now record when they were made, and
+  `sync`/`serve` remove ones older than 7 days (a run killed before delivering its manifest left its key for good), at
+  most once an hour per process; each delete is conditional on the version read (#132).
 
 ### Changed
 - `reso-ingest`: an S3 endpoint at `storage.googleapis.com` is refused, since GCS's interoperability API ignores the

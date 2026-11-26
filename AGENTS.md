@@ -90,7 +90,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/s3.rs         S3Options, Provider, S3StateStore, S3FileSink: state and data files in an S3-compatible or GCS bucket via `object_store` (feature `s3`; `--s3-*` and `--gcs-bucket` options, #107, #130)
   src/audit.rs      AccessLog, AccessEntry: append-only `audit/access.ndjson`, one line per resource pull (#93); per-run copy to the sink
   src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93)
-  src/runs.rs       run id reservation in the state store, manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
+  src/runs.rs       run id reservation in the state store (stale ones swept after 7 days), manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
   src/checkpoint.rs CheckpointStore: checkpoints, key sets (sorted lines, `.keys.ndjson`), event sequences, schema snapshots in a StateStore
   src/keyset.rs     ExternalSorter, diff: key sets at millions of keys, sorted in spilled chunks and diffed by merge (#87)
   src/serve.rs      Daemon, ServeOptions: `reso-ingest serve`, one task per feed (interval, jitter, backoff), axum endpoints
