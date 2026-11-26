@@ -15,9 +15,10 @@ Records are handed over **raw**, tagged with their source. The typical user is a
 vendors into its own store. The crates do **not** de-duplicate across MLSs, map local fields, enforce data-licence or
 display rules, or choose a database. They do help the consumer comply with licence terms: `reso-ingest` keeps an
 append-only access log of what was pulled, when and with which credential, and can purge one source's files, media and
-state when its licence ends (#93); records stay raw. The ingest-layer plan was tracker issue #18 (milestone "Ingest
-layer", closed); production-scale work is tracker #78 (milestone "Production scale", work order in #116). Open work is
-listed under "What's next" in `README.md`.
+state when its licence ends (#93); records stay raw. The plan to 1.0 is the release tracker #179: milestone `0.4.0` (both crates, before any vendor server; the first
+`reso-ingest` publish) and milestone `0.5.0` (checked against a real server, #32/#76). Earlier trackers #18 (ingest
+layer), #78 (production scale) and #116 (offline work order) are closed. Open work is listed under "What's next" in
+`README.md`.
 
 ## Finding things
 
@@ -25,7 +26,7 @@ listed under "What's next" in `README.md`.
 |---|---|
 | What the crates do, limits, quick start, configuration, what's next | `README.md` |
 | The ingest command: configuration, output format, deletes, media files, Parquet | `reso-ingest/README.md` |
-| The plan and open owner decisions | Production scale: issue #78 and its children, work order #116; ingest layer (done): #18 |
+| The plan and open owner decisions | Release tracker #179, milestones `0.4.0` and `0.5.0`; done: #18, #78, #116 |
 | What to check on a real server, and what may change | GitHub issue #76 (access: #32) |
 | API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |

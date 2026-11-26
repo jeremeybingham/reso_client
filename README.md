@@ -278,16 +278,24 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 The vendor differences known from public documentation are all handled
 ([#65](https://github.com/jeremeybingham/reso_client/issues/65)-[#69](https://github.com/jeremeybingham/reso_client/issues/69));
-what is left needs a real server or someone else:
+what is left is the two releases below, and work that needs a real server or someone else:
 
 - **A vendor server** ([#32](https://github.com/jeremeybingham/reso_client/issues/32)), then the verification pass
   in [#76](https://github.com/jeremeybingham/reso_client/issues/76): what to check against it (auth, paging, replication
   order, limits, `$metadata`, deletes, media) and what code may change with the answers.
-- **Release 0.4.0** of `reso-client` (rate limits per day and bytes per hour, `StandardReplication::expand`,
-  `execute_count` by `$count=true`, `Downloader::download_into`, metadata fixes; see the [changelog](CHANGELOG.md)) and
-  publishing `reso-ingest`, after #76.
+- **Release 0.4.0** (milestone `0.4.0`, plan in [#179](https://github.com/jeremeybingham/reso_client/issues/179)):
+  `reso-client` 0.4.0 (rate limits per day and bytes per hour, `StandardReplication::expand`, `execute_count` by
+  `$count=true`, `Downloader::download_into`, raw record text, `#[non_exhaustive]` API review, metadata fixes; see
+  the [changelog](CHANGELOG.md)) and the first `reso-ingest` publish at the same version
+  ([#178](https://github.com/jeremeybingham/reso_client/issues/178)), released before any vendor server and marked as
+  not yet checked against one. Before the tag: clean-ups ([#177](https://github.com/jeremeybingham/reso_client/issues/177))
+  and fewer bucket requests per quiet run ([#162](https://github.com/jeremeybingham/reso_client/issues/162) lead 6).
+- **Release 0.5.0** (milestone `0.5.0`): the #76 pass on a real server and its fixes, a filled-in
+  [compatibility table](docs/COMPATIBILITY.md), realistic load fixtures
+  ([#163](https://github.com/jeremeybingham/reso_client/issues/163)), SBOMs, signed tags and a published container
+  image ([#158](https://github.com/jeremeybingham/reso_client/issues/158)).
 - **Production scale, offline parts** (tracker [#78](https://github.com/jeremeybingham/reso_client/issues/78), work
-  order [#116](https://github.com/jeremeybingham/reso_client/issues/116)). Done: logs, metrics, run checks, leases,
+  order [#116](https://github.com/jeremeybingham/reso_client/issues/116), both closed). Done: logs, metrics, run checks, leases,
   graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
   harness, delete detection at millions of keys, backfill, media at scale, media index saves
   ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
@@ -297,9 +305,9 @@ what is left needs a real server or someone else:
   pausing, `serve` reload, `reset`/`replay`/`history`, onboarding
   ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness: compatibility table, 1.0 plan,
   `cargo-deny`, semver and MSRV checks in CI, operator guide and runbooks
-  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)). Open before 1.0: the API review
-  ([#157](https://github.com/jeremeybingham/reso_client/issues/157)) and SBOMs and signed releases
-  ([#158](https://github.com/jeremeybingham/reso_client/issues/158)). Built only on request: a Postgres state store, a
+  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)), the 1.0 API review
+  ([#157](https://github.com/jeremeybingham/reso_client/issues/157)), status pages and a Prometheus + Grafana kit
+  ([#161](https://github.com/jeremeybingham/reso_client/issues/161)). Built only on request: a Postgres state store, a
   stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
   advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso_client/issues/51)).
@@ -308,7 +316,7 @@ what is left needs a real server or someone else:
 **Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
 output, re-fetching parent records by key to get fresh media URLs for files that failed during `sync --media`.
 
-The ingest-layer plan was tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18) (closed); production scale is #78.
+The release plan is tracker [#179](https://github.com/jeremeybingham/reso_client/issues/179); earlier trackers #18 (ingest layer), #78 (production scale) and #116 were closed when their work was done.
 
 ## License
 
