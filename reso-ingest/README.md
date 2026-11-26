@@ -250,32 +250,36 @@ In `--out` (default `reso-out`):
 All of `state/` goes through one key-value interface, `StateStore` (get, put, create-if-absent, replace-if-unchanged,
 delete, list, and copies to and from local files for large values such as key sets). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
 synced and renamed. A library user can pass another backend (object storage, a database) to `CheckpointStore::with_store`,
-`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85. With the `s3` feature, `S3StateStore` keeps state as objects under a bucket prefix (AWS S3,
-R2, MinIO, GCS interoperability; version = ETag, `create` and `replace` use `If-None-Match` and `If-Match`; credentials
-from `AWS_ACCESS_KEY_ID` and friends, never the config file; `S3Options.single_delete` for GCS, which has no
-multi-delete). `S3FileSink` uploads finished data files to the same kind of bucket (one conditional `PUT` up to 32 MiB,
+`Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85. With the `s3` feature, `S3StateStore` keeps state as objects under a bucket prefix: AWS S3,
+R2, MinIO and RustFS through the S3 API (version = ETag, `create` and `replace` use `If-None-Match` and `If-Match`;
+credentials from `AWS_ACCESS_KEY_ID` and friends, never the config file; `S3Options.single_delete` for a store without
+multi-delete), or Google Cloud Storage through its own API (`Provider::Gcs`: version = object generation, `create`,
+`replace` and versioned `delete` use `x-goog-if-generation-match`; credentials from a service-account key file). `S3FileSink` uploads finished data files to the same kind of bucket (one conditional `PUT` up to 32 MiB,
 multipart above; never replaces a name; use it from a multi-threaded runtime).
 
 **Running against a bucket (`--features s3`).** `sync`, `serve`, `media` and `status` take `--s3-bucket` (env
-`RESO_S3_BUCKET`), `--s3-prefix`, `--s3-endpoint` (R2, MinIO, GCS), `--s3-region`, `--s3-allow-http` (a local test
-server) and `--s3-single-delete` (GCS). State then goes to `<prefix>/state/` and finished data files to `<prefix>/data/`,
-so a killed run resumes from the bucket and workers share feeds through leases. `--s3-bucket` conflicts with `--state`.
+`RESO_S3_BUCKET`), `--s3-prefix`, `--s3-endpoint` (R2, MinIO, RustFS), `--s3-region`, `--s3-allow-http` (a local test
+server) and `--s3-single-delete` (a store without multi-delete), or `--gcs-bucket` (env `RESO_GCS_BUCKET`) with
+`--gcs-prefix` (an alias of `--s3-prefix`) for Google Cloud Storage. State then goes to `<prefix>/state/` and finished data files to `<prefix>/data/`,
+so a killed run resumes from the bucket and workers share feeds through leases. `--s3-bucket` and `--gcs-bucket` conflict with `--state` and with each other.
 A checkpoint is saved only once the file holding its rows is in the bucket, so NDJSON files are then closed at the first
 page end past `--max-file-mb` (a file can pass the limit by up to one page, as Parquet files do) rather than in the
 middle of a page; a killed run loses at most the open file, whose pages the next run fetches again. A killed process
 leaves its lease behind, so its feeds wait up to 5 minutes before another worker takes them over.
-Credentials are the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`. Run manifests (`manifest.<run>.json`) and
+Credentials are the standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, or for GCS `GOOGLE_SERVICE_ACCOUNT` (path of a
+service-account JSON key; also `GOOGLE_SERVICE_ACCOUNT_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, or the metadata server on
+Google Cloud). Run manifests (`manifest.<run>.json`) and
 `sync --media` manifests (`media.<run>.json`) go to `<prefix>/data/` next to the data files they list, and a copy of the
 newest run manifest is kept at `<prefix>/state/runs/last.json`, which `status` reads, so a worker with an empty `--out`
 sees the last run. Run ids are reserved in the bucket (`state/runs/<run>.reserved`, created with `If-None-Match`, removed
 once the manifest is delivered), so two workers started in the same second get different ids. `--out` is only a staging
 directory then (files are removed once the bucket has them; the `.run.<run>` markers stay). Not routed: the metrics file
 (`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`) and downloaded media files
-(`--media-dir`). The `media` command refuses `--s3-bucket`, since the data files it reads are in the bucket: use
+(`--media-dir`). The `media` command refuses a bucket, since the data files it reads are in the bucket: use
 `sync --media` instead.
 `cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_BUCKET` is set
-with `RESO_S3_TEST_ENDPOINT` (a non-AWS server) or `RESO_S3_TEST_REGION` (AWS S3, no endpoint); add
-`RESO_S3_TEST_SINGLE_DELETE=1` for GCS. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images)
+with `RESO_S3_TEST_ENDPOINT` (a non-AWS server) or `RESO_S3_TEST_REGION` (AWS S3, no endpoint), or against GCS when
+`RESO_GCS_TEST_BUCKET` and `GOOGLE_SERVICE_ACCOUNT` are set. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images)
 and **AWS S3** 2026-11-25 (#115): conditional create, replace and delete, multipart uploads and listings past 1000 keys;
 `sync`, `status` and the container image against a bucket; two `serve` workers on one prefix; a `kill -9` partway through
 a `sync` taken over by a fresh worker once the lease ran out.
@@ -301,10 +305,14 @@ multipart step but the abort; `DeleteObject` releases leases and run-id reservat
 state listings. `AbortMultipartUpload` is only used when a large upload fails partway; without it the parts stay until a
 lifecycle rule removes them. `s3:ListBucketMultipartUploads` and `s3:ListMultipartUploadParts` are not needed.
 
-**GCS through the S3 interoperability API is not safe for state.** It accepts `If-None-Match: *` and `If-Match` on `PUT`
-and `DELETE` and ignores them (checked 2026-11-25, #115): a second `create` overwrites, so two workers can both take a
-feed and nothing reports it. Its own `x-goog-if-generation-match` cannot be combined with S3-style signing. Do not point
-`--s3-bucket` at GCS: native GCS support is #130.
+**Google Cloud Storage: use `--gcs-bucket`, not the S3 interoperability endpoint.** Through the interoperability API,
+GCS accepts `If-None-Match: *` and `If-Match` on `PUT` and `DELETE` and ignores them (checked 2026-11-25, #115): a second
+`create` overwrites, so two workers could both take a feed. `--s3-endpoint https://storage.googleapis.com` is therefore
+refused with an error. `--gcs-bucket` goes through GCS's own API, where `x-goog-if-generation-match` is enforced, and a
+versioned delete (lease release) is a conditional `DELETE`, with no check-then-delete window. The bucket role
+`Storage Object User` on the bucket is enough. In the container image, which runs as uid 65532, the mounted key file must be readable by
+that uid (or run the container with `-u`). Checked against a real bucket 2026-11-26 (#130): `s3_live`, `sync` twice
+and `status`, two `serve` workers on one prefix, the container image, and a `kill -9` partway through a `sync` taken over by a fresh worker.
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe

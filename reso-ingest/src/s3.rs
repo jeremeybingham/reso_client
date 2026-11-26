@@ -1,21 +1,27 @@
-//! S3-compatible object storage backends (feature `s3`)
+//! Object storage backends: S3-compatible buckets and Google Cloud Storage (feature `s3`)
 //!
 //! [`S3StateStore`] keeps ingest state (checkpoints, key sets, leases, media indexes) as objects
 //! under a prefix in a bucket, so several workers can share it. It works with AWS S3, Cloudflare R2,
-//! MinIO and GCS through its S3 interoperability API, using the `object_store` crate (rustls, no
-//! OpenSSL). Conditional writes are real HTTP preconditions: `create` is a put with
-//! `If-None-Match: *`, `replace` is a put with `If-Match` on the ETag, so a lease is held by
-//! exactly one worker. [`S3FileSink`] uploads finished output files to the same kind of bucket.
+//! MinIO and RustFS through the S3 API, and with Google Cloud Storage through its own API
+//! ([`Provider::Gcs`]), using the `object_store` crate (rustls, no OpenSSL). Conditional writes
+//! are real HTTP preconditions: on S3, `create` is a put with `If-None-Match: *` and `replace` a
+//! put with `If-Match` on the ETag; on GCS both use `x-goog-if-generation-match` on the object
+//! generation. So a lease is held by exactly one worker. [`S3FileSink`] uploads finished output
+//! files to the same kind of bucket.
+//!
+//! GCS through its S3 interoperability endpoint is refused: it accepts the S3 precondition headers
+//! and ignores them (#115, #130).
 
 use std::fmt;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::path::Path as ObjectPath;
 use object_store::{
-    Error as ObjectError, ObjectStore, ObjectStoreExt, PutMode, PutPayload, UpdateVersion,
-    WriteMultipart,
+    ClientOptions, Error as ObjectError, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
+    PutPayload, UpdateVersion, WriteMultipart,
 };
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,27 +47,65 @@ fn chain(e: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
-/// Where an S3-compatible bucket is and how to reach it
+/// Which API a bucket is reached through
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Provider {
+    /// The S3 API: AWS S3, Cloudflare R2, MinIO, RustFS. Versions are ETags.
+    #[default]
+    S3,
+    /// Google Cloud Storage's own API. Versions are object generations, and a versioned delete is
+    /// a conditional `DELETE` on the server.
+    Gcs,
+}
+
+/// Where a bucket is and how to reach it
 ///
-/// Credentials are not part of the options: they come from the standard environment
-/// (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`,
-/// `AWS_ENDPOINT`, and web-identity or instance credentials where the platform provides them), so
-/// they never sit in a configuration file.
+/// Credentials are not part of the options: they come from the standard environment, so they
+/// never sit in a configuration file. For S3: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+/// `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT`, and web-identity or instance credentials
+/// where the platform provides them. For GCS: `GOOGLE_SERVICE_ACCOUNT` (path of a service-account
+/// JSON key), `GOOGLE_SERVICE_ACCOUNT_KEY` (the key itself), `GOOGLE_APPLICATION_CREDENTIALS`, or
+/// the instance metadata server on Google Cloud.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct S3Options {
+    /// The API: S3 (default) or GCS
+    pub provider: Provider,
     /// The bucket
     pub bucket: String,
     /// Key prefix inside the bucket; empty for the bucket root
     pub prefix: String,
-    /// Endpoint URL of a non-AWS store (R2, MinIO, GCS interoperability); `None` for AWS
+    /// Endpoint URL of a non-AWS S3 store (R2, MinIO, RustFS); `None` for AWS. With GCS, the base
+    /// URL of a test server; `None` for Google's
     pub endpoint: Option<String>,
-    /// Region; `None` takes `AWS_REGION` or `AWS_DEFAULT_REGION` (R2 and MinIO accept `auto` or any)
+    /// S3 region; `None` takes `AWS_REGION` or `AWS_DEFAULT_REGION` (R2 and MinIO accept `auto` or
+    /// any). Not used with GCS
     pub region: Option<String>,
     /// Allow a plain-`http://` endpoint (a local MinIO); off by default
     pub allow_http: bool,
-    /// Delete with one `DELETE` per object instead of the multi-object `POST ?delete` (GCS's
-    /// interoperability API has no multi-delete); off by default
+    /// S3 only: delete with one `DELETE` per object instead of the multi-object `POST ?delete`,
+    /// for stores without multi-delete; off by default
     pub single_delete: bool,
+}
+
+/// A built client, with what a GCS conditional delete needs
+struct Built {
+    store: Arc<dyn ObjectStore>,
+    versions: Versions,
+}
+
+/// The GCS endpoint as an S3 interoperability URL (any scheme, with or without a path)
+fn is_gcs_interop(endpoint: &str) -> bool {
+    let host = endpoint
+        .split("://")
+        .nth(1)
+        .unwrap_or(endpoint)
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("");
+    host.eq_ignore_ascii_case("storage.googleapis.com")
+        || host
+            .to_ascii_lowercase()
+            .ends_with(".storage.googleapis.com")
 }
 
 impl S3Options {
@@ -80,7 +124,42 @@ impl S3Options {
     ///
     /// [`IngestError::Output`] when the options or the environment cannot make a client (no
     /// region or credentials, an invalid endpoint).
-    pub(crate) fn build(&self) -> Result<Arc<dyn ObjectStore>, IngestError> {
+    fn build(&self) -> Result<Built, IngestError> {
+        let error = |message: String| IngestError::Output {
+            path: self.location(""),
+            message,
+        };
+        if self.provider == Provider::Gcs {
+            let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(&self.bucket);
+            if let Some(endpoint) = &self.endpoint {
+                builder = builder.with_base_url(endpoint);
+            }
+            if self.allow_http {
+                builder = builder.with_client_options(ClientOptions::new().with_allow_http(true));
+            }
+            let gcs = Arc::new(builder.build().map_err(|e| error(chain(&e)))?);
+            let delete = GcsDelete {
+                credentials: Arc::clone(gcs.credentials()),
+                base_url: self
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| GCS_BASE_URL.to_string()),
+                bucket: self.bucket.clone(),
+                http: reqwest::Client::new(),
+            };
+            return Ok(Built {
+                store: gcs,
+                versions: Versions::Generation(Some(Arc::new(delete))),
+            });
+        }
+        if self.endpoint.as_deref().is_some_and(is_gcs_interop) {
+            return Err(error(
+                "GCS through its S3 interoperability endpoint ignores conditional writes, so leases \
+                 and run ids would not be safe; use the GCS backend instead (--gcs-bucket, \
+                 Provider::Gcs)"
+                    .to_string(),
+            ));
+        }
         let mut builder = AmazonS3Builder::from_env().with_bucket_name(&self.bucket);
         if let Some(endpoint) = &self.endpoint {
             builder = builder.with_endpoint(endpoint);
@@ -94,34 +173,122 @@ impl S3Options {
         if self.single_delete {
             builder = builder.with_config(AmazonS3ConfigKey::DisableBulkDelete, "true");
         }
-        let store = builder.build().map_err(|e| IngestError::Output {
-            path: self.location(""),
-            message: chain(&e),
-        })?;
-        Ok(Arc::new(store))
+        let store = builder.build().map_err(|e| error(chain(&e)))?;
+        Ok(Built {
+            store: Arc::new(store),
+            versions: Versions::ETag,
+        })
     }
 
     fn location(&self, key: &str) -> String {
+        let scheme = match self.provider {
+            Provider::S3 => "s3",
+            Provider::Gcs => "gs",
+        };
         let prefix = self.prefix.trim_matches('/');
         match (prefix.is_empty(), key.is_empty()) {
-            (true, true) => format!("s3://{}", self.bucket),
-            (true, false) => format!("s3://{}/{key}", self.bucket),
-            (false, true) => format!("s3://{}/{prefix}", self.bucket),
-            (false, false) => format!("s3://{}/{prefix}/{key}", self.bucket),
+            (true, true) => format!("{scheme}://{}", self.bucket),
+            (true, false) => format!("{scheme}://{}/{key}", self.bucket),
+            (false, true) => format!("{scheme}://{}/{prefix}", self.bucket),
+            (false, false) => format!("{scheme}://{}/{prefix}/{key}", self.bucket),
         }
     }
 }
 
-/// A [`StateStore`] in an S3-compatible bucket: one object per key under a prefix
+/// Google's GCS endpoint (XML API), the default base URL
+const GCS_BASE_URL: &str = "https://storage.googleapis.com";
+
+/// What the version of a stored value is
+#[derive(Clone)]
+enum Versions {
+    /// The ETag (S3, and the in-memory store)
+    ETag,
+    /// The object generation (GCS); with the client for conditional deletes, or `None` for
+    /// HEAD-then-DELETE (tests)
+    Generation(Option<Arc<GcsDelete>>),
+}
+
+impl Versions {
+    fn of(&self, meta: &ObjectMeta) -> Option<String> {
+        match self {
+            Versions::ETag => meta.e_tag.clone(),
+            Versions::Generation(_) => meta.version.clone(),
+        }
+    }
+
+    fn update(&self, version: &str) -> PutMode {
+        let version = Some(version.to_string());
+        PutMode::Update(match self {
+            Versions::ETag => UpdateVersion {
+                e_tag: version,
+                version: None,
+            },
+            Versions::Generation(_) => UpdateVersion {
+                e_tag: None,
+                version,
+            },
+        })
+    }
+}
+
+/// A `DELETE` with `x-goog-if-generation-match`, which `object_store` does not offer: the
+/// generation check and the delete are one step on the server, so a lease cannot be deleted after
+/// another worker took it over
+struct GcsDelete {
+    credentials: GcpCredentialProvider,
+    base_url: String,
+    bucket: String,
+    http: reqwest::Client,
+}
+
+impl GcsDelete {
+    /// `Ok(true)` when deleted, `Ok(false)` when missing or at another generation
+    async fn delete(&self, path: &ObjectPath, generation: &str) -> Result<bool, String> {
+        let token = self
+            .credentials
+            .get_credential()
+            .await
+            .map_err(|e| chain(&e))?;
+        let mut url = reqwest::Url::parse(&self.base_url).map_err(|e| e.to_string())?;
+        url.path_segments_mut()
+            .map_err(|()| format!("{}: not a base URL", self.base_url))?
+            .pop_if_empty()
+            .push(&self.bucket)
+            .extend(path.parts().map(|p| p.as_ref().to_string()));
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(&token.bearer)
+            .header("x-goog-if-generation-match", generation)
+            .send()
+            .await
+            .map_err(|e| chain(&e))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::PRECONDITION_FAILED
+        {
+            return Ok(false);
+        }
+        let body = response.text().await.unwrap_or_default();
+        let body: String = body.chars().take(300).collect();
+        Err(format!("DELETE returned {status}: {body}"))
+    }
+}
+
+/// A [`StateStore`] in a bucket (S3-compatible or GCS): one object per key under a prefix
 ///
-/// The version of a value is its ETag. [`create`](StateStore::create) and
-/// [`replace`](StateStore::replace) are atomic on the server (HTTP preconditions); the bucket must
-/// support them (AWS S3 since 2024, R2, MinIO and GCS do). [`delete`](StateStore::delete) with a
-/// version checks the ETag and then deletes, which leaves a short window (S3 has no conditional
-/// delete); leases tolerate it, since the loser notices at its next renewal. State is small and read
-/// rarely, so there is no caching.
+/// The version of a value is its ETag on S3 and its generation on GCS.
+/// [`create`](StateStore::create) and [`replace`](StateStore::replace) are atomic on the server
+/// (HTTP preconditions); the bucket must support them (AWS S3 since 2024, R2, MinIO, RustFS and
+/// native GCS do). [`delete`](StateStore::delete) with a version is a conditional `DELETE` on GCS;
+/// on S3 it checks the ETag and then deletes, which leaves a short window (#133); leases tolerate
+/// it, since the loser notices at its next renewal. State is small and read rarely, so there is no
+/// caching.
 ///
-/// Unconfirmed against a real bucket until tested with MinIO or S3 (#107).
+/// Confirmed against AWS S3 and RustFS (#115) and native GCS (#130).
 ///
 /// # Examples
 ///
@@ -138,6 +305,7 @@ pub struct S3StateStore {
     store: Arc<dyn ObjectStore>,
     prefix: Option<ObjectPath>,
     label: String,
+    versions: Versions,
 }
 
 impl fmt::Debug for S3StateStore {
@@ -156,10 +324,14 @@ impl S3StateStore {
     /// [`IngestError::Output`] when no client can be built (see [`S3Options`]). Nothing is sent
     /// until the first read or write.
     pub fn new(options: &S3Options) -> Result<Self, IngestError> {
-        Self::with_store(options.build()?, &options.prefix, options.location(""))
+        let built = options.build()?;
+        let mut store = Self::with_store(built.store, &options.prefix, options.location(""))?;
+        store.versions = built.versions;
+        Ok(store)
     }
 
-    /// A store over any `object_store` implementation (tests use the in-memory one)
+    /// A store over any `object_store` implementation whose versions are ETags (tests use the
+    /// in-memory one)
     ///
     /// # Errors
     ///
@@ -182,6 +354,7 @@ impl S3StateStore {
             store,
             prefix,
             label,
+            versions: Versions::ETag,
         })
     }
 
@@ -201,13 +374,6 @@ impl S3StateStore {
     }
 }
 
-fn update_version(version: &str) -> PutMode {
-    PutMode::Update(UpdateVersion {
-        e_tag: Some(version.to_string()),
-        version: None,
-    })
-}
-
 impl StateStore for S3StateStore {
     fn get<'a>(&'a self, key: &'a str) -> StoreFuture<'a, Option<Versioned>> {
         Box::pin(async move {
@@ -217,10 +383,10 @@ impl StateStore for S3StateStore {
                 Err(ObjectError::NotFound { .. }) => return Ok(None),
                 Err(e) => return Err(self.error(key, chain(&e))),
             };
-            let version = result.meta.e_tag.clone().ok_or_else(|| {
+            let version = self.versions.of(&result.meta).ok_or_else(|| {
                 self.error(
                     key,
-                    "the store returned no ETag, so versions are unavailable",
+                    "the store returned no ETag or generation, so versions are unavailable",
                 )
             })?;
             let bytes = result
@@ -274,7 +440,7 @@ impl StateStore for S3StateStore {
             let payload = PutPayload::from(bytes.to_vec());
             match self
                 .store
-                .put_opts(&path, payload, update_version(version).into())
+                .put_opts(&path, payload, self.versions.update(version).into())
                 .await
             {
                 Ok(_) => Ok(true),
@@ -289,13 +455,19 @@ impl StateStore for S3StateStore {
     fn delete<'a>(&'a self, key: &'a str, version: Option<&'a str>) -> StoreFuture<'a, bool> {
         Box::pin(async move {
             let path = self.path(key)?;
+            if let (Some(want), Versions::Generation(Some(gcs))) = (version, &self.versions) {
+                return gcs
+                    .delete(&path, want)
+                    .await
+                    .map_err(|e| self.error(key, e));
+            }
             let head = match self.store.head(&path).await {
                 Ok(h) => h,
                 Err(ObjectError::NotFound { .. }) => return Ok(false),
                 Err(e) => return Err(self.error(key, chain(&e))),
             };
             if let Some(want) = version {
-                if head.e_tag.as_deref() != Some(want) {
+                if self.versions.of(&head).as_deref() != Some(want) {
                     return Ok(false);
                 }
             }
@@ -420,16 +592,16 @@ const SINGLE_PUT_MAX: u64 = 32 * 1024 * 1024;
 /// Part size of a multipart upload (S3 needs at least 5 MiB per part)
 const PART_SIZE: usize = 16 * 1024 * 1024;
 
-/// A [`FileSink`] that uploads finished data files to an S3-compatible bucket
+/// A [`FileSink`] that uploads finished data files to a bucket (S3-compatible or GCS)
 ///
 /// `put_file` returns when the store confirms the object. A small file is one `PUT` with
-/// `If-None-Match: *`, so an existing name is never replaced, even by a racing worker. A large file
+/// `If-None-Match: *` (on GCS `x-goog-if-generation-match: 0`), so an existing name is never replaced, even by a racing worker. A large file
 /// is a multipart upload after a head check (the object appears only when the upload completes; a
 /// race between two workers on one run id is not caught for these, but run ids are unique per
 /// run). The trait is synchronous, so the async client runs through `block_in_place`: use it from
 /// a multi-threaded Tokio runtime (the binary's).
 ///
-/// Unconfirmed against a real bucket until tested with MinIO or S3 (#107).
+/// Confirmed against AWS S3 and RustFS (#115) and native GCS (#130).
 #[derive(Clone)]
 pub struct S3FileSink {
     store: Arc<dyn ObjectStore>,
@@ -452,7 +624,11 @@ impl S3FileSink {
     ///
     /// [`IngestError::Output`] when no client can be built (see [`S3Options`]).
     pub fn new(options: &S3Options) -> Result<Self, IngestError> {
-        Self::with_store(options.build()?, &options.prefix, options.location(""))
+        Self::with_store(
+            options.build()?.store,
+            &options.prefix,
+            options.location(""),
+        )
     }
 
     /// A sink over any `object_store` implementation (tests use the in-memory one)
@@ -694,6 +870,95 @@ mod tests {
         assert!(got[..] == data[..]);
         assert!(sink.put_file("big.ndjson", &file).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn versions_are_etags_on_s3_and_generations_on_gcs() {
+        let meta = ObjectMeta {
+            location: ObjectPath::from("k"),
+            last_modified: Default::default(),
+            size: 1,
+            e_tag: Some("\"etag\"".into()),
+            version: Some("1795654814258332".into()),
+        };
+        let generation = Versions::Generation(None);
+        assert_eq!(Versions::ETag.of(&meta).as_deref(), Some("\"etag\""));
+        assert_eq!(generation.of(&meta).as_deref(), Some("1795654814258332"));
+        let PutMode::Update(v) = Versions::ETag.update("\"etag\"") else {
+            panic!("not an update")
+        };
+        assert_eq!((v.e_tag.as_deref(), v.version), (Some("\"etag\""), None));
+        let PutMode::Update(v) = generation.update("17") else {
+            panic!("not an update")
+        };
+        assert_eq!((v.e_tag, v.version.as_deref()), (None, Some("17")));
+    }
+
+    #[tokio::test]
+    async fn gcs_delete_sends_the_generation_and_reads_the_answer() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (generation, status) in [("1", 204), ("2", 412), ("3", 404), ("4", 503)] {
+            Mock::given(method("DELETE"))
+                .and(path("/bkt/p/state/media/mls@1.json"))
+                .and(header("authorization", "Bearer test-token"))
+                .and(header("x-goog-if-generation-match", generation))
+                .respond_with(ResponseTemplate::new(status).set_body_string("busy"))
+                .mount(&server)
+                .await;
+        }
+        let delete = GcsDelete {
+            credentials: Arc::new(object_store::StaticCredentialProvider::new(
+                object_store::gcp::GcpCredential {
+                    bearer: "test-token".into(),
+                },
+            )),
+            base_url: format!("{}/", server.uri()),
+            bucket: "bkt".into(),
+            http: reqwest::Client::new(),
+        };
+        let p = ObjectPath::from("p/state/media/mls@1.json");
+        assert!(delete.delete(&p, "1").await.unwrap());
+        assert!(!delete.delete(&p, "2").await.unwrap());
+        assert!(!delete.delete(&p, "3").await.unwrap());
+        let err = delete.delete(&p, "4").await.unwrap_err();
+        assert!(err.contains("503") && err.contains("busy"), "{err}");
+    }
+
+    #[test]
+    fn gcs_through_the_s3_endpoint_is_refused() {
+        for endpoint in [
+            "https://storage.googleapis.com",
+            "https://STORAGE.googleapis.com/",
+            "storage.googleapis.com:443",
+            "https://bkt.storage.googleapis.com",
+        ] {
+            assert!(is_gcs_interop(endpoint), "{endpoint}");
+            let o = S3Options {
+                endpoint: Some(endpoint.into()),
+                region: Some("auto".into()),
+                ..S3Options::new("b", "")
+            };
+            let err = S3StateStore::new(&o).unwrap_err().to_string();
+            assert!(err.contains("--gcs-bucket"), "{err}");
+        }
+        for endpoint in [
+            "http://localhost:9100",
+            "https://x.r2.cloudflarestorage.com",
+        ] {
+            assert!(!is_gcs_interop(endpoint), "{endpoint}");
+        }
+    }
+
+    #[test]
+    fn gcs_options_name_a_gs_url() {
+        let o = S3Options {
+            provider: Provider::Gcs,
+            ..S3Options::new("b", "pre")
+        };
+        assert_eq!(o.location("k.json"), "gs://b/pre/k.json");
     }
 
     #[test]

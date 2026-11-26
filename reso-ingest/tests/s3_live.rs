@@ -1,20 +1,33 @@
 //! Checks of the S3 backends against a real S3-compatible server or AWS S3
 //!
 //! Skipped unless `RESO_S3_TEST_BUCKET` is set together with `RESO_S3_TEST_ENDPOINT` (a non-AWS
-//! server such as RustFS, MinIO, R2 or GCS interoperability) or `RESO_S3_TEST_REGION` (AWS S3, no
+//! server such as RustFS, MinIO or R2) or `RESO_S3_TEST_REGION` (AWS S3, no
 //! endpoint). Both may be set; the region defaults to `us-east-1` with an endpoint. Set
-//! `RESO_S3_TEST_SINGLE_DELETE=1` for GCS, which has no multi-object delete. Credentials come from
+//! `RESO_S3_TEST_SINGLE_DELETE=1` for a store without multi-object delete. Credentials come from
 //! `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN`); the bucket must exist.
-//! Run with `--features s3`. Written against MinIO-style servers; developed against RustFS because
+//!
+//! With `RESO_GCS_TEST_BUCKET` set instead, the same checks run against Google Cloud Storage through
+//! its own API ([`Provider::Gcs`]), with the service-account key file named by
+//! `GOOGLE_SERVICE_ACCOUNT`. Run with `--features s3`. Written against MinIO-style servers; developed against RustFS because
 //! MinIO no longer publishes binaries or images.
 #![cfg(feature = "s3")]
 
 use std::sync::Arc;
 
-use reso_ingest::{FileSink, S3FileSink, S3Options, S3StateStore, StateStore};
+use reso_ingest::{FileSink, Provider, S3FileSink, S3Options, S3StateStore, StateStore};
 
 fn options(tag: &str) -> Option<S3Options> {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    if let Some(bucket) = var("RESO_GCS_TEST_BUCKET") {
+        return Some(S3Options {
+            provider: Provider::Gcs,
+            ..S3Options::new(bucket, format!("live/{tag}-{nanos}"))
+        });
+    }
     let bucket = var("RESO_S3_TEST_BUCKET")?;
     let endpoint = var("RESO_S3_TEST_ENDPOINT");
     let region = match (&endpoint, var("RESO_S3_TEST_REGION")) {
@@ -22,11 +35,8 @@ fn options(tag: &str) -> Option<S3Options> {
         (Some(_), None) => "us-east-1".into(),
         (None, None) => return None,
     };
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
     Some(S3Options {
+        provider: Provider::S3,
         bucket,
         prefix: format!("live/{tag}-{nanos}"),
         allow_http: endpoint

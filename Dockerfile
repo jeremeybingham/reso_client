@@ -6,9 +6,9 @@
 #
 # The binary is built with `parquet` and `s3`. Its only C code is two crypto libraries, both
 # compiled here and linked in statically: `ring` (rustls for RESO servers and the webhook) and
-# `aws-lc` (rustls inside `object_store`, used by `--s3-*`).
+# `aws-lc` (rustls inside `object_store`, used by `--s3-*` and `--gcs-bucket`).
 # TLS roots: RESO servers and the webhook use roots built into the binary (webpki-roots). The S3
-# client checks certificates against the system CA bundle, so the image carries Alpine's
+# and GCS clients check certificates against the system CA bundle, so the image carries Alpine's
 # /etc/ssl/certs/ca-certificates.crt; mount your own file over it for a store with a private CA.
 # No libc or shell.
 

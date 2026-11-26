@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `reso-ingest`: Google Cloud Storage through its own API (#130). `S3Options` gains `provider` (`Provider::S3`, the
+  default, or `Provider::Gcs`); the commands take `--gcs-bucket` (env `RESO_GCS_BUCKET`, prefix from `--s3-prefix` or
+  its alias `--gcs-prefix`), with credentials from a service-account key (`GOOGLE_SERVICE_ACCOUNT`). Versions on GCS
+  are object generations, and a versioned delete is a conditional `DELETE` (`x-goog-if-generation-match`). The `s3`
+  feature now enables `object_store`'s `gcp` feature as well (no new C code: the same rustls and aws-lc-rs stack).
+  Checked against a real bucket.
+
+### Changed
+- `reso-ingest`: an S3 endpoint at `storage.googleapis.com` is refused, since GCS's interoperability API ignores the
+  S3 precondition headers (#115); use `--gcs-bucket`. Breaking for code that builds `S3Options` with a struct
+  literal: add `provider` (or use `..S3Options::default()`).
+
 ### Changed
 - `reso-ingest --deletes` key comparison at millions of keys (#87): key sets are saved as sorted lines
   (`<server>.<resource>.keys.ndjson`: a header line, then one key per line) instead of one JSON document, pulled keys

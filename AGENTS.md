@@ -59,7 +59,7 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 - **Public API.** Every public item has a `///` doc comment, with an example where useful. Breaking changes are allowed
   before 1.0 but are recorded in `CHANGELOG.md` with a version bump.
 - **No new dependencies without discussion.** Keep `reso-client` lean (its XML parser is `roxmltree`; OAuth2 and rate
-  limiting are hand-written); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, `reqwest` for the webhook, `axum` for `serve`, `sha2` for purge records, `object_store` behind the `s3` feature, and
+  limiting are hand-written); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, `reqwest` for the webhook, `axum` for `serve`, `sha2` for purge records, `object_store` (`aws` and `gcp`) behind the `s3` feature, and
   `arrow`/`parquet` behind the `parquet` feature).
 - Every bug fixed gets a regression test. Docs change in the same commit as the behaviour they describe.
 
@@ -87,7 +87,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore
   src/sink.rs       FileSink (put_file, exists), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
-  src/s3.rs         S3Options, S3StateStore, S3FileSink: state and data files in an S3-compatible bucket via `object_store` (feature `s3`; `--s3-*` options, #107)
+  src/s3.rs         S3Options, Provider, S3StateStore, S3FileSink: state and data files in an S3-compatible or GCS bucket via `object_store` (feature `s3`; `--s3-*` and `--gcs-bucket` options, #107, #130)
   src/audit.rs      AccessLog, AccessEntry: append-only `audit/access.ndjson`, one line per resource pull (#93); per-run copy to the sink
   src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93)
   src/runs.rs       run id reservation in the state store, manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
@@ -110,7 +110,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/error.rs      IngestError
   examples/loadtest.rs  load-test harness (#90): fake server with 1M records, faults, kill and resume; results in LOADTEST.md
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
-  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
+  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
                     log_json.rs for JSON log lines, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; audit_tests.rs for the access log; purge_tests.rs for purge; lease_tests.rs for held feeds; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon;
                     secret_rotation.rs for rotated secret files and no secrets in logs, own binary)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),

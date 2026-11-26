@@ -129,6 +129,7 @@ async fn fake_s3() -> (String, Objects) {
 
 fn options(endpoint: &str, prefix: &str) -> S3Options {
     S3Options {
+        provider: reso_ingest::Provider::S3,
         bucket: "bkt".to_string(),
         prefix: prefix.to_string(),
         endpoint: Some(endpoint.to_string()),
@@ -801,4 +802,34 @@ async fn bucket_errors_name_the_object() {
         "delete a found object",
         s.delete("a.json", None).await.map(|_| String::new()),
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gcs_interop_endpoint_is_refused_and_bucket_flags_conflict() {
+    let args = |extra: &[&str]| -> Vec<String> {
+        ["status", "--out", "/nonexistent-reso-out"]
+            .iter()
+            .chain(extra)
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let (code, _, err) = cli(&args(&[
+        "--s3-bucket",
+        "b",
+        "--s3-region",
+        "auto",
+        "--s3-endpoint",
+        "https://storage.googleapis.com",
+    ]))
+    .await;
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--gcs-bucket"), "{err}");
+
+    let (code, _, err) = cli(&args(&["--s3-bucket", "a", "--gcs-bucket", "b"])).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("cannot be used with"), "{err}");
+
+    let (code, _, err) = cli(&args(&["--gcs-prefix", "p"])).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("required"), "{err}");
 }

@@ -29,15 +29,15 @@ arrow-array = { version = "60", optional = true }
 arrow-json = { version = "60", optional = true }
 arrow-schema = { version = "60", optional = true }
 parquet = { version = "60", default-features = false, features = ["arrow", "snap"], optional = true }
-# S3-compatible object storage (optional feature `s3`)
-object_store = { version = "0.14", default-features = false, features = ["aws"], optional = true }
+# S3-compatible object storage and native GCS (optional feature `s3`)
+object_store = { version = "0.14", default-features = false, features = ["aws", "gcp"], optional = true }
 futures = { version = "0.3", default-features = false, optional = true }
 
 [features]
 default = []
 # Write Parquet files (`ParquetWriter`, `reso-ingest sync --format parquet`)
 parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-json", "dep:arrow-schema"]
-# S3-compatible state store and output sink (AWS S3, R2, MinIO, GCS interoperability); `object_store` with rustls, no OpenSSL
+# Object storage for state and output: S3-compatible (AWS S3, R2, MinIO, RustFS) and native GCS; `object_store` with rustls, no OpenSSL
 s3 = ["dep:object_store", "dep:futures"]
 
 [dev-dependencies]

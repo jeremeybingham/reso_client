@@ -113,7 +113,7 @@ pub use purge::{
 };
 pub use runner::{run_servers, ServerReport};
 #[cfg(feature = "s3")]
-pub use s3::{S3FileSink, S3Options, S3StateStore};
+pub use s3::{Provider, S3FileSink, S3Options, S3StateStore};
 pub use secrets::ClientHandle;
 pub use serve::{Daemon, ServeOptions};
 pub use shutdown::Shutdown;
