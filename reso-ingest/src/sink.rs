@@ -42,8 +42,9 @@ pub trait FileSink: Debug + Send + Sync {
 
     /// The stored names with their sizes in bytes, in name order (`purge`, #139)
     ///
-    /// Only names at the top level: no directory part. The default refuses, for sinks that only
-    /// take files.
+    /// Names at the top level, plus the files of the partition tree (`source=…/…`, from
+    /// `--partition`) with their folders; nothing else in deeper folders. The default refuses, for
+    /// sinks that only take files.
     ///
     /// # Errors
     ///
@@ -118,6 +119,9 @@ impl LocalDirSink {
 impl FileSink for LocalDirSink {
     fn put_file(&self, name: &str, local: &Path) -> Result<(), IngestError> {
         let dest = self.dir.join(name);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| output_error(parent, e))?;
+        }
         if dest.exists() {
             return Err(IngestError::Output {
                 path: dest.display().to_string(),
@@ -138,21 +142,11 @@ impl FileSink for LocalDirSink {
         self.dir.join(name).display().to_string()
     }
 
-    /// Regular files in the directory (including `.part` files a killed run left)
+    /// Regular files in the directory (including `.part` files a killed run left), and in the
+    /// partition tree (`source=…` folders) at all levels
     fn list(&self) -> Result<Vec<(String, u64)>, IngestError> {
-        let entries = match fs::read_dir(&self.dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(output_error(&self.dir, e)),
-        };
         let mut files = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|e| output_error(&self.dir, e))?;
-            let Ok(meta) = entry.metadata() else { continue };
-            if let (true, Some(name)) = (meta.is_file(), entry.file_name().to_str()) {
-                files.push((name.to_string(), meta.len()));
-            }
-        }
+        list_into(&self.dir, "", &mut files)?;
         files.sort();
         Ok(files)
     }
@@ -166,16 +160,49 @@ impl FileSink for LocalDirSink {
         }
     }
 
+    /// Also removes the partition folders the deletion left empty
     fn delete(&self, name: &str) -> Result<bool, IngestError> {
         let path = self.dir.join(name);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(output_error(&path, e)),
+        let deleted = match fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(output_error(&path, e)),
+        };
+        let mut folder = path.parent();
+        while let Some(dir) = folder.filter(|d| *d != self.dir && d.starts_with(&self.dir)) {
+            // Fails, and stops, at the first folder that still holds something
+            if fs::remove_dir(dir).is_err() {
+                break;
+            }
+            folder = dir.parent();
         }
+        Ok(deleted)
     }
 
     fn local_path(&self, name: &str) -> Option<PathBuf> {
         Some(self.dir.join(name))
     }
+}
+
+/// Files of `dir` into `files` as `prefix` + name; descends into `source=…` folders at the top
+/// and into every folder below them
+fn list_into(dir: &Path, prefix: &str, files: &mut Vec<(String, u64)>) -> Result<(), IngestError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(output_error(dir, e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| output_error(dir, e))?;
+        let Ok(meta) = entry.metadata() else { continue };
+        let Some(name) = entry.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        if meta.is_file() {
+            files.push((format!("{prefix}{name}"), meta.len()));
+        } else if meta.is_dir() && (!prefix.is_empty() || name.starts_with("source=")) {
+            list_into(&entry.path(), &format!("{prefix}{name}/"), files)?;
+        }
+    }
+    Ok(())
 }

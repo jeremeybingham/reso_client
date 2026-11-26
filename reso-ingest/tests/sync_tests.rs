@@ -242,6 +242,163 @@ async fn failed_write_never_advances_the_checkpoint_and_rerun_loses_nothing() {
     assert_eq!(keys(&out), ["K1", "K2", "K3", "K4", "K5"]);
 }
 
+/// Writes every page, then fails the Nth `commit`: the page is in the file but its checkpoint is
+/// never saved, as when the process dies between the two
+struct DiesBeforeCheckpoint {
+    inner: NdjsonWriter,
+    die_on: usize,
+    commits: usize,
+}
+
+impl RecordWriter for DiesBeforeCheckpoint {
+    fn write_batch(&mut self, records: &[Value], at: &str) -> Result<(), IngestError> {
+        self.inner.write_batch(records, at)
+    }
+    fn write_deletes(&mut self, keys: &[Value], at: &str) -> Result<(), IngestError> {
+        self.inner.write_deletes(keys, at)
+    }
+    fn flush(&mut self) -> Result<(), IngestError> {
+        self.inner.flush()
+    }
+    fn commit(&mut self) -> Result<bool, IngestError> {
+        self.inner.commit()?;
+        self.commits += 1;
+        if self.commits == self.die_on {
+            return Err(IngestError::Output {
+                path: "x".into(),
+                message: "killed".into(),
+            });
+        }
+        Ok(true)
+    }
+    fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {
+        self.inner.finish()
+    }
+}
+
+/// The lines of one run's files, in file order
+fn run_lines(dir: &std::path::Path, run: &str) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains(&format!(".{run}.")) && n.ends_with(".ndjson"))
+        .collect();
+    names.sort();
+    names
+        .iter()
+        .flat_map(|n| {
+            std::fs::read_to_string(dir.join(n))
+                .unwrap()
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The idempotency key of a record line: (source, resource, key, ModificationTimestamp)
+fn idempotency_key(line: &Value) -> (String, String, String, String) {
+    let text = |v: &Value| v.as_str().unwrap().to_string();
+    (
+        text(&line["source"]),
+        text(&line["resource"]),
+        text(&line["record"]["ListingKey"]),
+        text(&line["record"]["ModificationTimestamp"]),
+    )
+}
+
+/// The delivery guarantee in reso-ingest/README.md: at-least-once, ordered by
+/// (ModificationTimestamp, key) within a resource, and a repeat is the same record
+#[tokio::test]
+async fn an_interrupted_run_repeats_identical_records_in_order() {
+    let d = data(5);
+    let srv = server(d).await;
+    let dir = TempDir::new("repeat");
+    let store = CheckpointStore::new(dir.0.join("cp"));
+    let out = dir.0.join("out");
+
+    // Pages are K1-K2, K3-K4, K5; the run dies after writing K3-K4, before saving its checkpoint
+    let mut w = DiesBeforeCheckpoint {
+        inner: NdjsonWriter::new(&out, "mls", "Property", "r1", 1 << 20).unwrap(),
+        die_on: 2,
+        commits: 0,
+    };
+    let e = sync_resource(
+        &client(&srv),
+        "mls",
+        "Property",
+        spec(),
+        &mut w,
+        &store,
+        false,
+    )
+    .await;
+    assert!(e.error.unwrap().contains("killed"));
+    let mut w = NdjsonWriter::new(&out, "mls", "Property", "r2", 1 << 20).unwrap();
+    let e = sync_resource(
+        &client(&srv),
+        "mls",
+        "Property",
+        spec(),
+        &mut w,
+        &store,
+        false,
+    )
+    .await;
+    assert_eq!(e.error, None);
+
+    let (r1, r2) = (run_lines(&out, "r1"), run_lines(&out, "r2"));
+    let parse = |lines: &[String]| -> Vec<Value> {
+        lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    let (v1, v2) = (parse(&r1), parse(&r2));
+    let keys = |v: &[Value]| -> Vec<String> { v.iter().map(|l| idempotency_key(l).2).collect() };
+    // At least once: nothing is lost, and the page without a checkpoint comes again
+    assert_eq!(keys(&v1), ["K1", "K2", "K3", "K4"]);
+    assert_eq!(keys(&v2), ["K3", "K4", "K5"]);
+
+    // In order: each run's lines ascend by (ModificationTimestamp, key)
+    for v in [&v1, &v2] {
+        let order: Vec<(String, String)> = v
+            .iter()
+            .map(|l| {
+                let k = idempotency_key(l);
+                (k.3, k.2)
+            })
+            .collect();
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(order, sorted);
+    }
+
+    // A repeat is the same record: the line differs only in fetched_at and run_id, the record
+    // text after `"record":` is byte for byte the same, and so is the idempotency key
+    for (a, b) in [(&r1[2], &r2[0]), (&r1[3], &r2[1])] {
+        let (mut va, mut vb): (Value, Value) = (
+            serde_json::from_str(a).unwrap(),
+            serde_json::from_str(b).unwrap(),
+        );
+        assert_eq!(idempotency_key(&va), idempotency_key(&vb));
+        let tail = |l: &str| l[l.find("\"record\":").unwrap()..].to_string();
+        assert_eq!(tail(a), tail(b));
+        assert_ne!(va["run_id"], vb["run_id"]);
+        for tag in ["fetched_at", "run_id"] {
+            va.as_object_mut().unwrap().remove(tag);
+            vb.as_object_mut().unwrap().remove(tag);
+        }
+        assert_eq!(va, vb);
+    }
+
+    // Keeping one line per idempotency key leaves exactly the server's five records
+    let mut unique: Vec<_> = v1.iter().chain(&v2).map(idempotency_key).collect();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 5);
+}
+
 #[tokio::test]
 async fn start_over_clears_the_checkpoint_and_reloads() {
     let srv = server(data(3)).await;

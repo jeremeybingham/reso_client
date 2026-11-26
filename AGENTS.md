@@ -84,10 +84,10 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/secrets.rs    ClientHandle: a server's client, rebuilt when its secrets change; retry once after a 401 (#92)
   src/runner.rs     run_servers: one independent task per server, concurrency cap
   src/output.rs     RecordWriter, NdjsonWriter: tagged lines, size rotation, never overwrite; reserve_run_id (.run.<id>)
-  src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature)
+  src/parquet_out.rs  ParquetWriter typed from $metadata (`parquet` feature); `partitioned` = Hive folders source=/resource=/date= (#86)
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore
-  src/sink.rs       FileSink (put_file, exists; list, get_file, delete for purge, #139), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
+  src/sink.rs       FileSink (put_file, exists; list, get_file, delete for purge, #139), LocalDirSink: where finished data files go; list includes the source=… partition tree; writers take one with `with_sink` (#85, S3 in #107)
   src/s3.rs         S3Options, Provider, S3StateStore, S3FileSink, S3MediaStore: state, data and media files in an S3-compatible or GCS bucket via `object_store` (feature `s3`; `--s3-*` and `--gcs-bucket` options, #107, #130)
   src/audit.rs      AccessLog, AccessEntry: append-only `audit/access.ndjson`, one line per resource pull (#93); per-run copy to the sink
   src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93); in a bucket too (#139)

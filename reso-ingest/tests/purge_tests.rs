@@ -73,6 +73,11 @@ async fn cli(args: &[&str]) -> (i32, String, String) {
 
 /// Two servers synced into `dir/out`, a media file each, a media index for alpha
 async fn setup(dir: &Path) -> PathBuf {
+    setup_with(dir, &[]).await
+}
+
+/// [`setup`] with more `sync` options
+async fn setup_with(dir: &Path, extra: &[&str]) -> PathBuf {
     std::env::set_var("PURGE_TEST_TOKEN", "purge-secret");
     let (a, b) = (server().await, server().await);
     let mut config = String::new();
@@ -85,14 +90,15 @@ async fn setup(dir: &Path) -> PathBuf {
     let config_path = dir.join("servers.toml");
     fs::write(&config_path, config).unwrap();
     let out = dir.join("out");
-    let (code, _, err) = cli(&[
+    let mut args = vec![
         "sync",
         "--config",
         config_path.to_str().unwrap(),
         "--out",
         out.to_str().unwrap(),
-    ])
-    .await;
+    ];
+    args.extend_from_slice(extra);
+    let (code, _, err) = cli(&args).await;
     assert_eq!(code, 0, "{err}");
     for name in ["alpha", "beta"] {
         let m = out.join("media").join(name);
@@ -276,6 +282,52 @@ async fn execute_removes_only_that_servers_data_and_keeps_the_log() {
         .contains(&"alpha.Property.json".to_string()));
     // purge's own leases are released, not left behind
     assert!(!state_keys(&out).iter().any(|k| k.ends_with(".lock")));
+}
+
+#[cfg(feature = "parquet")]
+#[tokio::test]
+async fn execute_removes_that_servers_partition_folder() {
+    let dir = TempDir::new("hive");
+    let out = setup_with(&dir.0, &["--format", "parquet", "--partition"]).await;
+    let alpha = out.join("source=alpha");
+    let beta = walk(&out.join("source=beta"), "");
+    assert_eq!(beta.len(), 1, "{beta:?}");
+    // A file a killed run left in alpha's folder; no manifest names it
+    let day = fs::read_dir(alpha.join("resource=Property"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(day.join("alpha.Property.x.0001.parquet.part"), b"PAR").unwrap();
+
+    let (code, stdout, err) =
+        cli(&["purge", "--server", "alpha", "--out", out.to_str().unwrap()]).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(stdout.contains("data files: 2 (2 records"), "{stdout}");
+    assert!(
+        stdout.contains("source=alpha/resource=Property/date="),
+        "{stdout}"
+    );
+
+    let (code, stdout, err) = cli(&[
+        "purge",
+        "--server",
+        "alpha",
+        "--out",
+        out.to_str().unwrap(),
+        "--execute",
+        "--by",
+        "ops",
+    ])
+    .await;
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        stdout.starts_with("purged server alpha: 2 data files (2 records)"),
+        "{stdout}"
+    );
+    assert!(!alpha.exists(), "the emptied folders go too");
+    assert_eq!(walk(&out.join("source=beta"), ""), beta);
 }
 
 #[tokio::test]

@@ -26,7 +26,8 @@ cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J
 - **`sync`** pulls each resource the server's `$metadata` lists (after the config's `include`/`exclude` filters),
   continuing from the saved checkpoint; the first run is the full load. `--server` and `--resource` narrow it (each can
   be repeated). `--deletes` also writes delete events. `--start-over` drops the selected checkpoints first.
-  `--max-file-mb` (default 256) starts a new data file after that size. `--media` queues each page's media files as soon
+  `--max-file-mb` (default 256) starts a new data file after that size. `--partition` (with `--format parquet`) writes
+  files into Hive-style folders (see [Partitioned Parquet](#partitioned-parquet---partition)). `--media` queues each page's media files as soon
   as the page is written, and download workers fetch them while the sync goes on, into `--media-dir` or the bucket (see
   [Media during sync](#media-during-sync-sync---media)).
   `--backfill` runs a first load with progress on its own share of the rate limits, optionally for a
@@ -281,7 +282,8 @@ In `--out` (default `reso-out`):
   directory behind, and the next pass removes any such directory unchanged for a day (#134). A writer never overwrites an existing file:
   it stops with an error instead.
 - `state/` (or `--state`): one JSON checkpoint per server and resource (and one `$metadata` snapshot per server), saved after each batch is written, so a rerun
-  after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times.
+  after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times (see
+  [Delivery guarantee](#delivery-guarantee)).
 - `state/<server>.<resource>.keys.ndjson` (with `--deletes` and no event feed): the key set last seen, a header line
   (server, resource, time) then one key per line as JSON, sorted, without repeats. A key set in the older one-JSON
   format (`.keys.json`) is converted on the next `--deletes` run.
@@ -374,12 +376,37 @@ Finished data files can go to a `FileSink` instead of staying in `--out`: a libr
 point (so `sync` saves a checkpoint) only after the sink has it. `LocalDirSink` copies into a directory; `S3FileSink`
 uploads to a bucket, and the command selects it with `--s3-bucket` or `--gcs-bucket` (see above).
 
+## Delivery guarantee
+
+What a consumer of the data files can rely on, for resources synced incrementally (a single-field key and a
+`ModificationTimestamp`; others are skipped):
+
+- **At least once.** Every record the server returns for the replication filter ends up in a data file. A record can
+  arrive more than once, never zero times. Repeats come from a run that stopped between writing a page and saving its
+  checkpoint (a crash, a failed checkpoint write, or with Parquet or a bucket a file that was never finished): the next
+  run starts after the last saved checkpoint and fetches those pages again. A record changed on the server while a run
+  is going can also come twice in one run, with two different `ModificationTimestamp`s.
+- **Ordered within a resource.** Within one run of one resource, records come in the order the server sorts them:
+  `ModificationTimestamp`, then the key. Files of a run are numbered in that order (`0001`, `0002`, …), and run ids
+  sort by start time. Delete events of a run follow its records. Not ordered: different resources or servers, and
+  backfill windows (`sync --backfill --from/--to`), which run separately.
+- **A repeat is the same record.** A repeated record is the same JSON the server sent; only the `fetched_at` and
+  `run_id` tags differ (in NDJSON, the text from `"record":` to the end of the line is byte for byte the same).
+  `sync_tests.rs` `an_interrupted_run_repeats_identical_records_in_order` checks this.
+
+**Idempotency key:** `(source, resource, <key field>, ModificationTimestamp)`. Two lines with the same idempotency key
+hold the same version of a record; keep either. For the latest state of a record, keep, per `(source, resource, key)`,
+the line with the newest `fetched_at`, then the newest `ModificationTimestamp`. A delete event (`"event":"delete"`, with
+`key` instead of `record`) that is newer than every version of the key means the record is gone. The
+[compaction recipe](#compacting-parquet-files) below does this.
+
 ## Purging a source
 
 When an MLS licence ends, `purge --server NAME` removes what `reso-ingest` wrote for that server (#93):
 
 - the data files in `--out` whose `source` tag is the server (NDJSON files, read line by line, including `.part` files a
-  killed run left), and the files the run manifests list under the server (Parquet files);
+  killed run left), the files the run manifests list under the server (Parquet files), and everything in its partition
+  folder, `source=<server>/` (`--partition`; the emptied folders are removed too);
 - its media files, `<media-dir>/<server>/` (default `<out>/media/<server>/`), or `<prefix>/media/<server>/` with a bucket;
 - its state keys: checkpoints, key sets, event sequences, the schema snapshot and leases (`<server>.*`) and the media
   index (`media/<server>.json` and its deltas, `media/<server>/*.json`).
@@ -434,7 +461,7 @@ interval = "2m"
 
 - **Each sync is `sync --server S --resource R`** for that one feed: it takes the feed's lease, writes tagged files,
   checkpoints after each page, and does the options you gave `serve` (`--deletes`, `--allow-mass-deletes`, `--media`,
-  `--format`, `--max-file-mb`). `$metadata` is read at the start of every sync.
+  `--format`, `--max-file-mb`, `--partition`). `$metadata` is read at the start of every sync.
 - **Timing.** The first sync of each feed starts after a random delay of up to 10 seconds (or its interval, if shorter) so
   the feeds do not hit a server together; after a sync the feed waits its interval plus up to 10% jitter. A feed
   that fails waits twice as long after each failure in a row, up to 15 minutes (or its interval, if that is longer), and
@@ -591,12 +618,58 @@ Build with the `parquet` feature and pass `--format parquet` for typed columns i
 cargo run -p reso-ingest --features parquet -- sync --config servers.toml --format parquet
 ```
 
-Columns are the four tags, `fetched_at` (timestamp), `event`, `key` (delete events) and a `record` struct with one
+Columns are the four tags, `fetched_at` (UTC timestamp in milliseconds), `event`, `key` (delete events) and a `record` struct with one
 field per `$metadata` property: strings, booleans, integers, doubles, `Date32`, UTC millisecond timestamps, lists for
 collections. Decimals become doubles; enum, complex and unknown types become text. Properties missing from `$metadata`
 are dropped, except navigation properties named in `expand`, which are kept as JSON text. A Parquet file is readable only once finished, so `sync` keeps one file open across pages and saves a checkpoint only
 when the file holding its rows is finished (at `--max-file-mb` or the end of the resource). A run that dies mid-file leaves
 a `.part` file and resumes from the last finished file, so those pages are fetched again (at-least-once).
+
+### Partitioned Parquet (`--partition`)
+
+`sync --format parquet --partition` (and `serve`) writes each file into a Hive-style folder:
+
+```
+source=<server>/resource=<resource>/date=<YYYY-MM-DD>/<server>.<resource>.<run>.<NNNN>.parquet
+```
+
+`date` is the UTC day the rows were fetched (from `fetched_at`): a run that goes past midnight starts a new file in the
+next day's folder. Files are still rotated at `--max-file-mb`, the target file size (default 256 MiB). Folder values
+keep letters, digits, `.`, `-` and `_` and escape every other byte as `%XX`, as Hive does, so they decode back to the
+`source` and `resource` columns, which the files still hold. Manifests list the files with their folders. With
+`--s3-bucket` or `--gcs-bucket` the folders become key prefixes under `<prefix>/data/`. `--partition` needs
+`--format parquet`. Query engines that understand Hive partitions read the tree directly and skip folders a filter
+rules out:
+
+```sql
+-- DuckDB
+SELECT record.ListingKey, record.ListPrice
+FROM read_parquet('reso-out/source=*/resource=Property/date=*/*.parquet', hive_partitioning = true)
+WHERE source = 'mls-one' AND date >= DATE '2026-11-01';
+```
+
+### Compacting Parquet files
+
+Many runs leave many small files, and repeats ([Delivery guarantee](#delivery-guarantee)). There is no `compact`
+command; this DuckDB recipe merges one resource's files and keeps the latest version of each key, with the rule above.
+Replace `ListingKey` with the resource's key field:
+
+```sql
+COPY (
+  SELECT * EXCLUDE (k, ts)
+  FROM (
+    SELECT *, coalesce(record.ListingKey, key) AS k, record.ModificationTimestamp AS ts
+    FROM read_parquet('reso-out/source=*/resource=Property/date=*/*.parquet', hive_partitioning = false)
+  )
+  QUALIFY row_number() OVER (PARTITION BY source, k ORDER BY fetched_at DESC, ts DESC NULLS LAST) = 1
+      AND event IS NULL   -- drop keys whose latest event is a delete; remove this line to keep the delete events
+) TO 'compacted' (FORMAT parquet, PARTITION_BY (source, resource), FILE_SIZE_BYTES '256MB');
+```
+
+It writes `compacted/source=…/resource=…/data_N.parquet`, a new tree: check it, then replace the old files and keep
+the manifests. Compact while no `sync` writes to the resource, or only files older than the newest run, so no file is
+removed before it is merged. The same query reads NDJSON output with `read_json('reso-out/*.Property.*.ndjson')`.
+The recipe was checked with DuckDB 1.5 on files the writer made; it is not run in CI.
 
 ## Load test
 

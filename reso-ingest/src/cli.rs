@@ -135,6 +135,11 @@ enum Command {
         /// Data file format
         #[arg(long, value_enum, default_value_t = Format::Ndjson)]
         format: Format,
+        /// Write Parquet files into Hive-style folders: source=<server>/resource=<name>/date=<day>/
+        ///
+        /// The date is the UTC day the rows were fetched. Needs --format parquet.
+        #[arg(long)]
+        partition: bool,
         /// Also write the run's metrics (Prometheus text format) to this file
         ///
         /// Replaced atomically at the end of the run, for the node_exporter textfile collector.
@@ -184,6 +189,11 @@ enum Command {
         /// Data file format
         #[arg(long, value_enum, default_value_t = Format::Ndjson)]
         format: Format,
+        /// Write Parquet files into Hive-style folders: source=<server>/resource=<name>/date=<day>/
+        ///
+        /// The date is the UTC day the rows were fetched. Needs --format parquet.
+        #[arg(long)]
+        partition: bool,
         #[command(flatten)]
         storage: StorageArgs,
     },
@@ -350,6 +360,7 @@ struct Args {
     backfill: Option<BackfillWindow>,
     max_file_mb: Option<u64>,
     format: Format,
+    partition: bool,
     media_dir: Option<PathBuf>,
     limit: Option<u64>,
     metrics_file: Option<PathBuf>,
@@ -595,6 +606,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             to,
             max_file_mb,
             format,
+            partition,
             metrics_file,
             storage,
         } => {
@@ -619,6 +631,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 backfill,
                 max_file_mb: Some(max_file_mb),
                 format,
+                partition,
                 metrics_file,
                 storage,
                 ..Args::default()
@@ -637,6 +650,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             media_dir,
             max_file_mb,
             format,
+            partition,
             storage,
         } => {
             let args = Args {
@@ -650,6 +664,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 media_dir,
                 max_file_mb: Some(max_file_mb),
                 format,
+                partition,
                 storage,
                 ..Args::default()
             };
@@ -788,6 +803,15 @@ pub(crate) fn client_for(server: &ServerConfig) -> Result<ResoClient, String> {
 }
 
 /// Print a storage setup error (a bucket or credentials that cannot be used) and return exit code 2
+/// `--partition` only applies to Parquet files
+fn check_partition(args: &Args, err: &mut dyn Write) -> Result<(), i32> {
+    if args.partition && args.format == Format::Ndjson {
+        let _ = writeln!(err, "error: --partition needs --format parquet");
+        return Err(2);
+    }
+    Ok(())
+}
+
 fn usage_error(err: &mut dyn Write, e: &IngestError) -> i32 {
     let _ = writeln!(err, "error: {e}");
     2
@@ -801,6 +825,9 @@ async fn serve(
     err: &mut dyn Write,
     shutdown: Shutdown,
 ) -> i32 {
+    if let Err(code) = check_partition(&args, err) {
+        return code;
+    }
     let (mut config, servers) = match load_servers(&args, err) {
         Ok(v) => v,
         Err(code) => return code,
@@ -821,6 +848,7 @@ async fn serve(
     options.media = args.media.then(|| args.media_root());
     options.max_file_bytes = args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024;
     options.format = args.format;
+    options.partition = args.partition;
     match Daemon::start(config, options, shutdown).await {
         Ok(daemon) => {
             let _ = writeln!(err, "listening on http://{}", daemon.local_addr());
@@ -852,6 +880,9 @@ pub(crate) struct SyncOptions {
     pub(crate) backfill: Option<BackfillWindow>,
     pub(crate) max_file_bytes: u64,
     pub(crate) format: Format,
+    /// Hive-style partition folders for Parquet files (`--partition`)
+    #[cfg_attr(not(feature = "parquet"), allow(dead_code))]
+    pub(crate) partition: bool,
     /// Where finished data files go; `None` leaves them in `out`
     pub(crate) sink: Option<Arc<dyn crate::sink::FileSink>>,
     pub(crate) shutdown: Shutdown,
@@ -860,6 +891,9 @@ pub(crate) struct SyncOptions {
 }
 
 async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Shutdown) -> i32 {
+    if let Err(code) = check_partition(&args, err) {
+        return code;
+    }
     let (config, servers) = match load_servers(&args, err) {
         Ok(v) => v,
         Err(code) => return code,
@@ -887,6 +921,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         backfill: args.backfill.clone(),
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
+        partition: args.partition,
         access: AccessLog::new(&args.out()),
         sink,
         shutdown,
@@ -1652,7 +1687,8 @@ fn make_writer(
                 options.max_file_bytes,
                 entity,
             )?
-            .with_expanded(expanded);
+            .with_expanded(expanded)
+            .partitioned(options.partition);
             if let Some(sink) = &options.sink {
                 writer = writer.with_sink(Arc::clone(sink));
             }

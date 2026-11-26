@@ -112,7 +112,10 @@ pub use metrics::{
     parse_rfc3339, render_media_prometheus, render_prometheus, render_prometheus_at,
     write_metrics_file,
 };
-pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWriter};
+pub use output::{
+    hive_value, new_run_id, now_rfc3339, partition_prefix, reserve_run_id, NdjsonWriter,
+    RecordWriter,
+};
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
 pub use purge::{

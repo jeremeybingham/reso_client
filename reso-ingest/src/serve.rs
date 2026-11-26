@@ -68,6 +68,8 @@ pub struct ServeOptions {
     pub max_file_bytes: u64,
     /// Data file format
     pub format: Format,
+    /// Hive-style partition folders for Parquet files (`--partition`)
+    pub partition: bool,
 }
 
 impl ServeOptions {
@@ -84,6 +86,7 @@ impl ServeOptions {
             media: None,
             max_file_bytes: 256 * 1024 * 1024,
             format: Format::Ndjson,
+            partition: false,
         }
     }
 }
@@ -420,6 +423,7 @@ async fn sync_once(
         backfill: None,
         max_file_bytes: options.max_file_bytes,
         format: options.format,
+        partition: options.partition,
         sink: options.sink.clone(),
         shutdown: shutdown.clone(),
         access: AccessLog::new(&options.out),

@@ -16,7 +16,9 @@ use serde_json::Value;
 
 use crate::error::IngestError;
 use crate::manifest::FileEntry;
-use crate::output::{create_new_file, output_error, sanitize, RecordWriter};
+use crate::output::{
+    create_new_file, hive_value, output_error, partition_prefix, sanitize, RecordWriter,
+};
 use crate::sink::FileSink;
 
 /// Rows handed to the Arrow decoder at a time
@@ -85,7 +87,7 @@ fn schema_from(record_types: &[(String, DataType)]) -> SchemaRef {
         Field::new("resource", DataType::Utf8, false),
         Field::new(
             "fetched_at",
-            DataType::Timestamp(TimeUnit::Second, Some("+00:00".into())),
+            DataType::Timestamp(TimeUnit::Millisecond, Some("+00:00".into())),
             false,
         ),
         Field::new("run_id", DataType::Utf8, false),
@@ -126,6 +128,13 @@ struct Open {
     part_path: PathBuf,
     final_path: PathBuf,
     rows: u64,
+    /// The `date=` partition the file is in (partitioned output only)
+    date: Option<String>,
+}
+
+/// The UTC date of an RFC 3339 time (its first ten characters)
+fn date_of(fetched_at: &str) -> String {
+    fetched_at.get(..10).unwrap_or(fetched_at).to_string()
 }
 
 /// Writes tagged records as Parquet files typed from `$metadata`, rotating files by size
@@ -146,6 +155,11 @@ struct Open {
 ///
 /// A value that does not fit its column (for example text in an integer column) makes the write
 /// fail with [`IngestError::Output`], and the resource stops.
+///
+/// **Partitioned output** ([`partitioned`](Self::partitioned)) puts each file in a Hive-style folder,
+/// `source=<server>/resource=<resource>/date=<YYYY-MM-DD>/`, where the date is the UTC date of
+/// `fetched_at`. A file holds one date: a batch fetched on a new date starts a new file. The file
+/// names and the rows stay the same, so the `source` and `resource` columns match the folder values.
 pub struct ParquetWriter {
     dir: PathBuf,
     source: String,
@@ -157,6 +171,7 @@ pub struct ParquetWriter {
     current: Option<Open>,
     files: Vec<FileEntry>,
     sink: Option<Arc<dyn FileSink>>,
+    partitioned: bool,
 }
 
 impl ParquetWriter {
@@ -186,6 +201,7 @@ impl ParquetWriter {
             current: None,
             files: Vec::new(),
             sink: None,
+            partitioned: false,
         })
     }
 
@@ -196,6 +212,17 @@ impl ParquetWriter {
     #[must_use]
     pub fn with_sink(mut self, sink: Arc<dyn FileSink>) -> Self {
         self.sink = Some(sink);
+        self
+    }
+
+    /// Write each file into a Hive-style partition folder (`source=…/resource=…/date=…/`)
+    ///
+    /// File names in the manifest then carry the folder, e.g.
+    /// `source=mls/resource=Property/date=2026-11-26/mls.Property.<run>.0001.parquet`.
+    /// Call before the first row.
+    #[must_use]
+    pub fn partitioned(mut self, on: bool) -> Self {
+        self.partitioned = on;
         self
     }
 
@@ -229,9 +256,17 @@ impl ParquetWriter {
             .map_err(|e| self.fail(e))
     }
 
-    fn open_next(&mut self) -> Result<(), IngestError> {
+    fn open_next(&mut self, fetched_at: &str) -> Result<(), IngestError> {
+        let date = self.partitioned.then(|| date_of(fetched_at));
+        let folder = date.as_ref().map_or(String::new(), |d| {
+            format!(
+                "{}date={}/",
+                partition_prefix(&self.source, &self.resource),
+                hive_value(d)
+            )
+        });
         let name = format!(
-            "{}.{}.{}.{:04}.parquet",
+            "{folder}{}.{}.{}.{:04}.parquet",
             sanitize(&self.source),
             sanitize(&self.resource),
             sanitize(&self.run_id),
@@ -239,6 +274,9 @@ impl ParquetWriter {
         );
         let final_path = self.dir.join(&name);
         let part_path = self.dir.join(format!("{name}.part"));
+        if let Some(parent) = part_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| output_error(parent, e))?;
+        }
         let taken = match &self.sink {
             Some(sink) => sink.exists(&name)?,
             None => final_path.exists(),
@@ -267,6 +305,7 @@ impl ParquetWriter {
             part_path,
             final_path,
             rows: 0,
+            date,
         });
         Ok(())
     }
@@ -281,13 +320,22 @@ impl ParquetWriter {
         decoder.flush().map_err(|e| self.fail(e))
     }
 
-    /// Append batches to the current file, opening one if needed, and rotate when it is big enough
-    fn append(&mut self, batches: &[RecordBatch]) -> Result<(), IngestError> {
+    /// Append batches to the current file, opening one if needed (or, partitioned, when the date
+    /// changed), and rotate when it is big enough
+    fn append(&mut self, batches: &[RecordBatch], fetched_at: &str) -> Result<(), IngestError> {
         if batches.is_empty() {
             return Ok(());
         }
+        let new_date = self.partitioned
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|c| c.date.as_deref() != Some(date_of(fetched_at).as_str()));
+        if new_date {
+            self.close_current()?;
+        }
         if self.current.is_none() {
-            self.open_next()?;
+            self.open_next(fetched_at)?;
         }
         let cur = self.current.as_mut().expect("file was just opened");
         for batch in batches {
@@ -314,6 +362,7 @@ impl ParquetWriter {
             part_path,
             final_path,
             rows,
+            date: _,
         } = cur;
         writer
             .close()
@@ -324,6 +373,14 @@ impl ParquetWriter {
             let name = self.files.last().map_or("", |f| f.name.as_str());
             sink.put_file(name, &part_path)?;
             fs::remove_file(&part_path).map_err(|e| output_error(&part_path, e))?;
+            // Empty partition folders of the staging area go too
+            let mut folder = part_path.parent();
+            while let Some(d) = folder.filter(|d| *d != self.dir && d.starts_with(&self.dir)) {
+                if fs::remove_dir(d).is_err() {
+                    break;
+                }
+                folder = d.parent();
+            }
         } else {
             fs::rename(&part_path, &final_path).map_err(|e| output_error(&final_path, e))?;
         }
@@ -362,7 +419,7 @@ impl RecordWriter for ParquetWriter {
             })
             .collect();
         let batch = self.encode(&rows)?;
-        self.append(batch.as_slice())
+        self.append(batch.as_slice(), fetched_at)
     }
 
     fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {
@@ -379,7 +436,7 @@ impl RecordWriter for ParquetWriter {
             })
             .collect();
         let batch = self.encode(&rows)?;
-        self.append(batch.as_slice())
+        self.append(batch.as_slice(), fetched_at)
     }
 
     fn flush(&mut self) -> Result<(), IngestError> {

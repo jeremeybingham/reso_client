@@ -407,6 +407,71 @@ async fn sync_writes_parquet_with_the_format_flag() {
     assert_eq!(data_keys(&out), Vec::<String>::new(), "no NDJSON files");
 }
 
+#[cfg(feature = "parquet")]
+#[tokio::test]
+async fn sync_partitions_parquet_into_hive_folders() {
+    std::env::set_var("CLI_TEST_TOKEN_HIVE", SECRET);
+    let srv = server().await;
+    let dir = TempDir::new("hive");
+    let config = write_config(&dir, &[("mls", srv.uri(), "CLI_TEST_TOKEN_HIVE")]);
+    let out = dir.path("out");
+    let args = [
+        "sync",
+        "--config",
+        config.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--format",
+        "parquet",
+        "--partition",
+    ];
+    let r = cli(&args).await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+
+    let folder = out.join("source=mls/resource=Property");
+    let dates: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(dates.len(), 1, "{dates:?}");
+    assert!(dates[0].starts_with("date=20"), "{dates:?}");
+    let manifest = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("manifest.")
+        })
+        .unwrap();
+    let m: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+    let name = m["resources"][0]["files"][0]["name"].as_str().unwrap();
+    assert!(
+        name.starts_with(&format!(
+            "source=mls/resource=Property/{}/mls.Property.",
+            dates[0]
+        )),
+        "{name}"
+    );
+    assert!(out.join(name).is_file());
+
+    // --partition is for Parquet only
+    let r = cli(&args[..5]
+        .iter()
+        .copied()
+        .chain(["--partition"])
+        .collect::<Vec<_>>())
+    .await;
+    assert_eq!(r.code, 2);
+    assert!(
+        r.err.contains("--partition needs --format parquet"),
+        "{}",
+        r.err
+    );
+}
+
 const RICH_METADATA: &str = r#"<?xml version="1.0"?>
 <edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
 <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="org.reso.metadata">

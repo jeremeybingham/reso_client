@@ -266,3 +266,131 @@ fn a_sink_receives_each_finished_file_and_the_staged_copy_goes() {
     assert!(entries[0].bytes > 0);
     assert_eq!(std::fs::read_dir(&staging.0).unwrap().count(), 0);
 }
+
+/// Every file under `dir`, at all levels, as paths relative to it
+fn tree(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let rel = p.strip_prefix(dir).unwrap().to_string_lossy().into_owned();
+                found.push(rel);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn partitioned_files_go_into_hive_folders_by_fetch_date() {
+    let dir = TempDir::new("hive");
+    let mut w = writer(&dir, 1 << 30).partitioned(true);
+    w.write_batch(&[json!({"ListingKey": "A1"})], "2026-01-01T23:59:58Z")
+        .unwrap();
+    w.write_batch(&[json!({"ListingKey": "A2"})], "2026-01-01T23:59:59Z")
+        .unwrap();
+    // A new day starts a new file in a new folder
+    w.write_batch(&[json!({"ListingKey": "A3"})], "2026-01-02T00:00:01Z")
+        .unwrap();
+    w.write_deletes(&[json!("A0")], "2026-01-02T00:00:02Z")
+        .unwrap();
+    let files = w.finish().unwrap();
+    let day1 =
+        "source=mls-one/resource=Property/date=2026-01-01/mls-one.Property.run1.0001.parquet";
+    let day2 =
+        "source=mls-one/resource=Property/date=2026-01-02/mls-one.Property.run1.0002.parquet";
+    let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, [day1, day2]);
+    assert_eq!(tree(&dir.0), [day1, day2], "no .part file is left");
+    let rows = read_rows(&dir.0.join(day1));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0]["source"], "mls-one",
+        "the tag column matches the folder"
+    );
+    assert_eq!(rows[0]["resource"], "Property");
+    let rows = read_rows(&dir.0.join(day2));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1]["event"], "delete");
+    assert_eq!(files[0].records, 2);
+}
+
+#[test]
+fn partitioned_files_rotate_by_size_within_a_date() {
+    let dir = TempDir::new("hive-rotate");
+    let mut w = writer(&dir, 20_000).partitioned(true);
+    for batch in 0..4 {
+        let records: Vec<Value> = (0..2000)
+            .map(|i| json!({"ListingKey": format!("K{batch}-{i}")}))
+            .collect();
+        w.write_batch(&records, "2026-11-24T10:00:05Z").unwrap();
+    }
+    let files = w.finish().unwrap();
+    assert!(files.len() > 1, "{files:?}");
+    for (i, f) in files.iter().enumerate() {
+        assert_eq!(
+            f.name,
+            format!(
+                "source=mls-one/resource=Property/date=2026-11-24/mls-one.Property.run1.{:04}.parquet",
+                i + 1
+            )
+        );
+    }
+    assert_eq!(files.iter().map(|f| f.records).sum::<u64>(), 8000);
+}
+
+#[test]
+fn partition_folders_escape_names_and_reach_a_sink() {
+    let staging = TempDir::new("hive-stage");
+    let dest = TempDir::new("hive-dest");
+    let sink = std::sync::Arc::new(reso_ingest::LocalDirSink::new(&dest.0).unwrap());
+    let metadata = Metadata::parse(METADATA).unwrap();
+    let entity = metadata.resource("Property").unwrap();
+    let mut w = ParquetWriter::new(&staging.0, "mls one/x", "Property", "r", 1 << 20, entity)
+        .unwrap()
+        .with_sink(sink)
+        .partitioned(true);
+    w.write_batch(&[json!({"ListingKey": "A1"})], "2026-11-25T00:00:00Z")
+        .unwrap();
+    let files = w.finish().unwrap();
+    let name =
+        "source=mls%20one%2Fx/resource=Property/date=2026-11-25/mls_one_x.Property.r.0001.parquet";
+    assert_eq!(files[0].name, name);
+    assert_eq!(tree(&dest.0), [name]);
+    assert_eq!(read_rows(&dest.0.join(name))[0]["source"], "mls one/x");
+    assert_eq!(
+        std::fs::read_dir(&staging.0).unwrap().count(),
+        0,
+        "the staged copy and its folders go"
+    );
+}
+
+/// Regression: `fetched_at` was stored in seconds, which Parquet has no timestamp type for, so
+/// other readers (DuckDB, Spark) saw a plain integer
+#[test]
+fn fetched_at_is_a_parquet_timestamp() {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let dir = TempDir::new("ts");
+    let mut w = writer(&dir, 1 << 20);
+    w.write_batch(&[json!({"ListingKey": "A1"})], "2026-11-24T10:00:05Z")
+        .unwrap();
+    let files = w.finish().unwrap();
+    let reader =
+        SerializedFileReader::new(File::open(dir.0.join(&files[0].name)).unwrap()).unwrap();
+    let schema = reader.metadata().file_metadata().schema_descr();
+    let column = (0..schema.num_columns())
+        .map(|i| schema.column(i))
+        .find(|c| c.name() == "fetched_at")
+        .unwrap();
+    let ty = format!("{:?}", column.logical_type_ref());
+    assert!(
+        ty.contains("Timestamp") && ty.contains("MILLIS") && ty.contains("true"),
+        "{ty}"
+    );
+}
