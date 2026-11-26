@@ -7,20 +7,55 @@
 //! atomically) and checked against the manifests the sink already holds; the manifests go to the
 //! sink next to the data files they list, and a copy of the run manifest is kept in the state store
 //! under [`LAST_RUN_KEY`].
+//!
+//! A run killed before its manifest is delivered never releases its reservation. Each reservation
+//! records when it was made, and [`reserve`] removes ones older than [`STALE_AFTER`] (at most once
+//! an hour per process, see [`sweep_stale`]), so the keys do not build up (#132).
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::IngestError;
-use crate::output::{output_error, reserve_run_id, sanitize};
+use crate::metrics::parse_rfc3339;
+use crate::output::{format_rfc3339, now_rfc3339, output_error, reserve_run_id, sanitize};
 use crate::sink::FileSink;
 use crate::state::StateStore;
 
 /// The state key holding a copy of the newest run manifest when output goes to a sink
 pub(crate) const LAST_RUN_KEY: &str = "runs/last.json";
 
+/// A reservation older than this (seconds) belongs to a run that was killed or crashed: no run
+/// takes a week, and a live run's reservation is never older than the run itself
+pub(crate) const STALE_AFTER: u64 = 7 * 24 * 3600;
+
+/// How often (seconds) one process looks for stale reservations; `serve` reserves an id per sync
+const SWEEP_EVERY: u64 = 3600;
+
+/// When this process last looked for stale reservations (Unix seconds, 0 = never)
+static LAST_SWEEP: AtomicU64 = AtomicU64::new(0);
+
 fn reservation_key(run_id: &str) -> String {
     format!("runs/{}.reserved", sanitize(run_id))
+}
+
+fn reservation_body() -> Vec<u8> {
+    serde_json::json!({ "reserved_at": now_rfc3339() })
+        .to_string()
+        .into_bytes()
+}
+
+/// When a reservation was made, from its body; `None` for the empty body earlier versions wrote
+fn reserved_at(bytes: &[u8]) -> Option<f64> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    parse_rfc3339(value.get("reserved_at")?.as_str()?)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// A run id unused in `out` and, with a sink, in the sink and the shared state
@@ -38,7 +73,7 @@ pub(crate) async fn reserve(
         // manifest in the sink already. Checking the sink first lost that race: the other worker
         // could deliver and release between the check and the create (two runs, one id).
         let key = reservation_key(&id);
-        if !state.create(&key, b"").await? {
+        if !state.create(&key, &reservation_body()).await? {
             continue;
         }
         let name = sanitize(&id);
@@ -49,8 +84,62 @@ pub(crate) async fn reserve(
             state.delete(&key, None).await?;
             continue;
         }
+        let now = now_secs();
+        let last = LAST_SWEEP.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= SWEEP_EVERY
+            && LAST_SWEEP
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            if let Err(e) = sweep_stale(state, now, STALE_AFTER).await {
+                tracing::warn!(error = %e, "cannot look for stale run id reservations");
+            }
+        }
         return Ok(id);
     }
+}
+
+/// Remove run id reservations older than `max_age` seconds at `now`; returns how many went
+///
+/// Each removal is conditional on the version just read, so a reservation that changed in between
+/// stays. A reservation with no time in it (written before #132) is stamped with `now` instead, so
+/// it goes `max_age` later. Removing a stale reservation never frees an id that was used: a run
+/// that delivered its manifest is found by [`reserve`] in the sink.
+pub(crate) async fn sweep_stale(
+    state: &dyn StateStore,
+    now: u64,
+    max_age: u64,
+) -> Result<usize, IngestError> {
+    let mut removed = 0;
+    for key in state.list().await? {
+        let Some(name) = key.strip_prefix("runs/") else {
+            continue;
+        };
+        if name.contains('/') || !name.ends_with(".reserved") {
+            continue;
+        }
+        let Some(found) = state.get(&key).await? else {
+            continue;
+        };
+        match reserved_at(&found.bytes) {
+            Some(at) if (now as f64) - at > max_age as f64 => {
+                if state.delete(&key, Some(&found.version)).await? {
+                    removed += 1;
+                }
+            }
+            Some(_) => {}
+            None => {
+                let body = serde_json::json!({ "reserved_at": format_rfc3339(now) });
+                state
+                    .replace(&key, body.to_string().as_bytes(), &found.version)
+                    .await?;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed stale run id reservations");
+    }
+    Ok(removed)
 }
 
 /// Drop the shared reservation once the run's manifest is delivered (or it wrote nothing)
@@ -261,6 +350,56 @@ mod tests {
             .unwrap();
         let other = worker.other.lock().unwrap().clone().unwrap().0;
         assert_ne!(sanitize(&id), other, "two runs got one id");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stale_reservations_are_removed_and_fresh_ones_kept() {
+        let dir = temp("sweep");
+        let state = FileStateStore::new(dir.join("state"));
+        let id = reserve(
+            &dir.join("out"),
+            &state,
+            Some(&OneTaken(Mutex::new(vec!["x".into()]))),
+        )
+        .await
+        .unwrap();
+        let key = reservation_key(&id);
+        let body = state.get(&key).await.unwrap().unwrap().bytes;
+        let at = reserved_at(&body).expect("a reservation records its time") as u64;
+
+        // An old killed run, a reservation from before #132 (empty body) and unrelated keys
+        let old = serde_json::json!({ "reserved_at": format_rfc3339(at - STALE_AFTER - 1) });
+        state
+            .put("runs/old.reserved", old.to_string().as_bytes())
+            .await
+            .unwrap();
+        state.put("runs/legacy.reserved", b"").await.unwrap();
+        state.put(LAST_RUN_KEY, b"{}").await.unwrap();
+        state.put("mls.Property.json", b"{}").await.unwrap();
+        state.put("runs/x/deep.reserved", b"").await.unwrap();
+
+        assert_eq!(sweep_stale(&state, at, STALE_AFTER).await.unwrap(), 1);
+        assert!(state.get("runs/old.reserved").await.unwrap().is_none());
+        assert!(
+            state.get(&key).await.unwrap().is_some(),
+            "a live run's key went"
+        );
+        // The legacy key is stamped now and goes once it is stale itself
+        let legacy = state.get("runs/legacy.reserved").await.unwrap().unwrap();
+        assert_eq!(reserved_at(&legacy.bytes), Some(at as f64));
+        assert_eq!(
+            sweep_stale(&state, at + STALE_AFTER + 1, STALE_AFTER)
+                .await
+                .unwrap(),
+            2
+        );
+        let mut left = state.list().await.unwrap();
+        left.sort();
+        assert_eq!(
+            left,
+            ["mls.Property.json", LAST_RUN_KEY, "runs/x/deep.reserved"]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

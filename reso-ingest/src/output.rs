@@ -394,7 +394,7 @@ pub(crate) fn create_new_file(path: &Path) -> Result<File, IngestError> {
         })
 }
 
-fn format_rfc3339(secs: u64) -> String {
+pub(crate) fn format_rfc3339(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm)
