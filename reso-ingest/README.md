@@ -280,10 +280,31 @@ and **AWS S3** 2026-11-25 (#115): conditional create, replace and delete, multip
 `sync`, `status` and the container image against a bucket; two `serve` workers on one prefix; a `kill -9` partway through
 a `sync` taken over by a fresh worker once the lease ran out.
 
+**Smallest AWS IAM policy** (checked 2026-11-25, #115: `s3_live`, then `sync --deletes` twice and `status`, all with only
+this policy). Put the bucket name in both places.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow", "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::BUCKET" },
+    { "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"],
+      "Resource": "arn:aws:s3:::BUCKET/*" }
+  ]
+}
+```
+
+`GetObject` covers reads and existence checks (`HEAD`); `PutObject` covers plain and conditional uploads and every
+multipart step but the abort; `DeleteObject` releases leases and run-id reservations; `ListBucket` serves `status` and
+state listings. `AbortMultipartUpload` is only used when a large upload fails partway; without it the parts stay until a
+lifecycle rule removes them. `s3:ListBucketMultipartUploads` and `s3:ListMultipartUploadParts` are not needed.
+
 **GCS through the S3 interoperability API is not safe for state.** It accepts `If-None-Match: *` and `If-Match` on `PUT`
 and `DELETE` and ignores them (checked 2026-11-25, #115): a second `create` overwrites, so two workers can both take a
 feed and nothing reports it. Its own `x-goog-if-generation-match` cannot be combined with S3-style signing. Do not point
-`--s3-bucket` at GCS until #115 settles how GCS is supported.
+`--s3-bucket` at GCS: native GCS support is #130.
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
