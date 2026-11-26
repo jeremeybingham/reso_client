@@ -441,7 +441,7 @@ pub enum Format {
 /// The options the commands share, after parsing
 #[derive(Debug, Default)]
 struct Args {
-    config: Option<PathBuf>,
+    config: PathBuf,
     servers: Vec<String>,
     resources: Vec<String>,
     out: Option<PathBuf>,
@@ -711,7 +711,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 }
             };
             let args = Args {
-                config: Some(config),
+                config,
                 servers,
                 resources,
                 out: Some(out_dir),
@@ -750,7 +750,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             storage,
         } => {
             let args = Args {
-                config: Some(config),
+                config,
                 servers,
                 out: Some(out_dir),
                 state,
@@ -776,7 +776,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             storage,
         } => {
             let args = Args {
-                config: Some(config),
+                config,
                 servers,
                 out: Some(out_dir),
                 state,
@@ -794,7 +794,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             starter,
         } => {
             let args = Args {
-                config: Some(config),
+                config,
                 servers,
                 resources,
                 ..Args::default()
@@ -896,11 +896,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
 
 /// Load the config and apply `--server`; `Err` is the exit code (message already printed)
 fn load_servers(args: &Args, err: &mut dyn Write) -> Result<(Config, Vec<ServerConfig>), i32> {
-    let Some(path) = &args.config else {
-        let _ = writeln!(err, "error: --config PATH is required");
-        return Err(2);
-    };
-    let config = match Config::from_path(path) {
+    let config = match Config::from_path(&args.config) {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(err, "error: {e}");
@@ -1015,7 +1011,7 @@ async fn serve(
             let reloads = tokio::spawn(reload_loop(
                 Arc::clone(&daemon),
                 ReloadSource {
-                    path: args.config.clone().unwrap_or_default(),
+                    path: args.config.clone(),
                     servers: args.servers.clone(),
                 },
                 config,

@@ -228,12 +228,13 @@ async fn a_failing_feed_backs_off_and_does_not_stop_the_others() {
         "interval = \"100ms\"",
     );
     let shutdown = Shutdown::new();
+    let started = Instant::now();
     let daemon = Daemon::start(config, options(&dir), shutdown.clone())
         .await
         .unwrap();
 
-    until("Member failed twice", async || {
-        feed(&status(&daemon).await, "Member")["consecutive_failures"].as_u64() >= Some(2)
+    until("Member failed four times", async || {
+        feed(&status(&daemon).await, "Member")["consecutive_failures"].as_u64() >= Some(4)
     })
     .await;
     until("Property polled ten times", async || {
@@ -245,12 +246,15 @@ async fn a_failing_feed_backs_off_and_does_not_stop_the_others() {
     assert!(m["last_error"].as_str().unwrap().contains("500"), "{m}");
     assert!(m["last_success"].is_null());
     assert_eq!(feed(&s, "Property")["consecutive_failures"], 0);
-    // Doubling waits: the failing feed was asked far less often than the healthy one
+    // Doubling waits: after failure i the feed waits 100 ms * 2^i, so m failed requests take at
+    // least 100 ms * (2^m - 2). A slow machine only adds time, so this holds under any load,
+    // while a feed without backoff (one request per 100 ms) breaks it from the third request.
+    let failed = member.load(Ordering::SeqCst) as u32;
+    let elapsed = started.elapsed();
+    let floor = Duration::from_millis(100) * ((1u32 << failed.min(20)) - 2);
     assert!(
-        member.load(Ordering::SeqCst) * 2 < property.load(Ordering::SeqCst),
-        "member {} property {}",
-        member.load(Ordering::SeqCst),
-        property.load(Ordering::SeqCst)
+        elapsed >= floor,
+        "{failed} Member requests in {elapsed:?}, backoff needs at least {floor:?}"
     );
     let metrics = get(&daemon, "/metrics").await.1;
     assert!(

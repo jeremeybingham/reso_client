@@ -366,7 +366,7 @@ in memory and created with one conditional `PUT`; a larger one goes up in parts 
 final name and the staging object deleted. Nothing is written to the local disk. Not routed: the metrics file
 (`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`). The `media` command refuses a bucket,
 since the data files it reads are in the bucket: use `sync --media` instead.
-`cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_BUCKET` is set
+`cargo test -p reso-ingest --features s3 --test s3_live` (add `parquet` for a partitioned `sync` and `purge` through the command) runs against a real server when `RESO_S3_TEST_BUCKET` is set
 with `RESO_S3_TEST_ENDPOINT` (a non-AWS server) or `RESO_S3_TEST_REGION` (AWS S3, no endpoint), or against GCS when
 `RESO_GCS_TEST_BUCKET` and `GOOGLE_SERVICE_ACCOUNT` are set. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images)
 and **AWS S3** 2026-11-25 (#115): conditional create, replace and delete, multipart uploads and listings past 1000 keys;
@@ -470,7 +470,7 @@ into `--out` and judged by their tag. The record, its `.sha256` and the access l
 above and copied to `<prefix>/data/` (`purge.<id>.json`, `purge.<id>.json.sha256`, `access.<id>.ndjson`, the last with
 the dots of the id as `_`), next to the access copies `sync` leaves there. If a copy fails after the deletes, the
 local record and access line stand, the error is printed and the command exits 1. The sink's list, read and delete were checked
-against AWS S3 and GCS on 2026-11-26 (`s3_live`); the whole `purge` command only against an in-process S3 fake. It uses
+against AWS S3 and GCS on 2026-11-26 (`s3_live`); the whole `purge` command, after a partitioned Parquet `sync`, against AWS S3, GCS and RustFS on 2026-11-26 (#177). It uses
 only actions the IAM policy below already grants (`s3:ListBucket`, `s3:GetObject`, `s3:DeleteObject`, `s3:PutObject`).
 
 ## Daemon mode (`serve`)
