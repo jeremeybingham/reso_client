@@ -10,6 +10,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Lines, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{Duration, SystemTime};
 
 use crate::error::IngestError;
 
@@ -48,6 +49,74 @@ impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }
+}
+
+/// How old an abandoned scratch directory must be before [`sweep_stale_scratch`] removes it. A
+/// pass touches its directory all the time (a sort writes a run file every 100 000 keys, and
+/// 10M keys take about a minute), so a day is far beyond any live pass
+pub(crate) const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Whether `name` is one of ours: `keys-<pid>-<n>`
+fn is_scratch_name(name: &str) -> bool {
+    name.strip_prefix("keys-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(pid, n)| {
+            [pid, n]
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
+
+/// When `dir` or anything directly in it last changed
+fn last_change(dir: &Path) -> std::io::Result<SystemTime> {
+    let mut newest = fs::metadata(dir)?.modified()?;
+    for entry in fs::read_dir(dir)? {
+        if let Ok(modified) = entry.and_then(|e| e.metadata()).and_then(|m| m.modified()) {
+            newest = newest.max(modified);
+        }
+    }
+    Ok(newest)
+}
+
+/// Remove the `keys-<pid>-<n>` directories under `base` that nothing has changed for `max_age`
+/// (#134)
+///
+/// A pass removes its own directory when it ends, but a killed run (`kill -9`, OOM, a pod
+/// eviction) leaves it behind, at about 40 MB per million keys. Age rather than a pid check
+/// decides, since `base` may be on a volume shared by several hosts, where a pid means nothing.
+/// Returns how many directories were removed; errors are logged and skipped, never fatal.
+pub(crate) fn sweep_stale_scratch(base: &Path, max_age: Duration) -> usize {
+    let Ok(entries) = fs::read_dir(base) else {
+        return 0;
+    };
+    let now = SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(is_scratch_name)
+            || !entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let stale = last_change(&path)
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= max_age);
+        if !stale {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!(path = %path.display(), "removed an abandoned scratch directory");
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "could not remove an abandoned scratch directory");
+            }
+        }
+    }
+    removed
 }
 
 /// Sorts any number of keys with bounded memory: chunks are sorted, deduplicated and spilled to
@@ -272,6 +341,66 @@ mod tests {
             );
         }
         assert!(drain(sorted(&scratch, &[], 2)).is_empty());
+    }
+
+    #[test]
+    fn scratch_names_are_keys_pid_n_only() {
+        for name in ["keys-12-0", "keys-1-345"] {
+            assert!(is_scratch_name(name), "{name}");
+        }
+        for name in [
+            "keys-12",
+            "keys--0",
+            "keys-1-",
+            "keys-a-1",
+            "keys-1-2-3",
+            "x-1-2",
+            "keys",
+        ] {
+            assert!(!is_scratch_name(name), "{name}");
+        }
+    }
+
+    /// A killed run's directory goes once it is older than the bound; a fresh one, a recently
+    /// written one and anything not named `keys-<pid>-<n>` stay (#134)
+    #[test]
+    fn stale_scratch_dirs_are_swept_by_age() {
+        let dir = base("sweep");
+        let _ = fs::remove_dir_all(&dir);
+        let old = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let set_old = |p: &Path| {
+            File::options()
+                .write(true)
+                .open(p)
+                .or_else(|_| File::open(p))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        };
+        let make = |name: &str, file_old: bool| {
+            let d = dir.join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("run-0"), "\"a\"\n").unwrap();
+            if file_old {
+                set_old(&d.join("run-0"));
+            }
+            set_old(&d);
+            d
+        };
+        let killed = make("keys-999999-0", true);
+        let live = make("keys-999999-1", false); // its run file was just written
+        let other = make("keys-other", true);
+        let fresh = dir.join("keys-999999-2");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::write(dir.join("keys-1-1"), "a file, not a directory").unwrap();
+        set_old(&dir.join("keys-1-1"));
+
+        assert_eq!(sweep_stale_scratch(&dir, STALE_SCRATCH), 1);
+        assert!(!killed.exists());
+        assert!(live.exists() && other.exists() && fresh.exists());
+        assert!(dir.join("keys-1-1").exists());
+        assert_eq!(sweep_stale_scratch(&dir.join("missing"), STALE_SCRATCH), 0);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

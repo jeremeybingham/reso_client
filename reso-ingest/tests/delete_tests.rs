@@ -619,9 +619,24 @@ async fn chunked_diff_matches_an_in_memory_diff() {
     let target = DeleteTarget::new("Property", "ListingKey")
         .with_scratch_dir(&scratch)
         .with_chunk_keys(7);
+    // What a run killed two days ago left behind: the pass removes it (#134)
+    let killed = scratch.join("keys-999999-0");
+    std::fs::create_dir_all(&killed).unwrap();
+    std::fs::write(killed.join("run-0"), "\"K1\"\n").unwrap();
+    let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    for p in [killed.join("run-0"), killed.clone()] {
+        std::fs::File::open(&p)
+            .unwrap()
+            .set_modified(two_days_ago)
+            .unwrap();
+    }
 
     let e = run_target(&srv, &store, &out, "r1", &target).await;
     assert_eq!((e.error, e.deletes), (None, 0));
+    assert!(
+        !killed.exists(),
+        "a killed run's scratch directory is swept"
+    );
     *state.keys.lock().unwrap() = after.clone();
     let e = run_target(&srv, &store, &out, "r2", &target).await;
 

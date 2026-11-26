@@ -234,7 +234,8 @@ In `--out` (default `reso-out`):
   local log only).
 - `.run.<run>`: an empty marker that reserves the run id. Ids are the start time (`20261124T173005Z`); a run started in
   the same second as another in the same `--out` gets `-02`, `-03`, … added. `.scratch/` holds the temporary files of
-  a `--deletes` key comparison while it runs. A writer never overwrites an existing file:
+  a `--deletes` key comparison while it runs, in a `keys-<pid>-<n>` directory per pass; a run that is killed leaves its
+  directory behind, and the next pass removes any such directory unchanged for a day (#134). A writer never overwrites an existing file:
   it stops with an error instead.
 - `state/` (or `--state`): one JSON checkpoint per server and resource (and one `$metadata` snapshot per server), saved after each batch is written, so a rerun
   after a crash continues from there. Delivery is at least once: a record can appear twice, never zero times.
@@ -464,8 +465,8 @@ page request (`docker stop -t`, Kubernetes `terminationGracePeriodSeconds`). `me
 - Deletes (`--deletes`): when `$metadata` declares an `EntityEvent` resource, its feed is read from the last sequence
   number and each named record is looked up; otherwise every key is pulled and compared with the previous run's (the
   first run is the baseline and reports no deletes). The key comparison keeps memory flat: keys are sorted in chunks
-  of 100 000 that spill to temporary files in `<out>/.scratch/` (removed after each pass; about 3 times the key set,
-  some 40 MB per million keys), and the saved set is diffed by merging the two sorted streams. A million keys
+  of 100 000 that spill to temporary files in `<out>/.scratch/` (removed after each pass, and by the next pass after a
+  day when a killed run left them; about 3 times the key set, some 40 MB per million keys), and the saved set is diffed by merging the two sorted streams. A million keys
   peak at 24 MiB, as do ten million (`LOADTEST.md`). With `deletes.flag_field` set, flagged records produce the events
   instead (see above).
 

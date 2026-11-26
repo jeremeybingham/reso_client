@@ -10,7 +10,9 @@ use serde_json::Value;
 
 use crate::checkpoint::{keys_header, CheckpointStore};
 use crate::error::IngestError;
-use crate::keyset::{diff, ExternalSorter, KeyLines, ScratchDir, CHUNK_KEYS};
+use crate::keyset::{
+    diff, sweep_stale_scratch, ExternalSorter, KeyLines, ScratchDir, CHUNK_KEYS, STALE_SCRATCH,
+};
 use crate::manifest::FileEntry;
 use crate::manifest::{ResourceEntry, ResourceStats};
 use crate::output::{now_rfc3339, RecordWriter};
@@ -67,6 +69,9 @@ pub struct DeleteTarget<'a> {
     /// Where the key comparison keeps its temporary files (sorted runs, the next key set, the
     /// deleted keys), in a new subdirectory removed after the pass; `None` is the system temporary
     /// directory. Needs about three times the size of the key set (some 40 MB per million keys).
+    /// When it is set, a pass first removes `keys-<pid>-<n>` subdirectories in it that nothing has
+    /// changed for a day: what killed runs left (#134). Age decides, not the pid, so a directory
+    /// shared by several hosts is safe; the system temporary directory is never swept.
     pub scratch_dir: Option<&'a Path>,
     /// Keys held in memory before they are sorted and spilled to a file (100 000 by default,
     /// some 10 MB); memory use of the key comparison stays near this whatever the key count
@@ -258,6 +263,11 @@ async fn by_key_diff(
     store: &CheckpointStore,
 ) -> Outcome {
     let (resource, key_field) = (target.resource, target.key_field);
+    // Clear what killed runs left in our own scratch directory (#134); never in the system temp
+    // directory, where `keys-*` names may belong to someone else
+    if let Some(dir) = target.scratch_dir {
+        sweep_stale_scratch(dir, STALE_SCRATCH);
+    }
     let base = target
         .scratch_dir
         .map_or_else(std::env::temp_dir, Path::to_path_buf);
