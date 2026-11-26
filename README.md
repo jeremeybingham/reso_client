@@ -290,11 +290,10 @@ what is left needs a real server or someone else:
   ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
   ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
   ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), rate-limit budget and per-feed request counts
-  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)). Open: lookup values in the schema check
-  ([#109](https://github.com/jeremeybingham/reso_client/issues/109), optional), operating many feeds
+  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)). Open: operating many feeds
   ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness
-  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)); Postgres and stream backends wait on an owner
-  decision ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
+  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)). Built only on request: a Postgres state store, a
+  stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
   advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso_client/issues/51)).
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
