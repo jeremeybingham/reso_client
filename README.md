@@ -39,8 +39,8 @@ field names are plain strings and records are raw JSON, so any server schema wor
   `reso-ingest sync --media` queues them page by page for its own download workers during the sync (a slow file host
   does not slow the sync), including `Media` arrays expanded inside other records; each file is stored once, by its
   content hash, in a directory or a bucket. Checked against the reference server's `Media` records, not yet against a vendor's file host (signed
-  single-use URLs, media limits). The media index is still loaded and saved whole, so a feed with millions of media
-  records pays for the whole index on every page ([#149](https://github.com/jeremeybingham/reso_client/issues/149)).
+  single-use URLs, media limits). A save of the media index writes only what changed (#149: 1.8 ms and 0.6 MiB per page
+  at 1M entries), but the whole index is still held in memory while a run goes on (about 0.4 GB of JSON at 1M entries).
 - Vendor differences taken from public documentation (MLS Grid, Trestle) are supported but unconfirmed until #32: a
   filter required on every request, related records served only by `$expand`, deletes signalled by a flag field
   (`MlgCanView`), and request and byte limits per second, hour and day.
@@ -241,8 +241,8 @@ what is left needs a real server or someone else:
 - **Production scale, offline parts** (tracker [#78](https://github.com/jeremeybingham/reso_client/issues/78), work
   order [#116](https://github.com/jeremeybingham/reso_client/issues/116)). Done: logs, metrics, run checks, leases,
   graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
-  harness, delete detection at millions of keys, backfill, media at scale. Open: media index at scale
-  ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
+  harness, delete detection at millions of keys, backfill, media at scale, media index saves
+  ([#149](https://github.com/jeremeybingham/reso_client/issues/149)). Open: delivery guarantees and partitioned Parquet
   ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
   ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), observability follow-ups
   ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds

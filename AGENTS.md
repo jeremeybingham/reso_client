@@ -102,7 +102,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
                     `sync` skips a feed another process holds
   src/deletes.rs    reconcile_deletes, EventFeed, FlagDeleteWriter: delete events by key diff, EntityEvent or flag field;
                     DeleteLimits holds a mass delete back (`--allow-mass-deletes` releases it)
-  src/media.rs      sync_media, page_pipeline, MediaIndex, MediaManifest, PageMedia, MediaWorkers: Media files from sync output (`media`) or per page (`sync --media`) with a worker pool; files named by SHA-256 (#89)
+  src/media.rs      sync_media, page_pipeline, MediaIndex, MediaManifest, PageMedia, MediaWorkers: Media files from sync output (`media`) or per page (`sync --media`) with a worker pool; files named by SHA-256 (#89); index = snapshot + deltas (#149)
   src/media_store.rs  MediaStore, MediaUpload, LocalMediaStore, MediaRoot: where media files go (a directory; S3MediaStore in s3.rs)
   src/cli.rs, main.rs  the `reso-ingest` binary (sync, serve, media, discover, status, purge); run() takes writers so tests run in-process,
                     run_main() also installs the log subscriber

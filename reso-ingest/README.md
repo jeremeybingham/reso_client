@@ -382,7 +382,7 @@ When an MLS licence ends, `purge --server NAME` removes what `reso-ingest` wrote
   killed run left), and the files the run manifests list under the server (Parquet files);
 - its media files, `<media-dir>/<server>/` (default `<out>/media/<server>/`), or `<prefix>/media/<server>/` with a bucket;
 - its state keys: checkpoints, key sets, event sequences, the schema snapshot and leases (`<server>.*`) and the media
-  index (`media/<server>.json`).
+  index (`media/<server>.json` and its deltas, `media/<server>/*.json`).
 
 Nothing else is touched: other servers' files, the access log, run manifests and media manifests stay (the manifests list
 file names and counts, not records). A file whose name starts like the server's but that neither its tags nor a manifest
@@ -548,7 +548,11 @@ pending; the run carries on, exits `1`, and the next run tries it again. `--limi
 the rest stay pending. Files are streamed to a `.part-*` name (the hash is known only at the end) and renamed when
 complete, so a partial file never sits under a final name.
 
-The index of what was read and saved is `state/media/<server>.json`. Downloads have their own limits (`[server.media]`),
+The index of what was read and saved is `state/media/<server>.json` plus small deltas in `state/media/<server>/`: each
+save (after every page, every 50 downloads and at the end) writes only the entries that changed as a new delta, and once
+the deltas hold more entries than the index (at least 10 000) the next save writes a new `<server>.json` and deletes
+them, so saves cost what changed rather than the size of the index (#149). A load reads `<server>.json` and applies the
+newer deltas in order; a delta that cannot be read is an error, not a fresh start. Downloads have their own limits (`[server.media]`),
 so they do not use up the API's. The API token goes only to the API's own host by default (`send_token = "same_host"`):
 media usually lives on a CDN that does not need it. Each server has `[server.media] workers` download workers (default
 4); servers run in parallel.

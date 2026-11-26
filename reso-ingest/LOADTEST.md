@@ -20,6 +20,7 @@ are not a whole record.
 | `faults` | `--fault-percent` (default 5) of `/Property` requests get a fault, split evenly: 503, 429 with `Retry-After: 1`, a 300 ms slow page, the connection closed before the response, or the body cut off halfway. A failed sync is run again, as a scheduler would, up to `--max-runs` | no record missing, none repeated |
 | `kill` | The sync gets SIGKILL `--kills` times (default 3) at even points of the pull; each time a new sync resumes | no record missing; at most one page repeated per kill |
 | `backfill` | `sync --backfill --resource Property` (#88) with `per_second = --limit-rps` (default 100) and `rate_percent = --rate-percent` (default 50), killed once halfway and resumed, while `sync --resource Member` runs every second against a Member feed that grows by `--members-per-second` (default 50). Not in `all` | every record, at most one page repeated; a `##progress` line with `sub=` and `eta=` per page, ending complete; the resumed run counts only the records left; Property requests within the backfill's share; every Member sync succeeds, using the rest of the limits |
+| `media-index` | The media index alone (#149), in the harness process with no server: `--records` media records arrive in pages of `--page-size`; after each page the page before is marked downloaded (file name, hash, ETag, size) and the index is saved with `save_changes`, as `sync --media` does. At each tenth of the run the whole index is also serialized and written once, which is what every save cost before #149. State goes to `--workdir` (use a tmpfs such as `/dev/shm/loadtest` to keep about 1.3 GB of writes per 1M records off the disk). Not in `all`; prints its own table | a fresh `MediaIndex::load` equals the index in memory |
 | `deletes` | `sync --deletes` key comparison only (a checkpoint at the last record is seeded, so no records are pulled): a baseline run, a run after every `--gone-every`-th record (default 100, so 1%) left the server, and a run with nothing new. Not in `all` | each gone key exactly once as a delete event, no other key |
 
 `--server-rps N` makes the server answer 429 above N requests a second. The configuration it writes uses
@@ -88,6 +89,43 @@ Defaults: page size 1000, NDJSON on a local disk, no `--deletes`, no Parquet, no
 - **Memory** stayed at 25 MiB peak, as for a plain sync.
 - A short backfill is not slowed: each process's limiter starts with a full window, so a 50 000-record run (two
   processes, 54 requests) finished in 0.6 s.
+
+## Media index saves (#149)
+
+```sh
+cargo run --release -p reso-ingest --example loadtest -- --scenario media-index --records 1000000 --workdir /dev/shm/loadtest
+```
+
+Each row covers the pages since the row before. "save ms" and "KiB per save" are `save_changes` after each page
+(1000 new records and 1000 finished downloads); "whole rewrite" is serializing and writing the whole index once, the
+cost every page paid before #149.
+
+2026-11-26, c4ece05 + #149, i9-9900K, WSL2, state on tmpfs (`/dev/shm`), page size 1000:
+
+| entries | save ms (median) | save ms (max) | KiB per save (median) | KiB per save (mean) | whole rewrite ms | whole index KiB |
+|---|---|---|---|---|---|---|
+| 100000 | 1.8 | 38.2 | 641 | 1001 | 53.5 | 39036 |
+| 200000 | 1.8 | 65.0 | 644 | 1071 | 103.5 | 78391 |
+| 300000 | 1.8 | 122.2 | 644 | 1512 | 150.1 | 117747 |
+| 400000 | 1.8 | 2.0 | 644 | 644 | 196.3 | 157102 |
+| 500000 | 1.8 | 236.1 | 644 | 2394 | 240.2 | 196458 |
+| 600000 | 1.8 | 2.0 | 644 | 644 | 292.1 | 235813 |
+| 700000 | 1.8 | 2.2 | 644 | 644 | 445.8 | 275168 |
+| 800000 | 1.8 | 2.4 | 644 | 644 | 538.4 | 314524 |
+| 900000 | 1.8 | 549.2 | 644 | 4157 | 442.2 | 353879 |
+| 1000000 | 1.8 | 2.7 | 644 | 644 | 715.7 | 393235 |
+
+- **A page's save no longer grows with the index:** 1.8 ms and 644 KiB at 100 000 entries and at 1 000 000. The whole
+  rewrite it replaces grew to 0.7 s and 384 MiB per page; over the 1000 pages that is about 190 GB written, against
+  1.3 GB now. All 1000 saves took 2.8 s together.
+- **Snapshots are the max column:** when the deltas hold more entries than the index, one save writes the whole index
+  (up to 0.55 s at 900 000 entries) and deletes the deltas. They come further apart as the index grows (the deltas have
+  to outgrow it), so their cost per page stays about constant: the mean is 1.0 to 4.1 MiB per save against a median
+  of 0.6. 106 state keys at the end (the snapshot and 105 deltas).
+- **Loading** the 1M index (snapshot plus deltas) took 2.1 s, and the loaded index equalled the one in memory.
+- **Memory still grows with the index:** the index stays whole in memory during a run (peak RSS 1.9 GB here, which
+  includes the harness's own copies: the whole-rewrite text and a second, loaded index). A save no longer needs a
+  serialized copy of the whole index, except for a snapshot.
 
 ## Not covered yet
 

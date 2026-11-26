@@ -1333,9 +1333,11 @@ async fn sync_media_streams_files_into_the_bucket_and_purge_deletes_them() {
     assert_eq!(code, 0, "{o}{e}");
     assert!(o.contains("2 media files"), "{o}");
     assert!(media_keys(&objects).is_empty());
+    // The index snapshot and its deltas (#149)
     assert!(!objects
         .lock()
         .unwrap()
-        .contains_key("p/state/media/mls.json"));
+        .keys()
+        .any(|k| k.starts_with("p/state/media/mls")));
     let _ = std::fs::remove_dir_all(&dir);
 }

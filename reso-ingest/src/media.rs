@@ -5,8 +5,9 @@
 //! named by the SHA-256 of its content plus an extension from `Content-Type`
 //! (`<sha256>.jpg`), so a photo that several `MediaKey`s point at, or that comes back unchanged
 //! under a new timestamp, is stored once. A per-server [`MediaIndex`] (state store key
-//! `media/<server>.json`) maps each `MediaKey` to its file and records which data files were read,
-//! so a run only downloads what changed and picks up failed files again.
+//! `media/<server>.json`, plus small deltas in `media/<server>/`) maps each `MediaKey` to its file
+//! and records which data files were read, so a run only downloads what changed and picks up
+//! failed files again. A save writes only the entries that changed (#149).
 //!
 //! Downloads run in their own worker pool ([`MediaWorkers`], `[server.media] workers`) with the
 //! `[server.media]` rate limits, apart from the API's: `sync --media` hands each page's new and
@@ -81,31 +82,115 @@ pub struct MediaEntry {
 }
 
 /// The per-server record of data files read and files saved
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Stored in two parts so that a save costs what changed, not the size of the index (#149): a
+/// snapshot under [`key`](Self::key) (`media/<server>.json`) and a run of small deltas under
+/// [`delta_prefix`](Self::delta_prefix) (`media/<server>/<seq>.json`), each holding the entries
+/// changed or removed since the save before it. [`load`](Self::load) reads the snapshot and
+/// applies the deltas newer than it, in order. [`save_changes`](Self::save_changes) writes one
+/// delta, or, once the deltas hold more entries than the index itself, a new snapshot (and then
+/// deletes the deltas it folded in), so the full rewrites cost a constant share of the writes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MediaIndex {
     /// Data files (names in the output directory) already read
     pub read_files: BTreeSet<String>,
     /// One entry per `MediaKey`
     pub entries: BTreeMap<String, MediaEntry>,
+    /// Number of the newest delta folded into this index
+    #[serde(default)]
+    seq: u64,
     /// How many entries point at each stored file (rebuilt on load)
     #[serde(skip)]
     refs: HashMap<String, u64>,
+    /// What changed since the last save
+    #[serde(skip)]
+    journal: Journal,
+}
+
+impl PartialEq for MediaIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.read_files == other.read_files && self.entries == other.entries
+    }
+}
+
+impl Eq for MediaIndex {}
+
+/// Changes not saved yet, and the deltas the next snapshot replaces
+#[derive(Debug, Clone, Default)]
+struct Journal {
+    /// Keys changed or removed since the last save
+    dirty: BTreeSet<String>,
+    /// Data files read since the last save
+    read: BTreeSet<String>,
+    /// Delta keys a new snapshot makes obsolete
+    deltas: Vec<String>,
+    /// Entries written in deltas since the snapshot
+    written: u64,
+    /// The last save failed: write a whole snapshot next time
+    full: bool,
+}
+
+/// One delta of a [`MediaIndex`]
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Delta {
+    #[serde(default)]
+    read_files: Vec<String>,
+    #[serde(default)]
+    entries: BTreeMap<String, MediaEntry>,
+    #[serde(default)]
+    removed: Vec<String>,
+}
+
+/// Deltas may hold this many entries before a snapshot is due, however small the index
+const MIN_COMPACT: u64 = 10_000;
+
+/// A planned write of the index (built under the lock, written outside it)
+struct IndexWrite {
+    key: String,
+    bytes: Vec<u8>,
+    /// A snapshot: these deltas are deleted once it is written
+    replaces: Option<Vec<String>>,
 }
 
 impl MediaIndex {
-    /// The state store key of `server`'s index: `media/<server>.json` (with a
+    /// The state store key of `server`'s index snapshot: `media/<server>.json` (with a
     /// [`FileStateStore`](crate::FileStateStore), the file `<state>/media/<server>.json`)
     pub fn key(server: &str) -> String {
         format!("media/{}.json", encode_name(server))
+    }
+
+    /// The prefix of `server`'s delta keys: `media/<server>/`
+    pub fn delta_prefix(server: &str) -> String {
+        format!("media/{}/", encode_name(server))
+    }
+
+    /// True when the state store key `key` is part of `server`'s index (its snapshot or a delta)
+    pub fn is_index_key(server: &str, key: &str) -> bool {
+        key == Self::key(server) || delta_seq(key, &Self::delta_prefix(server)).is_some()
     }
 
     /// Load the index of `server`, or an empty one when there is none yet
     ///
     /// # Errors
     ///
-    /// [`IngestError::Output`] when the value is unreadable or not a valid index (a damaged index
+    /// [`IngestError::Output`] when a value is unreadable or not a valid index (a damaged index
     /// is an error, not a fresh start, so it never triggers a full re-download silently).
     pub async fn load(store: &dyn StateStore, server: &str) -> Result<Self, IngestError> {
+        // A delta that vanishes between the listing and the read was folded into a newer
+        // snapshot by another process: read again
+        for _ in 0..3 {
+            if let Some(index) = Self::try_load(store, server).await? {
+                return Ok(index);
+            }
+        }
+        Err(invalid(
+            store,
+            &Self::key(server),
+            "the index kept changing while it was read".into(),
+        ))
+    }
+
+    async fn try_load(store: &dyn StateStore, server: &str) -> Result<Option<Self>, IngestError> {
         let key = Self::key(server);
         let mut index: Self = match store.get(&key).await? {
             Some(v) => {
@@ -113,6 +198,32 @@ impl MediaIndex {
             }
             None => Self::default(),
         };
+        index.journal = Journal::default();
+        let prefix = Self::delta_prefix(server);
+        let mut deltas: Vec<(u64, String)> = store
+            .list()
+            .await?
+            .into_iter()
+            .filter_map(|k| delta_seq(&k, &prefix).map(|n| (n, k)))
+            .collect();
+        deltas.sort();
+        for (seq, delta_key) in deltas {
+            if seq > index.seq {
+                let Some(v) = store.get(&delta_key).await? else {
+                    return Ok(None);
+                };
+                let delta: Delta = serde_json::from_slice(&v.bytes)
+                    .map_err(|e| invalid(store, &delta_key, e.to_string()))?;
+                index.journal.written += (delta.entries.len() + delta.removed.len()) as u64;
+                for k in &delta.removed {
+                    index.entries.remove(k);
+                }
+                index.entries.extend(delta.entries);
+                index.read_files.extend(delta.read_files);
+                index.seq = seq;
+            }
+            index.journal.deltas.push(delta_key);
+        }
         index.refs.clear();
         let names: Vec<String> = index
             .entries
@@ -122,18 +233,125 @@ impl MediaIndex {
         for name in names {
             *index.refs.entry(name).or_default() += 1;
         }
-        Ok(index)
+        Ok(Some(index))
     }
 
-    /// Save the index of `server`, replacing the old one whole
+    /// Save the index of `server` whole, as a new snapshot
+    ///
+    /// The deltas known to this index (read by [`load`](Self::load)) are deleted afterwards.
+    /// [`save_changes`](Self::save_changes) is the cheap save for an index that changes often.
     ///
     /// # Errors
     ///
     /// [`IngestError::Output`] when the value cannot be written.
     pub async fn save(&self, store: &dyn StateStore, server: &str) -> Result<(), IngestError> {
         let key = Self::key(server);
-        let text = serde_json::to_string(self).map_err(|e| invalid(store, &key, e.to_string()))?;
-        store.put(&key, text.as_bytes()).await
+        let text = serde_json::to_vec(self).map_err(|e| invalid(store, &key, e.to_string()))?;
+        store.put(&key, &text).await?;
+        delete_deltas(store, &self.journal.deltas).await;
+        Ok(())
+    }
+
+    /// Save what changed since the last save: one delta with the changed entries, or a new
+    /// snapshot once the deltas hold more entries than the index (see [`MediaIndex`])
+    ///
+    /// Nothing is written when nothing changed.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the value cannot be written; the next save then writes a
+    /// whole snapshot, so nothing is lost.
+    pub async fn save_changes(
+        &mut self,
+        store: &dyn StateStore,
+        server: &str,
+    ) -> Result<(), IngestError> {
+        let Some(write) = self.plan_save(store, server)? else {
+            return Ok(());
+        };
+        match store.put(&write.key, &write.bytes).await {
+            Err(e) => {
+                self.save_failed(write.replaces);
+                Err(e)
+            }
+            Ok(()) => {
+                delete_deltas(store, write.replaces.as_deref().unwrap_or_default()).await;
+                Ok(())
+            }
+        }
+    }
+
+    /// Build the next write and clear the journal
+    fn plan_save(
+        &mut self,
+        store: &dyn StateStore,
+        server: &str,
+    ) -> Result<Option<IndexWrite>, IngestError> {
+        let j = &mut self.journal;
+        if !j.full && j.dirty.is_empty() && j.read.is_empty() {
+            return Ok(None);
+        }
+        let snapshot = j.full
+            || j.written + j.dirty.len() as u64 > (self.entries.len() as u64).max(MIN_COMPACT);
+        self.seq += 1;
+        let dirty = std::mem::take(&mut self.journal.dirty);
+        let read = std::mem::take(&mut self.journal.read);
+        if snapshot {
+            let key = Self::key(server);
+            let bytes =
+                serde_json::to_vec(&*self).map_err(|e| invalid(store, &key, e.to_string()))?;
+            let j = &mut self.journal;
+            j.full = false;
+            j.written = 0;
+            return Ok(Some(IndexWrite {
+                key,
+                bytes,
+                replaces: Some(std::mem::take(&mut j.deltas)),
+            }));
+        }
+        let mut delta = Delta {
+            read_files: read.into_iter().collect(),
+            ..Delta::default()
+        };
+        for k in dirty {
+            match self.entries.get(&k) {
+                Some(e) => {
+                    delta.entries.insert(k, e.clone());
+                }
+                None => delta.removed.push(k),
+            }
+        }
+        let key = format!("{}{:012}.json", Self::delta_prefix(server), self.seq);
+        let bytes = serde_json::to_vec(&delta).map_err(|e| invalid(store, &key, e.to_string()))?;
+        let j = &mut self.journal;
+        j.written += (delta.entries.len() + delta.removed.len()) as u64;
+        j.deltas.push(key.clone());
+        Ok(Some(IndexWrite {
+            key,
+            bytes,
+            replaces: None,
+        }))
+    }
+
+    /// A planned write failed: the next save writes a whole snapshot, which also replaces the
+    /// deltas this one would have
+    fn save_failed(&mut self, replaces: Option<Vec<String>>) {
+        self.journal.full = true;
+        self.journal.deltas.extend(replaces.into_iter().flatten());
+    }
+
+    /// Mark the data file `name` as read
+    pub fn mark_read(&mut self, name: String) {
+        if self.read_files.insert(name.clone()) {
+            self.journal.read.insert(name);
+        }
+    }
+
+    /// The entry of `key`, to change it (marks it changed for the next save)
+    pub fn entry_mut(&mut self, key: &str) -> Option<&mut MediaEntry> {
+        let entry = self.entries.get_mut(key)?;
+        self.journal.dirty.insert(key.to_string());
+        Some(entry)
     }
 
     /// How many entries point at the stored file `name`
@@ -144,7 +362,7 @@ impl MediaIndex {
     /// Point `key`'s entry at the stored file `name`; returns the file it pointed at before when
     /// no entry points at that one any more (the caller deletes it)
     fn link(&mut self, key: &str, name: &str) -> Option<String> {
-        let entry = self.entries.get_mut(key)?;
+        let entry = self.entry_mut(key)?;
         let old = entry.file.replace(name.to_string());
         *self.refs.entry(name.to_string()).or_default() += 1;
         match old {
@@ -169,7 +387,9 @@ impl MediaIndex {
 
     /// Remove `key`'s entry; returns its file when no other entry points at it
     pub fn remove(&mut self, key: &str) -> Option<String> {
-        let file = self.entries.remove(key)?.file?;
+        let entry = self.entries.remove(key)?;
+        self.journal.dirty.insert(key.to_string());
+        let file = entry.file?;
         self.unlink(&file).then_some(file)
     }
 
@@ -186,13 +406,17 @@ impl MediaIndex {
             .iter()
             .find_map(|f| record[*f].as_str())
             .map(str::to_owned);
-        let entry = self.entries.entry(key).or_default();
+        let entry = self.entries.entry(key.clone()).or_default();
         let fresh = entry.url.is_none() && entry.stamp.is_none() && entry.file.is_none();
         let changed = fresh || entry.stamp != stamp || (stamp.is_none() && entry.url != url);
+        let touched = changed || entry.url != url;
         entry.url = url;
         if changed {
             entry.stamp = stamp;
             entry.pending = true;
+        }
+        if touched {
+            self.journal.dirty.insert(key);
         }
         true
     }
@@ -244,12 +468,23 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    /// Save what changed in the index since the last save (see [`MediaIndex::save_changes`])
     async fn save(&self) -> Result<(), IngestError> {
         let _serial = self.save_lock.lock().await;
-        let key = MediaIndex::key(&self.server);
-        let text = serde_json::to_string(&*lock(&self.index))
-            .map_err(|e| invalid(self.state.as_ref(), &key, e.to_string()))?;
-        self.state.put(&key, text.as_bytes()).await
+        let state = self.state.as_ref();
+        let Some(write) = lock(&self.index).plan_save(state, &self.server)? else {
+            return Ok(());
+        };
+        match state.put(&write.key, &write.bytes).await {
+            Err(e) => {
+                lock(&self.index).save_failed(write.replaces);
+                Err(e)
+            }
+            Ok(()) => {
+                delete_deltas(state, write.replaces.as_deref().unwrap_or_default()).await;
+                Ok(())
+            }
+        }
     }
 
     async fn delete_files(&self, names: Vec<String>) {
@@ -513,7 +748,7 @@ impl MediaWorkers<'_> {
             match outcome {
                 Ok(DownloadOutcome::NotModified) => {
                     report.not_modified += 1;
-                    if let (true, Some(e)) = (current, index.entries.get_mut(key)) {
+                    if let Some(e) = current.then(|| index.entry_mut(key)).flatten() {
                         e.pending = false;
                         e.error = None;
                     }
@@ -529,7 +764,7 @@ impl MediaWorkers<'_> {
                     }
                     if current {
                         orphans.extend(index.link(key, &name));
-                        if let Some(e) = index.entries.get_mut(key) {
+                        if let Some(e) = index.entry_mut(key) {
                             e.sha256 = target.name.as_deref().map(hash_of).map(str::to_owned);
                             e.etag = saved.etag;
                             e.last_modified = saved.last_modified;
@@ -551,7 +786,7 @@ impl MediaWorkers<'_> {
                         key: key.to_string(),
                         error: error.clone(),
                     });
-                    if let (true, Some(entry)) = (current, index.entries.get_mut(key)) {
+                    if let Some(entry) = current.then(|| index.entry_mut(key)).flatten() {
                         entry.error = Some(error);
                     }
                 }
@@ -811,10 +1046,10 @@ async fn run(
             &mut orphans,
             report,
         )?;
-        index.read_files.insert(name);
+        index.mark_read(name);
         report.files_read += 1;
     }
-    index.save(state, server).await?;
+    index.save_changes(state, server).await?;
     for name in orphans {
         store.delete(&name).await?;
     }
@@ -928,6 +1163,25 @@ fn media_files(out: &Path, server: &str) -> Result<Vec<String>, IngestError> {
         }
     }
     Ok(files)
+}
+
+/// The number of a delta key under `prefix` (`<prefix><seq>.json`)
+fn delta_seq(key: &str, prefix: &str) -> Option<u64> {
+    key.strip_prefix(prefix)?
+        .strip_suffix(".json")
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))?
+        .parse()
+        .ok()
+}
+
+/// Delete index deltas a snapshot replaced; one left behind is ignored by the next load (it is not
+/// newer than the snapshot) and deleted by the next snapshot
+async fn delete_deltas(store: &dyn StateStore, keys: &[String]) {
+    for key in keys {
+        if let Err(e) = store.delete(key, None).await {
+            tracing::warn!(key = %store.location(key), error = %e, "cannot delete a media index delta");
+        }
+    }
 }
 
 fn key_string(v: &Value) -> Option<String> {
@@ -1151,5 +1405,129 @@ mod tests {
         let mut index = MediaIndex::default();
         assert!(!index.add_record(&json!({"MediaURL": "u"})));
         assert!(index.entries.is_empty());
+    }
+
+    fn state_dir(name: &str) -> (PathBuf, crate::FileStateStore) {
+        let dir = std::env::temp_dir().join(format!("media-index-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        (dir.clone(), crate::FileStateStore::new(dir))
+    }
+
+    async fn keys(store: &dyn StateStore) -> Vec<String> {
+        let mut k = store.list().await.unwrap();
+        k.sort();
+        k
+    }
+
+    #[tokio::test]
+    async fn saves_write_only_the_changed_entries() {
+        let (dir, store) = state_dir("delta");
+        let mut index = MediaIndex::default();
+        for i in 0..100 {
+            index.add_record(&record(&format!("k{i:03}"), "u", Some("t1")));
+        }
+        index.mark_read("a.ndjson".into());
+        index.save_changes(&store, "mls").await.unwrap();
+        // Nothing changed: nothing written
+        index.save_changes(&store, "mls").await.unwrap();
+        assert_eq!(keys(&store).await, ["media/mls/000000000001.json"]);
+
+        // One new entry, one changed, one removed, one URL-only change, one unchanged record
+        index.add_record(&record("new", "u", Some("t1")));
+        index.add_record(&record("k001", "u", Some("t2")));
+        index.add_record(&record("k002", "u2", Some("t1")));
+        index.add_record(&record("k003", "u", Some("t1")));
+        index.remove("k004");
+        index.save_changes(&store, "mls").await.unwrap();
+        let delta: Delta = serde_json::from_slice(
+            &store
+                .get("media/mls/000000000002.json")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            delta.entries.keys().collect::<Vec<_>>(),
+            ["k001", "k002", "new"]
+        );
+        assert_eq!(delta.removed, ["k004"]);
+        assert!(delta.read_files.is_empty());
+
+        let loaded = MediaIndex::load(&store, "mls").await.unwrap();
+        assert_eq!(loaded, index);
+        assert_eq!(loaded.seq, 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_replaces_the_deltas_once_they_outgrow_the_index() {
+        let (dir, store) = state_dir("compact");
+        let mut index = MediaIndex::default();
+        let mut snapshots = 0;
+        // 25 saves of 1000 changed entries over 5000 keys: deltas reach 10 000 entries (the
+        // minimum) after 10 saves, so a snapshot is due every 11th save
+        for round in 0..25u32 {
+            for i in 0..1000 {
+                let key = format!("k{}", (round * 1000 + i) % 5000);
+                index.add_record(&record(&key, "u", Some(&format!("t{round}"))));
+            }
+            index.save_changes(&store, "mls").await.unwrap();
+            if store.get(&MediaIndex::key("mls")).await.unwrap().is_some() && snapshots == 0 {
+                snapshots = round + 1;
+            }
+        }
+        assert_eq!(snapshots, 11);
+        let k = keys(&store).await;
+        // Two snapshots so far (saves 11 and 22); the three saves after the last are deltas
+        assert_eq!(k.len(), 4, "{k:?}");
+        assert_eq!(k[0], "media/mls.json");
+        assert_eq!(k[1], "media/mls/000000000023.json");
+        let loaded = MediaIndex::load(&store, "mls").await.unwrap();
+        assert_eq!(loaded, index);
+        assert_eq!(loaded.entries.len(), 5000);
+        assert_eq!(loaded.entries["k4999"].stamp.as_deref(), Some("t24"));
+
+        // A delta a snapshot already holds (left behind by a crash) is ignored, then deleted
+        store
+            .put("media/mls/000000000005.json", br#"{"removed":["k1"]}"#)
+            .await
+            .unwrap();
+        let loaded = MediaIndex::load(&store, "mls").await.unwrap();
+        assert!(loaded.entries.contains_key("k1"));
+        loaded.save(&store, "mls").await.unwrap();
+        assert_eq!(keys(&store).await, ["media/mls.json"]);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_is_made_good_by_the_next_one() {
+        let (dir, store) = state_dir("fail");
+        let mut index = MediaIndex::default();
+        index.add_record(&record("a", "u", Some("t1")));
+        index.save_changes(&store, "mls").await.unwrap();
+        index.add_record(&record("b", "u", Some("t1")));
+        // A file where the delta directory should be makes the write fail
+        fs::remove_dir_all(dir.join("media/mls")).unwrap();
+        fs::write(dir.join("media/mls"), b"x").unwrap();
+        assert!(index.save_changes(&store, "mls").await.is_err());
+        fs::remove_file(dir.join("media/mls")).unwrap();
+        index.add_record(&record("c", "u", Some("t1")));
+        index.save_changes(&store, "mls").await.unwrap();
+        assert_eq!(keys(&store).await, ["media/mls.json"]);
+        let loaded = MediaIndex::load(&store, "mls").await.unwrap();
+        assert_eq!(loaded.entries.len(), 3);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn index_keys_are_the_snapshot_and_numbered_deltas() {
+        assert!(MediaIndex::is_index_key("a", "media/a.json"));
+        assert!(MediaIndex::is_index_key("a", "media/a/000000000007.json"));
+        assert!(!MediaIndex::is_index_key("a", "media/ab.json"));
+        assert!(!MediaIndex::is_index_key("a", "media/ab/000000000007.json"));
+        assert!(!MediaIndex::is_index_key("a", "media/a/x.json"));
+        assert!(!MediaIndex::is_index_key("a", "a.Media.json"));
     }
 }
