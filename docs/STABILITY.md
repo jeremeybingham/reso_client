@@ -7,8 +7,10 @@ happen first. Releasing and publishing stay the owner's call.
 
 - `reso-client` follows Cargo's semver rules for 0.x: a **minor** bump (0.3 → 0.4) may break the API, a **patch** bump
   may not. Every breaking change is marked "breaking" in [`CHANGELOG.md`](../CHANGELOG.md).
-- `reso-ingest` is unpublished (version 0.0.1). Its command-line options, configuration file, output layout and
-  metrics can change in any commit; changes are recorded in the changelog.
+- `reso-ingest` is unpublished (version 0.0.1) until 0.4.0, when it is first published with the same version as
+  `reso-client` (#178; the two share version numbers from then on). Before 1.0 its command-line options,
+  configuration file, output layout and metrics may change in a minor release; changes are recorded in the changelog,
+  and renamed options and settings follow the deprecation policy below.
 - CI runs `cargo semver-checks` on `reso-client` against the last release on crates.io. While the version in
   `Cargo.toml` is still the released one, the job reports breaking changes without failing (they are expected before
   the next minor release); once `Cargo.toml` is bumped for a release, it fails on any change that version does not allow.
@@ -26,7 +28,7 @@ happen first. Releasing and publishing stay the owner's call.
 - Not covered: log message text, `Debug` output, and the exact URLs built (servers see the same query; spacing and
   parameter order may change).
 
-**`reso-ingest`** (when published; the owner decides whether it gets its own 1.0):
+**`reso-ingest`** (published from 0.4.0; whether it reaches 1.0 together with `reso-client` is decided then):
 
 - The configuration file: a 1.x configuration loads in every later 1.x; a setting is deprecated with a warning for at
   least one minor release before it is removed in 2.0.
@@ -80,14 +82,20 @@ stays `pub(crate)`. `DownloadTarget` gets no new required methods in 1.x (a new 
 
 ## Before 1.0 (to do)
 
-1. The #76 pass against at least one vendor server (#32), and the compatibility table
-   ([`COMPATIBILITY.md`](COMPATIBILITY.md)) filled in for it. The largest likely API change is a replication mode
-   without the two-field `$orderby` (#76, section 3).
-2. ~~API review ([#157](https://github.com/jeremeybingham/reso_client/issues/157))~~: done; the result is
+The release plan is the tracker [#179](https://github.com/jeremeybingham/reso_client/issues/179) (owner, 2026-11-26):
+
+1. ~~API review ([#157](https://github.com/jeremeybingham/reso_client/issues/157))~~: done; the result is
    [the 1.0 surface](#the-10-surface-of-reso-client) below. It ships in 0.4.0.
-3. Release 0.4.0, then at least one more minor release used in production with no breaking change needed, before
-   tagging 1.0.
-4. Release artifacts: SBOM and signed tags ([#158](https://github.com/jeremeybingham/reso_client/issues/158)).
+2. **0.4.0** (milestone `0.4.0`): both crates, released before any vendor server is available and marked as not yet
+   checked against one. `reso-client` 0.4.0 and the first `reso-ingest` publish (#178), after the pre-release
+   clean-ups (#177) and #162 lead 6. Unsigned tag; no container image on a registry.
+3. **0.5.0** (milestone `0.5.0`): the #76 pass against at least one vendor server (#32), its fixes, and the
+   compatibility table ([`COMPATIBILITY.md`](COMPATIBILITY.md)) filled in for it; realistic load fixtures (#163);
+   release artifacts: SBOM, signed tags and a signed container image
+   ([#158](https://github.com/jeremeybingham/reso_client/issues/158)). The largest likely API change is a replication
+   mode without the two-field `$orderby` (#76, section 3).
+4. After 0.5.0, at least one more minor release used in production with no breaking change needed, before tagging
+   1.0.
 
 ## Release checklist
 

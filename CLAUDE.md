@@ -11,7 +11,7 @@ Machine facts and standing preferences are in `~/.claude/CLAUDE.md`.
   was not run.
 - Keep `AGENTS.md` and `README.md` in step with the code: when commands, rules, layout or the roadmap change, update
   them in the same change.
-- Work from the milestone issues (#19-#31), one PR per issue; say in the PR body which part is unconfirmed against a
+- Work from the release tracker (#179) and its milestones (`0.4.0`, then `0.5.0`), one PR per issue; say in the PR body which part is unconfirmed against a
   real server (#32). Use "Part of #N" rather than a closing keyword unless the PR finishes the issue.
 - Before every commit or push, `git fetch origin` and check the branch's PR is not already merged and `origin/main` has
   not moved (restart from `origin/main` if it has merged).
