@@ -268,14 +268,9 @@ impl RecordWriter for ProgressWriter<'_> {
         Ok(())
     }
 
-    fn write_raw_batch(
-        &mut self,
-        records: &[Value],
-        raw: &RawRecords,
-        fetched_at: &str,
-    ) -> Result<(), IngestError> {
-        self.inner.write_raw_batch(records, raw, fetched_at)?;
-        self.done += records.len() as u64;
+    fn write_raw_batch(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
+        self.inner.write_raw_batch(raw, fetched_at)?;
+        self.done += raw.len() as u64;
         self.report();
         Ok(())
     }

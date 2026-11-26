@@ -431,12 +431,9 @@ async fn pull(
             next = run.next_batch_raw() => next,
         };
         match next {
-            Ok(Some(raw_batch)) => {
-                let batch = raw_batch.records;
-                let written = writer.write_raw_batch(&batch, &raw_batch.raw, &now_rfc3339());
-                // The page text is only needed by the writer
-                drop(raw_batch.raw);
-                if let Err(e) = written {
+            Ok(Some(batch)) => {
+                // Records stay text: NDJSON copies it, Parquet and media parse it (#162)
+                if let Err(e) = writer.write_raw_batch(&batch, &now_rfc3339()) {
                     error = Some(e.to_string());
                     break;
                 }
@@ -465,7 +462,15 @@ async fn pull(
                 }
                 checkpoint = checkpoint_json(run.checkpoint());
                 if let Some(media) = media.as_deref_mut() {
-                    if let Err(e) = media.page(resource, &batch).await {
+                    let parsed = batch.values().map_err(|e| e.to_string());
+                    let paged = match parsed {
+                        Ok(values) => media
+                            .page(resource, &values)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = paged {
                         error = Some(e.to_string());
                         break;
                     }

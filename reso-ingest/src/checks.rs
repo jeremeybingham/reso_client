@@ -3,10 +3,12 @@
 //! Findings are warnings: they are written to the manifest, logged and exported as metrics, and
 //! do not fail the run. Held deletes are in [`crate::DeleteLimits`].
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use reso_client::{Metadata, QueryBuilder, RawRecords, ResoClient};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 use crate::error::IngestError;
@@ -108,15 +110,38 @@ impl SchemaSnapshot {
 /// `1` distinct.
 #[derive(PartialEq, Eq, Hash)]
 enum SeenKey<'a> {
-    Str(&'a str),
+    Str(Cow<'a, str>),
     Json(String),
 }
 
 impl<'a> SeenKey<'a> {
     fn of(key: &'a Value) -> Self {
         match key {
-            Value::String(s) => SeenKey::Str(s),
+            Value::String(s) => SeenKey::Str(Cow::Borrowed(s)),
             other => SeenKey::Json(other.to_string()),
+        }
+    }
+
+    /// The key from its JSON text; `None` for `null` (#162)
+    fn of_raw(key: &'a RawValue) -> Option<Self> {
+        let text = key.get();
+        if text == "null" {
+            return None;
+        }
+        if let Ok(s) = serde_json::from_str::<&str>(text) {
+            return Some(SeenKey::Str(Cow::Borrowed(s)));
+        }
+        // An escaped string, or a number or other value: compared as a parse would compare it
+        match serde_json::from_str::<Value>(text).ok()? {
+            Value::String(s) => Some(SeenKey::Str(Cow::Owned(s))),
+            other => Some(SeenKey::of(&other).into_owned()),
+        }
+    }
+
+    fn into_owned(self) -> SeenKey<'static> {
+        match self {
+            SeenKey::Str(s) => SeenKey::Str(Cow::Owned(s.into_owned())),
+            SeenKey::Json(s) => SeenKey::Json(s),
         }
     }
 }
@@ -168,6 +193,23 @@ impl CheckingWriter<'_> {
             }
         }
     }
+
+    /// [`check`](Self::check) on the records' text: reads only the key member of each
+    fn check_raw(&mut self, raw: &RawRecords) {
+        let mut seen = HashSet::with_capacity(raw.len());
+        for i in 0..raw.len() {
+            // The replication already found each record's key (no scan here); a record it let
+            // through without the member has no key to compare
+            let Ok(Some(key)) = raw.field(i, &self.key_field) else {
+                continue;
+            };
+            if let Some(key) = SeenKey::of_raw(key) {
+                if !seen.insert(key) {
+                    self.duplicates += 1;
+                }
+            }
+        }
+    }
 }
 
 impl RecordWriter for CheckingWriter<'_> {
@@ -176,14 +218,9 @@ impl RecordWriter for CheckingWriter<'_> {
         self.inner.write_batch(records, fetched_at)
     }
 
-    fn write_raw_batch(
-        &mut self,
-        records: &[Value],
-        raw: &RawRecords,
-        fetched_at: &str,
-    ) -> Result<(), IngestError> {
-        self.check(records);
-        self.inner.write_raw_batch(records, raw, fetched_at)
+    fn write_raw_batch(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
+        self.check_raw(raw);
+        self.inner.write_raw_batch(raw, fetched_at)
     }
 
     fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {
@@ -236,7 +273,7 @@ mod tests {
     #[test]
     fn seen_keys_borrow_strings_and_keep_string_and_number_apart() {
         let (s, n) = (serde_json::json!("1"), serde_json::json!(1));
-        assert!(matches!(SeenKey::of(&s), SeenKey::Str("1")));
+        assert!(matches!(SeenKey::of(&s), SeenKey::Str(Cow::Borrowed("1"))));
         let mut seen = HashSet::new();
         assert!(seen.insert(SeenKey::of(&s)));
         assert!(
@@ -244,6 +281,34 @@ mod tests {
             "the number 1 is not the string \"1\""
         );
         assert!(!seen.insert(SeenKey::of(&n)));
+    }
+
+    #[test]
+    fn seen_keys_from_text_compare_as_parsed_keys() {
+        fn raw(t: &str) -> &RawValue {
+            serde_json::from_str(t).unwrap()
+        }
+        let (plain, escaped, number, number_text, null) = (
+            raw(r#""A/1""#),
+            raw(r#""A\u002f1""#),
+            raw("1"),
+            raw(r#""1""#),
+            raw("null"),
+        );
+        assert!(matches!(
+            SeenKey::of_raw(plain),
+            Some(SeenKey::Str(Cow::Borrowed("A/1")))
+        ));
+        assert!(SeenKey::of_raw(null).is_none());
+        let mut seen = HashSet::new();
+        assert!(seen.insert(SeenKey::of_raw(plain).unwrap()));
+        assert!(
+            !seen.insert(SeenKey::of_raw(escaped).unwrap()),
+            "an escaped key is the same key"
+        );
+        assert!(seen.insert(SeenKey::of_raw(number).unwrap()));
+        assert!(seen.insert(SeenKey::of_raw(number_text).unwrap()));
+        assert!(!seen.insert(SeenKey::of(&serde_json::json!(1))));
     }
 
     fn snap(fields: &[(&str, &str, &str)], members: &[(&str, &str)]) -> SchemaSnapshot {
