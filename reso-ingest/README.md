@@ -275,8 +275,15 @@ directory then (files are removed once the bucket has them; the `.run.<run>` mar
 `sync --media` instead.
 `cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_BUCKET` is set
 with `RESO_S3_TEST_ENDPOINT` (a non-AWS server) or `RESO_S3_TEST_REGION` (AWS S3, no endpoint); add
-`RESO_S3_TEST_SINGLE_DELETE=1` for GCS. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images);
-AWS S3 and GCS are not confirmed yet (#115).
+`RESO_S3_TEST_SINGLE_DELETE=1` for GCS. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images)
+and **AWS S3** 2026-11-25 (#115): conditional create, replace and delete, multipart uploads and listings past 1000 keys;
+`sync`, `status` and the container image against a bucket; two `serve` workers on one prefix; a `kill -9` partway through
+a `sync` taken over by a fresh worker once the lease ran out.
+
+**GCS through the S3 interoperability API is not safe for state.** It accepts `If-None-Match: *` and `If-Match` on `PUT`
+and `DELETE` and ignores them (checked 2026-11-25, #115): a second `create` overwrites, so two workers can both take a
+feed and nothing reports it. Its own `x-goog-if-generation-match` cannot be combined with S3-style signing. Do not point
+`--s3-bucket` at GCS until #115 settles how GCS is supported.
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
