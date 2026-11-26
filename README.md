@@ -39,7 +39,8 @@ field names are plain strings and records are raw JSON, so any server schema wor
   `reso-ingest sync --media` queues them page by page for its own download workers during the sync (a slow file host
   does not slow the sync), including `Media` arrays expanded inside other records; each file is stored once, by its
   content hash, in a directory or a bucket. Checked against the reference server's `Media` records, not yet against a vendor's file host (signed
-  single-use URLs, media limits).
+  single-use URLs, media limits). The media index is still loaded and saved whole, so a feed with millions of media
+  records pays for the whole index on every page ([#149](https://github.com/jeremeybingham/reso_client/issues/149)).
 - Vendor differences taken from public documentation (MLS Grid, Trestle) are supported but unconfirmed until #32: a
   filter required on every request, related records served only by `$expand`, deletes signalled by a flag field
   (`MlgCanView`), and request and byte limits per second, hour and day.
@@ -235,8 +236,19 @@ what is left needs a real server or someone else:
   in [#76](https://github.com/jeremeybingham/reso_client/issues/76): what to check against it (auth, paging, replication
   order, limits, `$metadata`, deletes, media) and what code may change with the answers.
 - **Release 0.4.0** of `reso-client` (rate limits per day and bytes per hour, `StandardReplication::expand`,
-  `execute_count` by `$count=true`, metadata fixes; see the [changelog](CHANGELOG.md)) and publishing `reso-ingest`,
-  after #76.
+  `execute_count` by `$count=true`, `Downloader::download_into`, metadata fixes; see the [changelog](CHANGELOG.md)) and
+  publishing `reso-ingest`, after #76.
+- **Production scale, offline parts** (tracker [#78](https://github.com/jeremeybingham/reso_client/issues/78), work
+  order [#116](https://github.com/jeremeybingham/reso_client/issues/116)). Done: logs, metrics, run checks, leases,
+  graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
+  harness, delete detection at millions of keys, backfill, media at scale. Open: media index at scale
+  ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
+  ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
+  ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), observability follow-ups
+  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds
+  ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness
+  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)); Postgres and stream backends wait on an owner
+  decision ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
   advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso_client/issues/51)).
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
@@ -244,7 +256,7 @@ what is left needs a real server or someone else:
 **Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
 output, re-fetching parent records by key to get fresh media URLs for files that failed during `sync --media`.
 
-The overall plan is tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18).
+The ingest-layer plan was tracker [#18](https://github.com/jeremeybingham/reso_client/issues/18) (closed); production scale is #78.
 
 ## License
 
