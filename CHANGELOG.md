@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   100 runs). Hand-written HTML, no scripts, reloads every 15 s, every value escaped. Feature `ui`, on by default, adds
   no dependency; without it `--ui` is a start-up error. A warning is logged when `--ui` listens on a public address
   (#161).
+- `deploy/observability/`: a Prometheus + Grafana kit for one `serve` daemon (#161). It includes a scrape config with
+  30-day retention, four `serve` alert rules (`ResoServeDown`, `ResoFeedFailing`, `ResoFeedNoSuccess`,
+  `ResoRateLimitHigh`, with runbooks in `docs/OPERATIONS.md`) plus the existing rules, and a provisioned dashboard
+  filtered by server and resource. It runs natively (`setup.sh install`: pinned, checksum-verified releases as
+  systemd user units) or with `docker compose`.
+- `reso-ingest`: `serve` exports `reso_ingest_feed_last_success_timestamp_seconds` per feed. Under `serve`,
+  `reso_ingest_last_success_timestamp_seconds` is never set, because the daemon has no run end time.
 - `reso-client`: `ReplicationRun::next_batch_raw` returns `RawRecords`, each record's JSON text as the server sent
   it, without parsing the records into `serde_json::Value`s (#162, lead 4); the order check and checkpoint read only
   the timestamp and key members. `RawRecords::values` parses them when needed, `RawRecords::from_texts` builds one,

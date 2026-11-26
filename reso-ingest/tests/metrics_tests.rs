@@ -287,22 +287,32 @@ async fn shipped_dashboard_and_alerts_use_only_exported_metrics() {
 #[test]
 fn every_shipped_alert_links_a_runbook_that_exists() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let alerts = std::fs::read_to_string(root.join("monitoring/alert-rules.yml")).unwrap();
     let runbooks = std::fs::read_to_string(root.join("../docs/OPERATIONS.md")).unwrap();
     let base = "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#";
-    let names: Vec<&str> = alerts
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("- alert: "))
-        .collect();
-    assert!(!names.is_empty());
-    let urls = alerts.matches("runbook_url:").count();
-    assert_eq!(urls, names.len(), "every alert needs one runbook_url");
-    for name in names {
-        let url = format!("runbook_url: \"{base}{}\"", name.to_lowercase());
-        assert!(alerts.contains(&url), "{name} has no runbook_url {url}");
-        assert!(
-            runbooks.lines().any(|l| l == format!("### {name}")),
-            "docs/OPERATIONS.md has no runbook section for {name}"
+    // The rules for every run, and the `serve` rules of the Prometheus + Grafana kit (#161)
+    for file in [
+        "monitoring/alert-rules.yml",
+        "../deploy/observability/alerts.yml",
+    ] {
+        let alerts = std::fs::read_to_string(root.join(file)).unwrap();
+        let names: Vec<&str> = alerts
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("- alert: "))
+            .collect();
+        assert!(!names.is_empty(), "{file}");
+        let urls = alerts.matches("runbook_url:").count();
+        assert_eq!(
+            urls,
+            names.len(),
+            "{file}: every alert needs one runbook_url"
         );
+        for name in names {
+            let url = format!("runbook_url: \"{base}{}\"", name.to_lowercase());
+            assert!(alerts.contains(&url), "{name} has no runbook_url {url}");
+            assert!(
+                runbooks.lines().any(|l| l == format!("### {name}")),
+                "docs/OPERATIONS.md has no runbook section for {name}"
+            );
+        }
     }
 }

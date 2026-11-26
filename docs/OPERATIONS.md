@@ -42,6 +42,9 @@ Build the image from the [`Dockerfile`](../Dockerfile) (no image is published ye
 - Scrape `serve`'s `/metrics`, or point node_exporter's textfile collector at `sync --metrics-file`.
 - Load the alert rules and the Grafana dashboard from [`reso-ingest/monitoring/`](../reso-ingest/monitoring/); set the
   thresholds from how often each feed runs.
+- For `serve` on one machine, [`deploy/observability/`](../deploy/observability/) is a ready kit: Prometheus (30 days),
+  the alert rules above plus four for `serve` feeds, and a Grafana dashboard with a per-feed filter, installed natively
+  (`setup.sh install`, systemd user units) or with `docker compose`.
 - Optionally set `webhook_url_env` for a JSON summary of each run.
 
 ### 5. Before going live
@@ -146,6 +149,47 @@ The data written is fine; findings are in the manifest's `warnings`.
 
 - Repeated keys: usually a vendor paging bug; downstream should de-duplicate on the key (delivery is at least once).
 - Count mismatch: records changed during the load (rerun and compare), or the server's count uses other filters.
+
+### ResoServeDown
+
+Prometheus cannot scrape `serve` (`up == 0`).
+
+1. Is the process running? systemd: `systemctl status reso-ingest`; Kubernetes: the pod's restarts and events.
+2. Did `--listen` change, or does the scrape target in `prometheus.yml` (`setup.sh install --target`) point elsewhere?
+   `curl http://HOST:PORT/healthz` from the Prometheus host.
+3. A daemon that exits at once logs why on stderr: a configuration that does not parse, a missing secret, an address in
+   use (exit `2`).
+
+### ResoFeedFailing
+
+One feed failed three syncs in a row. It keeps trying, doubling its wait up to 15 minutes (or its interval when that is
+longer); the other feeds are not affected.
+
+1. Read the error: `/status` (`last_error`), the feed's page with `serve --ui`, or the logs (`--log-format json`,
+   filter on `server` and `resource`).
+2. Then follow **ResoResourceFailed** (credentials, throttling, out-of-order data, leases, storage) or
+   **ResoServerFailed** when every feed of the server fails.
+3. To stop the noise while the vendor fixes it, set `paused = true` on the resource; `serve` picks it up on its next
+   reload (SIGHUP or `--reload-every`).
+
+### ResoFeedNoSuccess
+
+A feed that is not paused has not succeeded for three intervals plus 10 minutes.
+
+- With **ResoFeedFailing** also firing, start there.
+- Otherwise the feed is not running: check its `state` in `/status`. `queued` for a long time means the server's
+  `concurrency` slots are held by slow feeds (raise `concurrency` or lengthen intervals); `skipped` runs on the
+  `--ui` pages mean another process holds the feed's lease (another `serve` or a `sync` on the same state).
+
+### ResoRateLimitHigh
+
+A server's client has used over 90% of one of its rate-limit windows for 15 minutes. Nothing fails yet: the client
+waits for budget, so syncs get slower and feeds fall behind.
+
+1. Check which window (`window`, `unit` labels) and whether other systems share the credential.
+2. Lengthen feed intervals, lower `concurrency`, or move large first loads to a `sync --backfill` with
+   `[server.backfill] rate_percent`.
+3. If the vendor allows more, raise `[server.limits]`; see **ResoRepeatedThrottling** if 429s start.
 
 ## Support
 

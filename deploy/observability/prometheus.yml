@@ -1,0 +1,18 @@
+# Prometheus for one `reso-ingest serve` (see README.md in this directory).
+#
+# Scrapes the daemon every 30 s. Retention (30 days) is a command-line flag, set by setup.sh and
+# compose.yaml. Rule files are read from this file's directory: alerts.yml (serve feeds) and
+# alert-rules.yml (copied from reso-ingest/monitoring/, shared with `sync --metrics-file`).
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - alerts.yml
+  - alert-rules.yml
+
+scrape_configs:
+  - job_name: reso-ingest
+    static_configs:
+      # `serve --listen`; setup.sh --target replaces it
+      - targets: ["127.0.0.1:9090"]
