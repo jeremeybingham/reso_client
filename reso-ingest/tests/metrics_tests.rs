@@ -71,7 +71,7 @@ async fn sync(dir: &TempDir, url: &str, extra: &[&str]) -> (i32, String) {
     std::fs::write(
         &config,
         format!(
-            "[[server]]\nname = \"mls\"\nbase_url = \"{url}\"\n[server.limits]\nmax_retries = 0\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"METRICS_TEST_TOKEN\"\n"
+            "[[server]]\nname = \"mls\"\nbase_url = \"{url}\"\n[server.limits]\nmax_retries = 0\nper_hour = 1000\nbytes_per_day = 100000000\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"METRICS_TEST_TOKEN\"\n"
         ),
     )
     .unwrap();
@@ -142,6 +142,23 @@ async fn metrics_file_has_lag_volumes_and_request_counts() {
     );
     assert!(text.contains("# TYPE reso_ingest_freshness_lag_seconds gauge"));
 
+    // The rate-limit windows of the server's client at the end of its sync (#109): the pull's
+    // requests plus the $metadata fetch; the bytes window counts every body; no per-second limit
+    let hour = "server=\"mls\",unit=\"requests\",window=\"hour\"";
+    let used = sample(&text, "reso_ingest_rate_limit_used", hour).unwrap();
+    assert_eq!(used, get("reso_ingest_last_run_requests") + 1.0, "{text}");
+    assert_eq!(sample(&text, "reso_ingest_rate_limit", hour), Some(1000.0));
+    let day_bytes = "server=\"mls\",unit=\"bytes\",window=\"day\"";
+    assert!(
+        sample(&text, "reso_ingest_rate_limit_used", day_bytes).unwrap()
+            > get("reso_ingest_last_run_http_bytes")
+    );
+    assert_eq!(
+        sample(&text, "reso_ingest_rate_limit", day_bytes),
+        Some(100_000_000.0)
+    );
+    assert!(!text.contains("window=\"second\""), "{text}");
+
     // A run with nothing new keeps reporting the lag from the saved checkpoint
     let (code, err) = sync(
         &dir,
@@ -167,6 +184,13 @@ async fn metrics_file_has_lag_volumes_and_request_counts() {
         .unwrap();
     let m: serde_json::Value = serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
     assert!(m["resources"][0]["stats"]["requests"].as_u64().unwrap() >= 1);
+    let budget = &m["rate_budget"];
+    assert_eq!(budget.as_array().unwrap().len(), 2, "{budget}");
+    assert_eq!(budget[0]["server"], "mls");
+    assert_eq!(budget[0]["unit"], "requests");
+    assert_eq!(budget[0]["window"], "hour");
+    assert_eq!(budget[0]["limit"], 1000);
+    assert!(budget[0]["used"].as_u64().unwrap() >= 2);
 }
 
 #[tokio::test]

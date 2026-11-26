@@ -26,7 +26,8 @@ use tracing::debug;
 use crate::client::ResoClient;
 use crate::error::{ResoError, Result};
 use crate::retry::{
-    is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter, RateLimit, RetryPolicy,
+    is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter, RateLimit, RateUsage,
+    RetryPolicy,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -307,6 +308,12 @@ impl Downloader<'_> {
     /// Counters of file requests, retries and body bytes (separate from the client's)
     pub fn stats(&self) -> ClientStats {
         self.counters.snapshot()
+    }
+
+    /// How much of each window of the downloader's own [`RateLimit`] is used now; see
+    /// [`RateUsage`]
+    pub fn rate_usage(&self) -> RateUsage {
+        self.limiter.usage()
     }
 
     /// Whether the API token goes with a request to `url`

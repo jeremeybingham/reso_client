@@ -81,7 +81,7 @@ The rest describe the run just finished. Labels are `server` and `resource` unle
 | `reso_ingest_last_success_timestamp_seconds` | End of the last error-free run (absent after a failed run) |
 | `reso_ingest_last_run_records`, `_deletes`, `_files`, `_file_bytes` | Records, delete events, data files and their size |
 | `reso_ingest_last_run_duration_seconds`, `_records_per_second` | Time taken, and records over time |
-| `reso_ingest_last_run_requests`, `_retries`, `_http_bytes` | HTTP requests (retries included), retries, body bytes |
+| `reso_ingest_last_run_requests`, `_retries`, `_http_bytes` | HTTP requests (retries included), retries, body bytes; the resource's own requests, also when other feeds of the server use its client at the same time |
 | `reso_ingest_last_run_responses` (also `class`) | Responses by `2xx` (3xx included), `429`, `4xx`, `5xx` |
 | `reso_ingest_last_run_warnings`, `_deletes_held` | Check findings and held deletes (see [Run checks](#run-checks)) |
 | `reso_ingest_schema_changes` (`server` only) | `$metadata` changes against the previous run (absent when none) |
@@ -92,10 +92,12 @@ The rest describe the run just finished. Labels are `server` and `resource` unle
 | `reso_ingest_last_run_media_files` (`server`, `outcome`) | With `--media`: files `downloaded`, `unchanged` (same content under a new stamp), `shared` (content already stored for another key), `not_modified` (304), `failed`, `expired` (401, 403 or 410 from the file host; also in `failed`), `deleted` |
 | `reso_ingest_last_run_media_bytes`, `reso_ingest_media_pending` (`server`) | With `--media`: bytes downloaded; files still to fetch |
 | `reso_ingest_media_index_ok` (`server`) | With `--media`: 0 when the media index could not be read or saved |
+| `reso_ingest_rate_limit_used`, `reso_ingest_rate_limit` (`server`, `unit`, `window`) | Rate-limit budget: requests (`unit="requests"`, `window` `second`, `hour` or `day`) or response bytes (`unit="bytes"`, `hour` or `day`) counted in the rolling window, and the ceiling the client paces to, one pair per window set in `[server.limits]`. Taken when the server's sync ends (`serve`: when scraped). The count starts at zero with each new client: a new process, changed secrets, or a backfill's rate share (the ceiling is then the share); the vendor may still count earlier requests |
 
-Not measured yet: the rate-limit budget used (the limiter does not report it) and checkpoint age (the freshness lag
-covers the same question). The request counters cover the pull and delete detection, not media downloads (those are the `media` metrics). OpenTelemetry
-is not exported; the text format needs no new dependency.
+Not measured: checkpoint age (the freshness lag covers the same question) and the media downloader's own rate limit
+(`[server.media]`). The request counters cover the pull and delete detection, not media downloads (those are the `media`
+metrics) or the `$metadata` fetch at the start of a server's sync (that one is in the rate-limit budget). OpenTelemetry
+is not exported; the text format needs no new dependency, and collectors can scrape it with their Prometheus receiver.
 
 `monitoring/` holds an example Grafana dashboard (`grafana-dashboard.json`: import it and pick the Prometheus data
 source) and Prometheus alert rules (`alert-rules.yml`: stale feed, failed resource or server, repeated 429s, no run
@@ -501,8 +503,9 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 | `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures` and `reso_ingest_feed_interval_seconds` (labels `server`, `resource`); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
 | `/status` | JSON: `started_at` and, per feed, `state` (`waiting`, `queued`, `running`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
 
-Unconfirmed against a real server (#32): everything here is tested against mock servers only. With concurrent feeds of one
-server the per-feed request counters in the metrics overlap, because they are differences of one shared client's counters.
+Unconfirmed against a real server (#32): everything here is tested against mock servers only. Feeds of one server
+share its client, so `reso_ingest_rate_limit_used` is per server, read live from that client at each scrape; the
+per-feed request counters count each feed's own requests.
 
 ## Containers and deployment
 

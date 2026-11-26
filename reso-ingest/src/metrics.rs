@@ -186,6 +186,14 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
         "reso_ingest_last_run_resources",
         "Resources the last run handled",
     );
+    let mut budget_used = Family::new(
+        "reso_ingest_rate_limit_used",
+        "Requests or response bytes counted in a rate-limit window (rolling; at the end of the server's sync, or now under serve)",
+    );
+    let mut budget_limit = Family::new(
+        "reso_ingest_rate_limit",
+        "The rate-limit ceiling the server's client paces to, per window",
+    );
 
     let mut backfill_left = Family::new(
         "reso_ingest_backfill_remaining_records",
@@ -261,6 +269,16 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
             .samples
             .push((format!("server=\"{}\"", escape(&f.server)), 1.0));
     }
+    for b in &manifest.rate_budget {
+        let l = format!(
+            "server=\"{}\",unit=\"{}\",window=\"{}\"",
+            escape(&b.server),
+            b.unit,
+            b.window
+        );
+        budget_used.samples.push((l.clone(), b.used as f64));
+        budget_limit.samples.push((l, b.limit as f64));
+    }
     if let Some(t) = finished_at {
         finished.samples.push((String::new(), t));
     }
@@ -291,6 +309,8 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
             backfill_share,
             schema,
             failed,
+            budget_used,
+            budget_limit,
             finished,
             resources,
         ],

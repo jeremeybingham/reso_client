@@ -195,7 +195,7 @@ pub use network::NetworkOptions;
 pub use paging::Page;
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;
-pub use retry::{ClientStats, RateLimit, RetryPolicy};
+pub use retry::{count_requests, ClientStats, RateLimit, RateUsage, RetryPolicy, WindowUsage};
 pub use standard_replication::{Checkpoint, ReplicationRun, StandardReplication};
 
 // Re-export serde_json for convenience

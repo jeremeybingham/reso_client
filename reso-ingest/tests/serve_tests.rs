@@ -374,3 +374,121 @@ token_env = "SERVE_TEST_TOKEN"
     assert_eq!(run(&args, &mut out, &mut err).await, 2);
     assert!(String::from_utf8_lossy(&err).contains("interval"));
 }
+
+#[tokio::test]
+async fn feeds_of_one_server_count_their_own_requests() {
+    // Both feeds share the server's client and sync at the same time (slow answers, short
+    // intervals). Property's answers are padded to 20 kB and Member's are small, so a Member sync
+    // that counted Property's traffic would show it in its bytes (#109).
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let srv = MockServer::start().await;
+    // Arrival time of each data request, and whether it was Member's
+    let arrivals = Arc::new(std::sync::Mutex::new(Vec::<(Instant, bool)>::new()));
+    let seen = Arc::clone(&arrivals);
+    Mock::given(method("GET"))
+        .respond_with(move |req: &wiremock::Request| {
+            let path = req.url.path();
+            if path.ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(METADATA);
+            }
+            let member = path.ends_with("/Member");
+            seen.lock().unwrap().push((Instant::now(), member));
+            let (key, pad) = if member {
+                ("MemberKey", String::new())
+            } else {
+                ("ListingKey", "x".repeat(20_000))
+            };
+            let value = if req.url.query_pairs().any(|(k, _)| k == "$filter") {
+                json!([])
+            } else {
+                json!([{key: "K1", "ModificationTimestamp": "2026-01-01T00:00:01Z"}])
+            };
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": value, "pad": pad}))
+                .set_delay(DELAY)
+        })
+        .mount(&srv)
+        .await;
+    const DELAY: Duration = Duration::from_millis(150);
+    // Requests of the two feeds open at the same time: a Member request that arrived while a
+    // Property request was still delayed, or the other way round
+    let overlaps = || {
+        let a = arrivals.lock().unwrap();
+        a.iter()
+            .filter(|(t, m)| {
+                a.iter()
+                    .any(|(u, n)| n != m && u <= t && t.duration_since(*u) < DELAY)
+            })
+            .count()
+    };
+    let dir = TempDir::new("own-counts");
+    // A rate limit, so /metrics reports the client's live use of it
+    let config = Config::parse(&format!(
+        r#"
+[[server]]
+name = "mls"
+base_url = "{}"
+[server.limits]
+max_retries = 0
+per_hour = 100000
+[server.auth]
+type = "bearer"
+token_env = "SERVE_TEST_TOKEN"
+[server.resources.Property]
+interval = "100ms"
+[server.resources.Member]
+interval = "100ms"
+"#,
+        srv.uri()
+    ))
+    .unwrap();
+    let shutdown = Shutdown::new();
+    let daemon = Daemon::start(config, options(&dir), shutdown.clone())
+        .await
+        .unwrap();
+
+    let bytes = |m: &str, resource: &str| -> f64 {
+        let prefix =
+            format!("reso_ingest_last_run_http_bytes{{server=\"mls\",resource=\"{resource}\"}} ");
+        m.lines()
+            .find_map(|l| l.strip_prefix(&prefix))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("{resource}: {m}"))
+    };
+    let mut checked = 0;
+    until("several overlapping syncs of both feeds", async || {
+        let s = status(&daemon).await;
+        if feed(&s, "Member")["runs"].as_u64() < Some(1)
+            || feed(&s, "Property")["runs"].as_u64() < Some(1)
+        {
+            return false;
+        }
+        // Every request that has arrived was counted by the limiter before it was sent
+        let arrived = arrivals.lock().unwrap().len() as f64;
+        let metrics = get(&daemon, "/metrics").await.1;
+        assert!(bytes(&metrics, "Member") < 20_000.0, "{metrics}");
+        assert!(bytes(&metrics, "Property") >= 20_000.0, "{metrics}");
+        // Both feeds' requests and the $metadata fetches, read from the shared client now
+        let hour = "reso_ingest_rate_limit_used{server=\"mls\",unit=\"requests\",window=\"hour\"} ";
+        let used: f64 = metrics
+            .lines()
+            .find_map(|l| l.strip_prefix(hour))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("{metrics}"));
+        assert!(used >= arrived, "{metrics}");
+        assert!(
+            metrics.contains(
+                "reso_ingest_rate_limit{server=\"mls\",unit=\"requests\",window=\"hour\"} 100000\n"
+            ),
+            "{metrics}"
+        );
+        checked += 1;
+        checked >= 10 && overlaps() >= 5
+    })
+    .await;
+
+    shutdown.trigger();
+    tokio::time::timeout(Duration::from_secs(10), daemon.wait())
+        .await
+        .unwrap();
+}

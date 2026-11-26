@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   held whole in memory during a run.
 
 ### Added
+- Rate-limit budget and per-task request counts (#109). `reso-client`: `ResoClient::rate_usage` and
+  `Downloader::rate_usage` return a `RateUsage`: for each window of the `RateLimit`, the requests or bytes counted in it
+  now and the ceiling (`WindowUsage`, `fraction()`); it never waits, also while a request is held back by the limit.
+  `count_requests(future)` returns the `ClientStats` of the requests `future` makes with any `ResoClient`, separate from
+  other tasks sharing the client; scopes nest. `reso-ingest`: per-resource `stats` now count only the resource's own
+  requests (under `serve`, feeds of one server syncing at once no longer count each other's, and a resource retried
+  with changed secrets keeps the first try's requests); the manifest has `rate_budget` (per server, unit and window) and
+  the metrics have `reso_ingest_rate_limit_used` and `reso_ingest_rate_limit`, read live from each server's client at
+  `serve`'s `/metrics`; the example dashboard has a rate-limit panel.
 - Network options (#91): `NetworkOptions` (`ClientConfig::with_network`) sets an HTTP(S) proxy (with basic proxy
   credentials and a `NO_PROXY` list; the proxy variables are honoured by default, `without_system_proxy` turns them
   off), extra trusted CA certificates (PEM bytes or a file), the `User-Agent`, and the connection pool's idle cap and

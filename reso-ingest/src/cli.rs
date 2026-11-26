@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{error::ErrorKind, Parser, Subcommand};
-use reso_client::{ClientStats, Metadata, ResoClient, StandardReplication};
+use reso_client::{count_requests, Metadata, RateUsage, ResoClient, StandardReplication};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tracing::Instrument;
@@ -952,10 +952,14 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
     let mut media_manifest = MediaManifest::new(&options.run_id);
     for report in reports {
         match report.result {
-            Ok((entries, media, schema_changes)) => {
-                entries.into_iter().for_each(|e| manifest.add_resource(e));
-                media_manifest.servers.extend(media);
-                manifest.add_schema_changes(&report.name, schema_changes);
+            Ok(outcome) => {
+                outcome
+                    .entries
+                    .into_iter()
+                    .for_each(|e| manifest.add_resource(e));
+                media_manifest.servers.extend(outcome.media);
+                manifest.add_schema_changes(&report.name, outcome.schema_changes);
+                manifest.add_rate_usage(&report.name, &outcome.rate_usage);
             }
             Err(message) => manifest.add_server_failure(report.name, message),
         }
@@ -1029,8 +1033,17 @@ fn send(tx: &UnboundedSender<String>, line: String) {
     let _ = tx.send(line);
 }
 
-/// What one server's sync gives back: resource entries, the media report and schema changes
-pub(crate) type ServerOutcome = (Vec<ResourceEntry>, Option<MediaReport>, Vec<String>);
+/// What one server's sync gives back
+pub(crate) struct ServerOutcome {
+    /// One entry per resource
+    pub(crate) entries: Vec<ResourceEntry>,
+    /// The media report (with `--media`)
+    pub(crate) media: Option<MediaReport>,
+    /// `$metadata` changes since the previous run
+    pub(crate) schema_changes: Vec<String>,
+    /// How much of its rate limit the server's client had used at the end
+    pub(crate) rate_usage: RateUsage,
+}
 
 async fn sync_server(
     server: ServerConfig,
@@ -1231,159 +1244,161 @@ pub(crate) async fn sync_server_with(
                 }
             };
             let started = std::time::Instant::now();
-            client = handle.client();
-            let mut stats_before = client.stats();
-            let filter = join_filters(
-                server.filter_for(resource),
-                options
-                    .backfill
-                    .as_ref()
-                    .and_then(|w| w.filter(TIMESTAMP_FIELD)),
-            );
-            // A backfill window keeps its own checkpoint
-            let store = match &options.backfill {
-                Some(w) => store_main.scoped(&w.checkpoint_suffix()),
-                None => store_main.clone(),
-            };
-            let mut spec = StandardReplication::new(resource, &plan.key);
-            if let Some(n) = server.page_size_for(resource) {
-                spec = spec.page_size(n);
-            }
-            if let Some(f) = &filter {
-                spec = spec.filter(f.as_str());
-            }
-            let expand: Vec<&str> = server
-                .expand_for(resource)
-                .iter()
-                .map(String::as_str)
-                .collect();
-            if !expand.is_empty() {
-                spec = spec.expand(&expand);
-            }
-            // A full load when there is no checkpoint to start from
-            let saved = store.load(&name, resource).await;
-            let full_load = options.start_over || matches!(saved, Ok(None) | Err(_));
-            let window_start = match &saved {
-                Ok(Some(c)) if !full_load => Some(c.timestamp.clone()),
-                _ => None,
-            };
-            let backfill_entry = match &options.backfill {
-                Some(w) => {
-                    let mut filters: Vec<String> = filter.iter().cloned().collect();
-                    if let Ok(Some(cp)) = &saved {
-                        if !options.start_over {
-                            filters.push(backfill::after_checkpoint(
-                                cp,
-                                TIMESTAMP_FIELD,
-                                &plan.key,
-                            ));
-                        }
-                    }
-                    let remaining = backfill::count(&client, resource, &filters)
-                        .instrument(span.clone())
-                        .await;
-                    let rate_percent = handle.rate_percent();
-                    span.in_scope(|| {
-                        tracing::info!(remaining, rate_percent, from = ?w.from, to = ?w.to, "backfill started")
-                    });
-                    send(
-                        &tx,
-                        format!(
-                            "[{label}] backfill: {} records left, {rate_percent}% of the rate limits",
-                            remaining.map_or("unknown".into(), |n| n.to_string())
-                        ),
-                    );
-                    Some(BackfillEntry {
-                        from: w.from.clone(),
-                        to: w.to.clone(),
-                        remaining_at_start: remaining,
-                        rate_percent,
-                    })
-                }
-                None => None,
-            };
-            let mut progress;
-            let inner: &mut dyn RecordWriter = match &backfill_entry {
-                Some(b) => {
-                    progress = ProgressWriter::new(
-                        writer.as_mut(),
-                        tx.clone(),
-                        format!("##progress step={}/{total} label={label}", i + 1),
-                        b.remaining_at_start,
-                    );
-                    &mut progress
-                }
-                None => writer.as_mut(),
-            };
-            let mut checked = CheckingWriter::new(inner, &plan.key);
-            let mut pull = Pull {
-                handle,
-                client: &mut client,
-                stats_before: &mut stats_before,
-                server: &name,
-                resource,
-                spec,
-                store: &store,
-                start_over: options.start_over,
-                media: page_media.as_mut(),
-                shutdown: &options.shutdown,
-                span: &span,
-            };
-            let mut entry = if let Some(flag) = &server.deletes.flag_field {
-                let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
-                let mut entry = pull.run(&mut flagged).await;
-                entry.deletes = flagged.deletes();
-                entry
-            } else {
-                pull.run(&mut checked).await
-            };
-            entry.warnings = checked.warnings();
-            entry.backfill = backfill_entry;
-            if let Some(w) = options.backfill.as_ref().filter(|w| !w.is_whole()) {
-                if w.to.is_none() && entry.error.is_none() && !entry.interrupted {
-                    hand_over_checkpoint(&store, &store_main, &name, resource, &span, &tx, &label)
-                        .await;
-                }
-            }
-            if full_load && entry.error.is_none() && !entry.interrupted {
-                // A full load should hold what the server counts (servers without $count are skipped)
-                let written = entry.records;
-                entry.warnings.extend(
-                    count_warning(&client, resource, filter.as_deref(), written)
-                        .instrument(span.clone())
-                        .await,
+            // Count this resource's own requests: feeds of one server share a client in `serve` (#109)
+            let ((mut entry, window_start), requests) = count_requests(async {
+                client = handle.client();
+                let filter = join_filters(
+                    server.filter_for(resource),
+                    options
+                        .backfill
+                        .as_ref()
+                        .and_then(|w| w.filter(TIMESTAMP_FIELD)),
                 );
-            }
-            if options.deletes
-                && entry.error.is_none()
-                && !entry.interrupted
-                && server.deletes.flag_field.is_none()
-            {
-                // Key-diff temporary files; the image has no /tmp, --out is writable
-                let scratch = options.out.join(".scratch");
-                let deleted = reconcile_deletes(
-                    &client,
-                    &name,
-                    &DeleteTarget::new(resource, &plan.key)
-                        .with_filter(filter.as_deref())
-                        .with_limits(server.deletes.limits(options.allow_mass_deletes))
-                        .with_scratch_dir(&scratch),
-                    feed.as_ref(),
-                    writer.as_mut(),
-                    &store,
-                )
-                .instrument(span.clone())
-                .await;
-                entry.deletes = deleted.deletes;
-                entry.deletes_held = deleted.deletes_held;
-                entry.warnings.extend(deleted.warnings);
-                entry.error = deleted.error;
-                if !deleted.files.is_empty() {
-                    entry.files = deleted.files; // the writer's list is cumulative
+                // A backfill window keeps its own checkpoint
+                let store = match &options.backfill {
+                    Some(w) => store_main.scoped(&w.checkpoint_suffix()),
+                    None => store_main.clone(),
+                };
+                let mut spec = StandardReplication::new(resource, &plan.key);
+                if let Some(n) = server.page_size_for(resource) {
+                    spec = spec.page_size(n);
                 }
-            }
-            entry.stats =
-                ResourceStats::new(started.elapsed(), &client.stats().since(&stats_before));
+                if let Some(f) = &filter {
+                    spec = spec.filter(f.as_str());
+                }
+                let expand: Vec<&str> = server
+                    .expand_for(resource)
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                if !expand.is_empty() {
+                    spec = spec.expand(&expand);
+                }
+                // A full load when there is no checkpoint to start from
+                let saved = store.load(&name, resource).await;
+                let full_load = options.start_over || matches!(saved, Ok(None) | Err(_));
+                let window_start = match &saved {
+                    Ok(Some(c)) if !full_load => Some(c.timestamp.clone()),
+                    _ => None,
+                };
+                let backfill_entry = match &options.backfill {
+                    Some(w) => {
+                        let mut filters: Vec<String> = filter.iter().cloned().collect();
+                        if let Ok(Some(cp)) = &saved {
+                            if !options.start_over {
+                                filters.push(backfill::after_checkpoint(
+                                    cp,
+                                    TIMESTAMP_FIELD,
+                                    &plan.key,
+                                ));
+                            }
+                        }
+                        let remaining = backfill::count(&client, resource, &filters)
+                            .instrument(span.clone())
+                            .await;
+                        let rate_percent = handle.rate_percent();
+                        span.in_scope(|| {
+                            tracing::info!(remaining, rate_percent, from = ?w.from, to = ?w.to, "backfill started")
+                        });
+                        send(
+                            &tx,
+                            format!(
+                                "[{label}] backfill: {} records left, {rate_percent}% of the rate limits",
+                                remaining.map_or("unknown".into(), |n| n.to_string())
+                            ),
+                        );
+                        Some(BackfillEntry {
+                            from: w.from.clone(),
+                            to: w.to.clone(),
+                            remaining_at_start: remaining,
+                            rate_percent,
+                        })
+                    }
+                    None => None,
+                };
+                let mut progress;
+                let inner: &mut dyn RecordWriter = match &backfill_entry {
+                    Some(b) => {
+                        progress = ProgressWriter::new(
+                            writer.as_mut(),
+                            tx.clone(),
+                            format!("##progress step={}/{total} label={label}", i + 1),
+                            b.remaining_at_start,
+                        );
+                        &mut progress
+                    }
+                    None => writer.as_mut(),
+                };
+                let mut checked = CheckingWriter::new(inner, &plan.key);
+                let mut pull = Pull {
+                    handle,
+                    client: &mut client,
+                    server: &name,
+                    resource,
+                    spec,
+                    store: &store,
+                    start_over: options.start_over,
+                    media: page_media.as_mut(),
+                    shutdown: &options.shutdown,
+                    span: &span,
+                };
+                let mut entry = if let Some(flag) = &server.deletes.flag_field {
+                    let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
+                    let mut entry = pull.run(&mut flagged).await;
+                    entry.deletes = flagged.deletes();
+                    entry
+                } else {
+                    pull.run(&mut checked).await
+                };
+                entry.warnings = checked.warnings();
+                entry.backfill = backfill_entry;
+                if let Some(w) = options.backfill.as_ref().filter(|w| !w.is_whole()) {
+                    if w.to.is_none() && entry.error.is_none() && !entry.interrupted {
+                        hand_over_checkpoint(&store, &store_main, &name, resource, &span, &tx, &label)
+                            .await;
+                    }
+                }
+                if full_load && entry.error.is_none() && !entry.interrupted {
+                    // A full load should hold what the server counts (servers without $count are skipped)
+                    let written = entry.records;
+                    entry.warnings.extend(
+                        count_warning(&client, resource, filter.as_deref(), written)
+                            .instrument(span.clone())
+                            .await,
+                    );
+                }
+                if options.deletes
+                    && entry.error.is_none()
+                    && !entry.interrupted
+                    && server.deletes.flag_field.is_none()
+                {
+                    // Key-diff temporary files; the image has no /tmp, --out is writable
+                    let scratch = options.out.join(".scratch");
+                    let deleted = reconcile_deletes(
+                        &client,
+                        &name,
+                        &DeleteTarget::new(resource, &plan.key)
+                            .with_filter(filter.as_deref())
+                            .with_limits(server.deletes.limits(options.allow_mass_deletes))
+                            .with_scratch_dir(&scratch),
+                        feed.as_ref(),
+                        writer.as_mut(),
+                        &store,
+                    )
+                    .instrument(span.clone())
+                    .await;
+                    entry.deletes = deleted.deletes;
+                    entry.deletes_held = deleted.deletes_held;
+                    entry.warnings.extend(deleted.warnings);
+                    entry.error = deleted.error;
+                    if !deleted.files.is_empty() {
+                        entry.files = deleted.files; // the writer's list is cumulative
+                    }
+                }
+                (entry, window_start)
+            })
+            .await;
+            entry.stats = ResourceStats::new(started.elapsed(), &requests);
             span.in_scope(|| {
                 for w in &entry.warnings {
                     tracing::warn!(warning = %w, "check finding");
@@ -1432,7 +1447,12 @@ pub(crate) async fn sync_server_with(
         }
         None => (records.await, None),
     };
-    Ok((entries, media, schema_changes))
+    Ok(ServerOutcome {
+        entries,
+        media,
+        schema_changes,
+        rate_usage: handle.rate_usage(),
+    })
 }
 
 /// Set the rate share of `handle` for what this sync is about to do, and return the marker leases
@@ -1574,7 +1594,6 @@ async fn hand_over_checkpoint(
 struct Pull<'a> {
     handle: &'a ClientHandle,
     client: &'a mut Arc<ResoClient>,
-    stats_before: &'a mut ClientStats,
     server: &'a str,
     resource: &'a str,
     spec: StandardReplication,
@@ -1596,7 +1615,6 @@ impl Pull<'_> {
             self.span
                 .in_scope(|| tracing::info!("retrying with the changed secrets"));
             *self.client = renewed;
-            *self.stats_before = self.client.stats();
             let earlier = entry.records;
             // From the checkpoint the first try saved; the writer carries on with its files
             entry = self.once(writer, false).await;

@@ -11,7 +11,8 @@ use crate::auth::{Auth, ClientCredentials, CredentialTransport, TokenProvider};
 use crate::error::{ResoError, Result};
 use crate::network::NetworkOptions;
 use crate::retry::{
-    is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter, RateLimit, RetryPolicy,
+    count_in_scopes, is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter,
+    RateLimit, RateUsage, RetryPolicy,
 };
 
 /// A successful response: its headers and its complete body
@@ -439,6 +440,20 @@ impl ResoClient {
         self.counters.snapshot()
     }
 
+    /// How much of each window of the configured [`RateLimit`] is used now; see [`RateUsage`]
+    ///
+    /// Does not wait, also while a request is held back by the limit.
+    pub fn rate_usage(&self) -> RateUsage {
+        self.limiter.usage()
+    }
+
+    /// Count on the client's counters and those of any [`count_requests`](crate::count_requests)
+    /// scope the calling task is in
+    fn count(&self, count: impl Fn(&Counters)) {
+        count(&self.counters);
+        count_in_scopes(count);
+    }
+
     /// The token provider, shared with a [`Downloader`](crate::Downloader)
     pub(crate) fn tokens(&self) -> &TokenProvider {
         &self.tokens
@@ -522,7 +537,7 @@ impl ResoClient {
                 delay,
                 error
             );
-            self.counters.retry();
+            self.count(Counters::retry);
             tokio::time::sleep(delay).await;
             retries += 1;
         }
@@ -549,7 +564,7 @@ impl ResoClient {
     /// Send one GET with the given bearer token, after waiting for the rate limit
     async fn send_get(&self, url: &str, accept: &str, token: &str) -> Result<reqwest::Response> {
         self.limiter.acquire().await;
-        self.counters.request();
+        self.count(Counters::request);
         let response = self
             .http_client
             .get(url)
@@ -558,7 +573,8 @@ impl ResoClient {
             .send()
             .await
             .map_err(|e| ResoError::Network(e.to_string()))?;
-        self.counters.status(response.status().as_u16());
+        let code = response.status().as_u16();
+        self.count(|c| c.status(code));
         Ok(response)
     }
 
@@ -571,7 +587,7 @@ impl ResoClient {
             .bytes()
             .await
             .map_err(|e| ResoError::Network(format!("Failed to read response body: {}", e)))?;
-        self.counters.bytes(bytes.len() as u64);
+        self.count(|c| c.bytes(bytes.len() as u64));
         self.limiter.record_bytes(bytes.len() as u64).await;
         Ok(bytes.to_vec())
     }

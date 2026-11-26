@@ -274,6 +274,35 @@
           "legendFormat": "{{server}}"
         }
       ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Rate-limit budget used (fraction of each window)",
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "reso_ingest_rate_limit_used / reso_ingest_rate_limit",
+          "legendFormat": "{{server}} {{unit}}/{{window}}"
+        }
+      ]
     }
   ]
 }
