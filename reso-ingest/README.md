@@ -251,7 +251,8 @@ All of `state/` goes through one key-value interface, `StateStore` (get, put, cr
 delete, list, and copies to and from local files for large values such as key sets). The command uses the file backend, `FileStateStore`: one file per key, written to a temporary file,
 synced and renamed. A library user can pass another backend (object storage, a database) to `CheckpointStore::with_store`,
 `Lease::acquire`, `MediaOptions` and `ServeOptions`; leases rely on its conditional writes. Shared backends are #85. With the `s3` feature, `S3StateStore` keeps state as objects under a bucket prefix: AWS S3,
-R2, MinIO and RustFS through the S3 API (version = ETag, `create` and `replace` use `If-None-Match` and `If-Match`;
+R2, MinIO and RustFS through the S3 API (version = ETag, `create`, `replace` and versioned `delete` use `If-None-Match`
+and `If-Match`, the delete as a presigned `DELETE` since `object_store` has no conditional delete (#133);
 credentials from `AWS_ACCESS_KEY_ID` and friends, never the config file; `S3Options.single_delete` for a store without
 multi-delete), or Google Cloud Storage through its own API (`Provider::Gcs`: version = object generation, `create`,
 `replace` and versioned `delete` use `x-goog-if-generation-match`; credentials from a service-account key file). `S3FileSink` uploads finished data files to the same kind of bucket (one conditional `PUT` up to 32 MiB,
@@ -277,8 +278,9 @@ when it was made; a run killed before delivery leaves its key behind, and `sync`
 process) delete reservations older than 7 days, conditionally on the version just read (#132). Reservations written by
 earlier versions carry no time: the first sweep stamps them and they go 7 days later. All of this relies on
 the store enforcing conditional writes, so `sync` and `serve` first probe it (#131): they create a throwaway object
-`state/.probe/<pid>-<nanos>`, try to create it again and to replace it with a stale version, delete it, and stop with an
-error (exit code 2) if either second write succeeds. That costs two or three `PUT`s and one `DELETE` per start.
+`state/.probe/<pid>-<nanos>`, try to create it again, to replace it and to delete it with a stale version, delete it,
+and stop with an error (exit code 2) if any of the three succeeds. That costs up to three `PUT`s and two `DELETE`s per
+start.
 `--s3-unsafe-no-conditional-writes` skips the probe (logging a warning) for a bucket only one worker ever uses. `--out` is only a staging
 directory then (files are removed once the bucket has them; the `.run.<run>` markers stay). Not routed: the metrics file
 (`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`) and downloaded media files

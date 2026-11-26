@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `reso-ingest`: an S3 endpoint at `storage.googleapis.com` is refused, since GCS's interoperability API ignores the
   S3 precondition headers (#115); use `--gcs-bucket`. Breaking for code that builds `S3Options` with a struct
   literal: add `provider` (or use `..S3Options::default()`).
+- `reso-ingest`: on S3, a versioned `S3StateStore::delete` (lease release, stale reservations) is one `DELETE` with
+  `If-Match` on the ETag instead of a `HEAD` then an unconditional `DELETE`, so an object replaced in between is no
+  longer deleted (#133). `object_store` has no conditional delete, so it is a presigned request from its signer with
+  `If-Match` in the signature; no new dependency. The start-up probe (#131) now also checks that a delete with a stale
+  version leaves the object in place.
 
 ### Changed
 - `reso-ingest --deletes` key comparison at millions of keys (#87): key sets are saved as sorted lines
