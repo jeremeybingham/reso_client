@@ -653,6 +653,45 @@ mod tests {
     }
 
     #[test]
+    fn purge_records_are_never_replaced() {
+        let out = std::env::temp_dir().join(format!("reso-purge-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out);
+        // Two purges in the same second: the second record gets `-1`
+        let mut collided = false;
+        for _ in 0..5 {
+            let (a, path_a, _) = reserve_record(&out, "m/ls").unwrap();
+            let (b, path_b, _) = reserve_record(&out, "m/ls").unwrap();
+            assert_ne!(path_a, path_b);
+            if b == format!("{a}-1") {
+                collided = true;
+                break; // otherwise the clock ticked between the two
+            }
+        }
+        assert!(collided);
+        // Every name of this second taken: an error, nothing replaced
+        let dir = out.join(AUDIT_DIR);
+        let mut refused = false;
+        for _ in 0..5 {
+            let base = format!("{}.{}", new_run_id(), encode_name("full"));
+            fs::write(dir.join(format!("purge.{base}.json")), "x").unwrap();
+            for n in 1..100 {
+                fs::write(dir.join(format!("purge.{base}-{n}.json")), "x").unwrap();
+            }
+            if let Err(e) = reserve_record(&out, "full") {
+                assert!(e.to_string().contains("no free purge record name"), "{e}");
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused);
+        // The audit directory cannot be made: an error
+        let file = out.join("a-file");
+        fs::write(&file, "x").unwrap();
+        assert!(reserve_record(&file, "mls").is_err());
+        fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
     fn hashes_as_lowercase_hex() {
         assert_eq!(
             sha256_hex(b"abc"),

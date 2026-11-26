@@ -733,3 +733,27 @@ async fn flag_field_deletes_are_events_without_a_key_comparison() {
         r.err
     );
 }
+
+#[tokio::test]
+async fn status_reports_a_last_run_or_manifest_that_is_not_json() {
+    let dir = TempDir::new("status-bad-json");
+    let (out, state) = (dir.path("out"), dir.path("state"));
+    let (out_s, state_s) = (out.to_str().unwrap(), state.to_str().unwrap());
+    // A manifest in --out that is not JSON
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("manifest.20260101T000000Z.json"), "{not json").unwrap();
+    let r = cli(&["status", "--out", out_s, "--state", state_s]).await;
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(r.err.contains("is not valid JSON"), "{}", r.err);
+    assert!(
+        r.err.contains("manifest.20260101T000000Z.json"),
+        "{}",
+        r.err
+    );
+    // The state's copy of the last run wins over --out, and is not JSON either
+    std::fs::create_dir_all(state.join("runs")).unwrap();
+    std::fs::write(state.join("runs").join("last.json"), "[").unwrap();
+    let r = cli(&["status", "--out", out_s, "--state", state_s]).await;
+    assert_eq!(r.code, 1, "{}{}", r.out, r.err);
+    assert!(r.err.contains("last.json is not valid JSON"), "{}", r.err);
+}
