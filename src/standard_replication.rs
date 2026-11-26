@@ -323,7 +323,7 @@ impl ReplicationRun<'_> {
     /// For writers that store records unchanged: copying the text keeps the server's member order
     /// and number formatting, and skips building and dropping a `Value` per record, which is most
     /// of a sync's CPU time (#162). The order check and the checkpoint read only the timestamp
-    /// and key members. Read other members with [`record_fields`](crate::record_fields) or parse
+    /// and key members. Read other members with [`record_fields`] or parse
     /// whole records with [`RawRecords::values`].
     ///
     /// # Errors
