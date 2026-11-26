@@ -1,8 +1,9 @@
 //! The S3 state store over HTTP, against a small in-process S3 fake (feature `s3`)
 //!
 //! The fake implements what `S3StateStore` uses: PUT (with `If-None-Match: *` and `If-Match`),
-//! GET, HEAD, DELETE and ListObjectsV2; `fake_s3_ignoring_preconditions` accepts and ignores the
-//! precondition headers, as GCS's S3 endpoint does (#131). It is a protocol check only; behaviour against a real
+//! GET, HEAD, DELETE (with `If-Match`, #133) and ListObjectsV2; `fake_s3_ignoring_preconditions`
+//! accepts and ignores the precondition headers, as GCS's S3 endpoint does (#131), and
+//! `fake_s3_ignoring_delete_preconditions` ignores them on DELETE only. It is a protocol check only; behaviour against a real
 //! bucket is unconfirmed (#107).
 #![cfg(feature = "s3")]
 
@@ -19,24 +20,34 @@ use reso_ingest::{Lease, LeaseOutcome, S3Options, S3StateStore, StateStore};
 
 type Objects = Arc<Mutex<BTreeMap<String, (Vec<u8>, u64)>>>;
 
+/// The HEAD and DELETE requests the fake served, as `HEAD key` or `DELETE key If-Match: <etag>`
+type Requests = Arc<Mutex<Vec<String>>>;
+
 fn etag(n: u64) -> HeaderValue {
     HeaderValue::from_str(&format!("\"etag{n}\"")).unwrap()
 }
 
-/// Whether the fake ignores `If-None-Match` and `If-Match` on PUT
-#[derive(Clone, Copy)]
-struct IgnorePreconditions(bool);
+/// Which precondition headers the fake ignores
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ignore {
+    /// None: it honours `If-None-Match` and `If-Match` on PUT and `If-Match` on DELETE
+    Nothing,
+    /// All of them, on PUT and DELETE
+    All,
+    /// `If-Match` on DELETE only
+    OnDelete,
+}
 
 async fn put_object(
     State(objects): State<Objects>,
-    Extension(IgnorePreconditions(ignore)): Extension<IgnorePreconditions>,
+    Extension(ignore): Extension<Ignore>,
     Path((_bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let mut map = objects.lock().unwrap();
     let current = map.get(&key).map(|(_, n)| *n);
-    if ignore {
+    if ignore == Ignore::All {
         let n = current.unwrap_or(0) + 1;
         map.insert(key, (body.to_vec(), n));
         return ([("etag", etag(n))], StatusCode::OK).into_response();
@@ -56,9 +67,13 @@ async fn put_object(
 
 async fn get_object(
     State(objects): State<Objects>,
+    Extension(requests): Extension<Requests>,
     Path((_bucket, key)): Path<(String, String)>,
     method: axum::http::Method,
 ) -> Response {
+    if method == axum::http::Method::HEAD {
+        requests.lock().unwrap().push(format!("HEAD {key}"));
+    }
     match objects.lock().unwrap().get(&key) {
         Some((bytes, n)) => {
             let body = if method == axum::http::Method::HEAD {
@@ -89,9 +104,36 @@ async fn get_object(
 
 async fn delete_object(
     State(objects): State<Objects>,
+    Extension(ignore): Extension<Ignore>,
+    Extension(requests): Extension<Requests>,
     Path((_bucket, key)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> StatusCode {
-    objects.lock().unwrap().remove(&key);
+    let if_match = headers.get("if-match").and_then(|v| v.to_str().ok());
+    requests.lock().unwrap().push(match if_match {
+        Some(v) => format!("DELETE {key} If-Match: {v}"),
+        None => format!("DELETE {key}"),
+    });
+    let mut map = objects.lock().unwrap();
+    if let Some(want) = headers.get("if-match") {
+        // A conditional delete is a presigned URL with If-Match in its signature (#133)
+        let signed = query.unwrap_or_default().split('&').any(|kv| {
+            kv.strip_prefix("X-Amz-SignedHeaders=")
+                .is_some_and(|h| h.split("%3B").any(|h| h == "if-match"))
+        });
+        if !signed {
+            return StatusCode::FORBIDDEN;
+        }
+        if ignore == Ignore::Nothing {
+            match map.get(&key) {
+                None => return StatusCode::NOT_FOUND,
+                Some((_, n)) if etag(*n) != want => return StatusCode::PRECONDITION_FAILED,
+                Some(_) => {}
+            }
+        }
+    }
+    map.remove(&key);
     StatusCode::NO_CONTENT
 }
 
@@ -121,16 +163,28 @@ async fn list_objects(State(objects): State<Objects>, RawQuery(query): RawQuery)
 
 /// Start the fake on a free port; returns its endpoint and the shared objects
 async fn fake_s3() -> (String, Objects) {
-    fake_s3_with(false).await
+    fake_s3_with(Ignore::Nothing).await
 }
 
 /// A fake that accepts the precondition headers and ignores them
 async fn fake_s3_ignoring_preconditions() -> (String, Objects) {
-    fake_s3_with(true).await
+    fake_s3_with(Ignore::All).await
 }
 
-async fn fake_s3_with(ignore_preconditions: bool) -> (String, Objects) {
+/// A fake that honours the precondition headers on PUT and ignores `If-Match` on DELETE
+async fn fake_s3_ignoring_delete_preconditions() -> (String, Objects) {
+    fake_s3_with(Ignore::OnDelete).await
+}
+
+async fn fake_s3_with(ignore: Ignore) -> (String, Objects) {
+    let (endpoint, objects, _) = fake_s3_logged(ignore).await;
+    (endpoint, objects)
+}
+
+/// A fake that also records its HEAD and DELETE requests
+async fn fake_s3_logged(ignore: Ignore) -> (String, Objects, Requests) {
     let objects = Objects::default();
+    let requests = Requests::default();
     let app = Router::new()
         .route("/{bucket}", get(list_objects))
         .route(
@@ -140,12 +194,13 @@ async fn fake_s3_with(ignore_preconditions: bool) -> (String, Objects) {
                 .put(put_object)
                 .delete(delete_object),
         )
-        .layer(Extension(IgnorePreconditions(ignore_preconditions)))
+        .layer(Extension(ignore))
+        .layer(Extension(requests.clone()))
         .with_state(objects.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), objects)
+    (format!("http://{addr}"), objects, requests)
 }
 
 fn options(endpoint: &str, prefix: &str) -> S3Options {
@@ -876,6 +931,50 @@ async fn the_probe_refuses_a_store_that_ignores_conditional_writes() {
         objects.lock().unwrap().is_empty(),
         "the probe object is deleted"
     );
+}
+
+#[tokio::test]
+async fn the_probe_refuses_a_store_that_ignores_if_match_on_delete() {
+    set_credentials();
+    let (endpoint, objects) = fake_s3_ignoring_delete_preconditions().await;
+    let s = S3StateStore::new(&options(&endpoint, "p/state")).unwrap();
+    let err = s.check_conditional_writes().await.unwrap_err().to_string();
+    assert!(
+        err.contains("a delete with a stale version (If-Match) succeeded"),
+        "{err}"
+    );
+    assert!(objects.lock().unwrap().is_empty());
+}
+
+/// Another worker replaces the object between our read and our delete: the delete is one
+/// conditional request with no HEAD before it, so there is no window in which the newer object
+/// could be deleted, and the newer object stays (#133)
+#[tokio::test]
+async fn a_delete_after_another_worker_replaced_the_object_leaves_it() {
+    set_credentials();
+    let (endpoint, objects, requests) = fake_s3_logged(Ignore::Nothing).await;
+    let s = S3StateStore::new(&options(&endpoint, "p/state")).unwrap();
+    let other = S3StateStore::new(&options(&endpoint, "p/state")).unwrap();
+    assert!(s.create("lease.json", b"mine").await.unwrap());
+    let read = s.get("lease.json").await.unwrap().unwrap();
+    assert!(other
+        .replace("lease.json", b"theirs", &read.version)
+        .await
+        .unwrap());
+    assert!(!s.delete("lease.json", Some(&read.version)).await.unwrap());
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [format!(
+            "DELETE p/state/lease.json If-Match: {}",
+            read.version
+        )]
+    );
+    let kept = objects.lock().unwrap().get("p/state/lease.json").cloned();
+    assert_eq!(kept.map(|(bytes, _)| bytes), Some(b"theirs".to_vec()));
+    // A missing object is not deleted either
+    let now = s.get("lease.json").await.unwrap().unwrap();
+    assert!(s.delete("lease.json", Some(&now.version)).await.unwrap());
+    assert!(!s.delete("lease.json", Some(&now.version)).await.unwrap());
 }
 
 /// `sync` and `serve` stop before touching a server when the bucket ignores conditional writes;

@@ -6,7 +6,8 @@
 //! ([`Provider::Gcs`]), using the `object_store` crate (rustls, no OpenSSL). Conditional writes
 //! are real HTTP preconditions: on S3, `create` is a put with `If-None-Match: *` and `replace` a
 //! put with `If-Match` on the ETag; on GCS both use `x-goog-if-generation-match` on the object
-//! generation. So a lease is held by exactly one worker. [`S3FileSink`] uploads finished output
+//! generation, and a versioned delete is a `DELETE` with the same precondition. So a lease is held
+//! by exactly one worker. [`S3FileSink`] uploads finished output
 //! files to the same kind of bucket.
 //!
 //! GCS through its S3 interoperability endpoint is refused: it accepts the S3 precondition headers
@@ -16,9 +17,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
-use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::gcp::{GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::path::Path as ObjectPath;
+use object_store::signer::{HeaderName, HeaderValue, Method, SignedUrlOptions, Signer};
 use object_store::{
     ClientOptions, Error as ObjectError, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
     PutPayload, UpdateVersion, WriteMultipart,
@@ -87,7 +89,7 @@ pub struct S3Options {
     pub single_delete: bool,
 }
 
-/// A built client, with what a GCS conditional delete needs
+/// A built client, with what a conditional delete needs
 struct Built {
     store: Arc<dyn ObjectStore>,
     versions: Versions,
@@ -173,10 +175,14 @@ impl S3Options {
         if self.single_delete {
             builder = builder.with_config(AmazonS3ConfigKey::DisableBulkDelete, "true");
         }
-        let store = builder.build().map_err(|e| error(chain(&e)))?;
+        let store = Arc::new(builder.build().map_err(|e| error(chain(&e)))?);
+        let delete = S3Delete {
+            signer: Arc::clone(&store),
+            http: reqwest::Client::new(),
+        };
         Ok(Built {
-            store: Arc::new(store),
-            versions: Versions::ETag,
+            store,
+            versions: Versions::ETag(Some(Arc::new(delete))),
         })
     }
 
@@ -201,8 +207,9 @@ const GCS_BASE_URL: &str = "https://storage.googleapis.com";
 /// What the version of a stored value is
 #[derive(Clone)]
 enum Versions {
-    /// The ETag (S3, and the in-memory store)
-    ETag,
+    /// The ETag (S3, and the in-memory store); with the client for conditional deletes, or `None`
+    /// for HEAD-then-DELETE (the in-memory store)
+    ETag(Option<Arc<S3Delete>>),
     /// The object generation (GCS); with the client for conditional deletes, or `None` for
     /// HEAD-then-DELETE (tests)
     Generation(Option<Arc<GcsDelete>>),
@@ -211,7 +218,7 @@ enum Versions {
 impl Versions {
     fn of(&self, meta: &ObjectMeta) -> Option<String> {
         match self {
-            Versions::ETag => meta.e_tag.clone(),
+            Versions::ETag(_) => meta.e_tag.clone(),
             Versions::Generation(_) => meta.version.clone(),
         }
     }
@@ -219,7 +226,7 @@ impl Versions {
     fn update(&self, version: &str) -> PutMode {
         let version = Some(version.to_string());
         PutMode::Update(match self {
-            Versions::ETag => UpdateVersion {
+            Versions::ETag(_) => UpdateVersion {
                 e_tag: version,
                 version: None,
             },
@@ -263,18 +270,60 @@ impl GcsDelete {
             .send()
             .await
             .map_err(|e| chain(&e))?;
-        let status = response.status();
-        if status.is_success() {
-            return Ok(true);
-        }
-        if status == reqwest::StatusCode::NOT_FOUND
-            || status == reqwest::StatusCode::PRECONDITION_FAILED
-        {
-            return Ok(false);
-        }
-        let body = response.text().await.unwrap_or_default();
-        let body: String = body.chars().take(300).collect();
-        Err(format!("DELETE returned {status}: {body}"))
+        delete_answer(response).await
+    }
+}
+
+/// What a conditional `DELETE` answered: `Ok(true)` when deleted, `Ok(false)` when the object is
+/// missing or at another version (404, 412)
+async fn delete_answer(response: reqwest::Response) -> Result<bool, String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::PRECONDITION_FAILED
+    {
+        return Ok(false);
+    }
+    let body = response.text().await.unwrap_or_default();
+    let body: String = body.chars().take(300).collect();
+    Err(format!("DELETE returned {status}: {body}"))
+}
+
+/// How long a presigned conditional `DELETE` URL stays valid; it is sent at once
+const SIGNED_DELETE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A `DELETE` with `If-Match` on the ETag, which `object_store` does not offer (#133): the ETag
+/// check and the delete are one step on the server, so a lease cannot be deleted after another
+/// worker renewed it. The request is a presigned URL from `object_store`'s signer with `If-Match`
+/// bound into the signature, so it uses the same credentials, endpoint and addressing style as
+/// every other request
+struct S3Delete {
+    signer: Arc<AmazonS3>,
+    http: reqwest::Client,
+}
+
+impl S3Delete {
+    /// `Ok(true)` when deleted, `Ok(false)` when missing or at another ETag
+    async fn delete(&self, path: &ObjectPath, etag: &str) -> Result<bool, String> {
+        let if_match = HeaderName::from_static("if-match");
+        let value = HeaderValue::from_str(etag).map_err(|e| format!("ETag {etag:?}: {e}"))?;
+        let options = SignedUrlOptions::default().with_signed_header(if_match, value.clone());
+        let url = self
+            .signer
+            .signed_url_opts(Method::DELETE, path, SIGNED_DELETE_TTL, &options)
+            .await
+            .map_err(|e| chain(&e))?;
+        let response = self
+            .http
+            .delete(url)
+            .header(reqwest::header::IF_MATCH, value)
+            .send()
+            .await
+            // The URL carries a signature: keep it out of messages
+            .map_err(|e| chain(&e.without_url()))?;
+        delete_answer(response).await
     }
 }
 
@@ -283,10 +332,10 @@ impl GcsDelete {
 /// The version of a value is its ETag on S3 and its generation on GCS.
 /// [`create`](StateStore::create) and [`replace`](StateStore::replace) are atomic on the server
 /// (HTTP preconditions); the bucket must support them (AWS S3 since 2024, R2, MinIO, RustFS and
-/// native GCS do). [`delete`](StateStore::delete) with a version is a conditional `DELETE` on GCS;
-/// on S3 it checks the ETag and then deletes, which leaves a short window (#133); leases tolerate
-/// it, since the loser notices at its next renewal. State is small and read rarely, so there is no
-/// caching.
+/// native GCS do). [`delete`](StateStore::delete) with a version is a conditional `DELETE` too:
+/// `If-Match` on the ETag on S3 (a presigned request, since `object_store` has no conditional
+/// delete, #133), `x-goog-if-generation-match` on GCS. State is small and read rarely, so there is
+/// no caching.
 ///
 /// Confirmed against AWS S3 and RustFS (#115) and native GCS (#130).
 ///
@@ -354,7 +403,7 @@ impl S3StateStore {
             store,
             prefix,
             label,
-            versions: Versions::ETag,
+            versions: Versions::ETag(None),
         })
     }
 
@@ -362,16 +411,17 @@ impl S3StateStore {
     ///
     /// Leases, run-id reservations and the sink's never-replace rule rely on the store refusing a
     /// create of an existing object (`If-None-Match: *`) and a replace with a stale version
-    /// (`If-Match`). Some S3-compatible stores accept those headers and ignore them (GCS through
-    /// its S3 interoperability endpoint does, #115), and then two workers can hold one lease
-    /// without any error. This writes a throwaway object `.probe/<pid>-<nanos>`, tries to create
-    /// it again and to replace it with a wrong version, and deletes it: two or three PUTs and one
-    /// DELETE. `sync` and `serve` run it once at start-up.
+    /// (`If-Match`), and a delete with a stale version leaving the object in place. Some
+    /// S3-compatible stores accept those headers and ignore them (GCS through its S3
+    /// interoperability endpoint does, #115), and then two workers can hold one lease without any
+    /// error. This writes a throwaway object `.probe/<pid>-<nanos>`, tries to create it again, to
+    /// replace it and to delete it with a wrong version, and deletes it: up to three PUTs and two
+    /// DELETEs. `sync` and `serve` run it once at start-up.
     ///
     /// # Errors
     ///
-    /// [`IngestError::Output`] when the second create or the stale replace succeeds, or when the
-    /// store cannot be reached.
+    /// [`IngestError::Output`] when the second create, the stale replace or the stale delete
+    /// succeeds, or when the store cannot be reached.
     pub async fn check_conditional_writes(&self) -> Result<(), IngestError> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -383,13 +433,15 @@ impl S3StateStore {
         }
         // A version no object has, in the form the store uses
         let stale = match self.versions {
-            Versions::ETag => "\"0\"",
+            Versions::ETag(_) => "\"0\"",
             Versions::Generation(_) => "1",
         };
         let ignored = if self.create(&key, b"probe").await? {
             Some("a create of an existing object (If-None-Match: *) succeeded")
         } else if self.replace(&key, b"probe", stale).await? {
             Some("a replace with a stale version (If-Match) succeeded")
+        } else if self.delete(&key, Some(stale)).await? {
+            Some("a delete with a stale version (If-Match) succeeded")
         } else {
             None
         };
@@ -505,11 +557,17 @@ impl StateStore for S3StateStore {
     fn delete<'a>(&'a self, key: &'a str, version: Option<&'a str>) -> StoreFuture<'a, bool> {
         Box::pin(async move {
             let path = self.path(key)?;
-            if let (Some(want), Versions::Generation(Some(gcs))) = (version, &self.versions) {
-                return gcs
-                    .delete(&path, want)
-                    .await
-                    .map_err(|e| self.error(key, e));
+            match (version, &self.versions) {
+                (Some(want), Versions::Generation(Some(gcs))) => {
+                    return gcs
+                        .delete(&path, want)
+                        .await
+                        .map_err(|e| self.error(key, e));
+                }
+                (Some(want), Versions::ETag(Some(s3))) => {
+                    return s3.delete(&path, want).await.map_err(|e| self.error(key, e));
+                }
+                _ => {}
             }
             let head = match self.store.head(&path).await {
                 Ok(h) => h,
@@ -932,9 +990,9 @@ mod tests {
             version: Some("1795654814258332".into()),
         };
         let generation = Versions::Generation(None);
-        assert_eq!(Versions::ETag.of(&meta).as_deref(), Some("\"etag\""));
+        assert_eq!(Versions::ETag(None).of(&meta).as_deref(), Some("\"etag\""));
         assert_eq!(generation.of(&meta).as_deref(), Some("1795654814258332"));
-        let PutMode::Update(v) = Versions::ETag.update("\"etag\"") else {
+        let PutMode::Update(v) = Versions::ETag(None).update("\"etag\"") else {
             panic!("not an update")
         };
         assert_eq!((v.e_tag.as_deref(), v.version), (Some("\"etag\""), None));
