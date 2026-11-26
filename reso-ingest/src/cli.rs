@@ -363,10 +363,13 @@ impl Args {
     /// Whether state and data files are in a bucket
     fn in_bucket(&self) -> bool {
         #[cfg(feature = "s3")]
-        if self.storage.s3_bucket.is_some() || self.storage.gcs_bucket.is_some() {
-            return true;
+        {
+            self.storage.s3_bucket.is_some() || self.storage.gcs_bucket.is_some()
         }
-        false
+        #[cfg(not(feature = "s3"))]
+        {
+            false
+        }
     }
 
     /// The state store: the bucket with `--s3-bucket` or `--gcs-bucket`, else the state directory
