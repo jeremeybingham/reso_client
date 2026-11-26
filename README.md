@@ -34,7 +34,10 @@ field names are plain strings and records are raw JSON, so any server schema wor
   a vendor server is available ([#32](https://github.com/jeremeybingham/reso_client/issues/32)); the checks are listed
   in [#76](https://github.com/jeremeybingham/reso_client/issues/76).
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
-- `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is finished.
+- `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is
+  finished. `--partition` puts them in Hive-style folders (`source=…/resource=…/date=…/`); compaction is a documented
+  DuckDB recipe, not a command. Delivery is at least once, in `ModificationTimestamp`-then-key order within a resource
+  ([Delivery guarantee](reso-ingest/README.md#delivery-guarantee)).
 - Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output), and
   `reso-ingest sync --media` queues them page by page for its own download workers during the sync (a slow file host
   does not slow the sync), including `Media` arrays expanded inside other records; each file is stored once, by its
@@ -242,8 +245,8 @@ what is left needs a real server or someone else:
   order [#116](https://github.com/jeremeybingham/reso_client/issues/116)). Done: logs, metrics, run checks, leases,
   graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
   harness, delete detection at millions of keys, backfill, media at scale, media index saves
-  ([#149](https://github.com/jeremeybingham/reso_client/issues/149)). Open: delivery guarantees and partitioned Parquet
-  ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
+  ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
+  ([#86](https://github.com/jeremeybingham/reso_client/issues/86)). Open: network options
   ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), observability follow-ups
   ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds
   ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness

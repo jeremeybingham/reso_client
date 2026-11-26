@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `reso-ingest`: the Parquet `fetched_at` column is now a UTC timestamp in milliseconds
+  (`Timestamp(Millisecond, "+00:00")`); it was seconds with no time zone, which DuckDB read as an integer (#86).
+- `reso-ingest`: `FileSink::list` (`LocalDirSink`, `S3FileSink`) also returns the files in the `source=…` partition
+  tree, as `/`-joined names; `LocalDirSink::put_file` creates parent folders and `delete` removes partition folders it
+  leaves empty (#86).
 - `reso-ingest`: media index saves cost what changed, not the size of the index (#149). The index is now a snapshot
   (`media/<server>.json`, as before) plus deltas (`media/<server>/<seq>.json`) holding the entries changed or removed
   since the save before; a save writes one delta, or a new snapshot once the deltas hold more entries than the index
@@ -19,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   held whole in memory during a run.
 
 ### Added
+- `reso-ingest`: delivery guarantee documented (#86): at least once, ordered by `ModificationTimestamp` then key within
+  a resource's run, idempotency key `(source, resource, key, ModificationTimestamp)`; a repeat after an interrupted run
+  is the same record with new `fetched_at` and `run_id` (tested). `sync --partition` and `serve --partition` (Parquet
+  only) write files to Hive-style folders `source=<server>/resource=<name>/date=<UTC fetch day>/`, still rotated at
+  `--max-file-mb`; `purge` removes a server's partition folder. A DuckDB recipe for compacting files to the latest
+  version of each key is in `reso-ingest/README.md`. New `ParquetWriter::partitioned`, `hive_value` and
+  `partition_prefix`; `ServeOptions` gains `partition`.
 - `reso-ingest`: media at scale (#89). `sync --media` (and `serve --media`) queues each page's new and changed files
   for a separate pool of download workers (`[server.media] workers`, default 4, with the `[server.media]` rate limits),
   which fetch them while the record sync goes on, so a slow file host no longer holds up the pages; the run ends once

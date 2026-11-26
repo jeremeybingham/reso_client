@@ -321,6 +321,36 @@ pub(crate) fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// A value as a Hive partition path segment: letters, digits, `.`, `-` and `_` stay, every other
+/// byte becomes `%XX` (as Hive escapes), so the path decodes back to the exact tag
+///
+/// ```
+/// assert_eq!(reso_ingest::hive_value("mls-one"), "mls-one");
+/// assert_eq!(reso_ingest::hive_value("a/b c"), "a%2Fb%20c");
+/// ```
+pub fn hive_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_') {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The partition folder for a source and resource: `source=<source>/resource=<resource>/`
+///
+/// Every partitioned file of a server is under `source=<hive_value(server)>/`.
+pub fn partition_prefix(source: &str, resource: &str) -> String {
+    format!(
+        "source={}/resource={}/",
+        hive_value(source),
+        hive_value(resource)
+    )
+}
+
 /// The current UTC time as RFC 3339 with whole seconds, e.g. `2026-11-24T17:30:05Z`
 pub fn now_rfc3339() -> String {
     let secs = SystemTime::now()

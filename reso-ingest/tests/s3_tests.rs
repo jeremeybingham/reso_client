@@ -1341,3 +1341,89 @@ async fn sync_media_streams_files_into_the_bucket_and_purge_deletes_them() {
         .any(|k| k.starts_with("p/state/media/mls")));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(feature = "parquet")]
+#[tokio::test(flavor = "multi_thread")]
+async fn partitioned_parquet_lands_in_hive_keys_and_purge_takes_one_servers_tree() {
+    set_credentials();
+    std::env::set_var("S3_HIVE_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3().await;
+    let reso = reso_server().await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-hive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    let server = |name: &str| {
+        format!(
+            "[[server]]\nname = \"{name}\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_HIVE_TEST_TOKEN\"\n",
+            reso.uri()
+        )
+    };
+    // A name the partition folder has to escape
+    std::fs::write(&config, server("mls one") + &server("other")).unwrap();
+    let out = dir.join("out");
+    let bucket = [
+        "--out",
+        out.to_str().unwrap(),
+        "--s3-bucket",
+        "bkt",
+        "--s3-prefix",
+        "p",
+        "--s3-endpoint",
+        &endpoint,
+        "--s3-region",
+        "us-east-1",
+        "--s3-allow-http",
+        "--s3-single-delete",
+    ]
+    .map(String::from);
+    let args = |cmd: &[&str]| -> Vec<String> {
+        cmd.iter()
+            .map(|s| s.to_string())
+            .chain(bucket.iter().cloned())
+            .collect()
+    };
+    let (code, o, e) = cli(&args(&[
+        "sync",
+        "--config",
+        config.to_str().unwrap(),
+        "--format",
+        "parquet",
+        "--partition",
+    ]))
+    .await;
+    assert_eq!(code, 0, "{o}{e}");
+    let under = |objects: &Objects, prefix: &str| -> Vec<String> {
+        objects
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect()
+    };
+    let mls = under(&objects, "p/data/source=mls%20one/resource=Property/date=");
+    assert_eq!(mls.len(), 1, "{:?}", objects.lock().unwrap().keys());
+    assert!(mls[0].contains("/mls_one.Property."), "{mls:?}");
+    let other = under(&objects, "p/data/source=other/");
+    assert_eq!(other.len(), 1);
+
+    let (code, o, e) = cli(&args(&[
+        "purge",
+        "--server",
+        "mls one",
+        "--execute",
+        "--by",
+        "ops",
+    ]))
+    .await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(
+        o.contains("purged server mls one: 1 data files (2 records)"),
+        "{o}"
+    );
+    assert!(under(&objects, "p/data/source=mls").is_empty());
+    assert_eq!(under(&objects, "p/data/source=other/"), other);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -45,7 +45,7 @@ use crate::error::IngestError;
 use crate::lease::{live_holder, Lease, LeaseHolder, LeaseOutcome};
 use crate::media::{encode_name, MediaIndex};
 use crate::media_store::MediaStore;
-use crate::output::{new_run_id, now_rfc3339, output_error};
+use crate::output::{hive_value, new_run_id, now_rfc3339, output_error};
 use crate::sink::{FileSink, LocalDirSink};
 use crate::state::StateStore;
 
@@ -497,7 +497,10 @@ fn data_files(
                 continue;
             }
             for f in r["files"].as_array().into_iter().flatten() {
-                let Some(file) = f["name"].as_str().filter(|n| plain_name(n)) else {
+                let Some(file) = f["name"]
+                    .as_str()
+                    .filter(|n| plain_name(n) || partition_name(n))
+                else {
                     continue;
                 };
                 let Some(&bytes) = sizes.get(file) else {
@@ -511,6 +514,18 @@ fn data_files(
                     });
                 }
             }
+        }
+    }
+    // The server's partition folder holds only its files, listed in a manifest or not (a `.part`
+    // file a killed run left, a file whose manifest is gone)
+    let folder = format!("source={}/", hive_value(server));
+    for (name, &bytes) in sizes.iter().filter(|(n, _)| n.starts_with(&folder)) {
+        if partition_name(name) && claimed.insert(name.clone()) {
+            files.push(PurgedFile {
+                name: name.clone(),
+                records: 0,
+                bytes,
+            });
         }
     }
     if !local {
@@ -596,6 +611,16 @@ fn plain_name(name: &str) -> bool {
         && !name.starts_with('.')
 }
 
+/// A file in the partition tree: `source=…/…/name`, every segment plain
+fn partition_name(name: &str) -> bool {
+    name.starts_with("source=")
+        && name.contains('/')
+        && !name.contains('\\')
+        && name
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// Files and bytes under `dir`, at all levels; zero when it does not exist
 fn file_name(path: &Path) -> String {
     path.file_name()
@@ -625,6 +650,23 @@ mod tests {
         assert!(plain_name("a.Property.r.0001.ndjson"));
         for bad in ["", "..", "../x", "a/b", "a\\b", ".run.x"] {
             assert!(!plain_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn partition_names_stay_in_the_tree() {
+        assert!(partition_name(
+            "source=a/resource=Property/date=2026-11-26/a.Property.r.0001.parquet"
+        ));
+        for bad in [
+            "source=a",
+            "source=a/../x",
+            "source=a//x",
+            "source=a/./x",
+            "source=a\\x/y",
+            "other/x",
+        ] {
+            assert!(!partition_name(bad), "{bad}");
         }
     }
 

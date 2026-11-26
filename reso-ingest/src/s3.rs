@@ -1043,7 +1043,8 @@ impl FileSink for S3FileSink {
         format!("{}/{name}", self.label.trim_end_matches('/'))
     }
 
-    /// Objects directly under the prefix (`<prefix>/data/`), not those in deeper folders
+    /// Objects directly under the prefix (`<prefix>/data/`) and in its partition tree
+    /// (`source=…/…`), not those in other deeper folders
     fn list(&self) -> Result<Vec<(String, u64)>, IngestError> {
         block_on(async {
             let metas: Vec<_> = self
@@ -1056,9 +1057,15 @@ impl FileSink for S3FileSink {
             let mut files: Vec<(String, u64)> = metas
                 .into_iter()
                 .filter_map(|m| {
-                    let mut parts = m.location.parts().skip(skip);
-                    let name = parts.next()?.as_ref().to_string();
-                    parts.next().is_none().then_some((name, m.size))
+                    let parts: Vec<String> = m
+                        .location
+                        .parts()
+                        .skip(skip)
+                        .map(|p| p.as_ref().to_string())
+                        .collect();
+                    let top = parts.first()?;
+                    (parts.len() == 1 || top.starts_with("source="))
+                        .then(|| (parts.join("/"), m.size))
                 })
                 .collect();
             files.sort();
