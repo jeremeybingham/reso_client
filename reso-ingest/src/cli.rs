@@ -1663,7 +1663,7 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
     if args.in_bucket() {
         let _ = writeln!(
             err,
-            "error: purge works on local storage only; a bucket needs delete and list on the sink (#107)"
+            "error: purge works on local storage only; a bucket needs delete and list on the sink (#139)"
         );
         return 2;
     }

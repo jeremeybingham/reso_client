@@ -316,8 +316,8 @@ and `status`, two `serve` workers on one prefix, the container image, and a `kil
 
 Finished data files can go to a `FileSink` instead of staying in `--out`: a library user calls `with_sink` on
 `NdjsonWriter` or `ParquetWriter`. The writer stages each file, delivers it when full or at the end, and reports a safe
-point (so `sync` saves a checkpoint) only after the sink has it. `LocalDirSink` copies into a directory. The command does
-not select a sink yet (#107).
+point (so `sync` saves a checkpoint) only after the sink has it. `LocalDirSink` copies into a directory; `S3FileSink`
+uploads to a bucket, and the command selects it with `--s3-bucket` or `--gcs-bucket` (see above).
 
 ## Purging a source
 
@@ -348,8 +348,8 @@ deletion fails, the purge stops, the record lists what was deleted with `"status
 command exits 1. Remove the server from the configuration afterwards: a later `sync` would start a full load again, and
 `media` for it would look for data files that are gone.
 
-`purge` works on local storage only. With `--s3-bucket` it refuses: deleting data files in a bucket needs `list` and
-`delete` on the file sink (#107).
+`purge` works on local storage only. With `--s3-bucket` or `--gcs-bucket` it refuses: deleting data files in a bucket
+needs `list` and `delete` on the file sink (#139).
 
 ## Daemon mode (`serve`)
 
