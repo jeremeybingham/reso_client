@@ -1,7 +1,8 @@
 //! The S3 state store over HTTP, against a small in-process S3 fake (feature `s3`)
 //!
 //! The fake implements what `S3StateStore` uses: PUT (with `If-None-Match: *` and `If-Match`),
-//! GET, HEAD, DELETE and ListObjectsV2. It is a protocol check only; behaviour against a real
+//! GET, HEAD, DELETE and ListObjectsV2; `fake_s3_ignoring_preconditions` accepts and ignores the
+//! precondition headers, as GCS's S3 endpoint does (#131). It is a protocol check only; behaviour against a real
 //! bucket is unconfirmed (#107).
 #![cfg(feature = "s3")]
 
@@ -9,7 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Extension, Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -22,14 +23,24 @@ fn etag(n: u64) -> HeaderValue {
     HeaderValue::from_str(&format!("\"etag{n}\"")).unwrap()
 }
 
+/// Whether the fake ignores `If-None-Match` and `If-Match` on PUT
+#[derive(Clone, Copy)]
+struct IgnorePreconditions(bool);
+
 async fn put_object(
     State(objects): State<Objects>,
+    Extension(IgnorePreconditions(ignore)): Extension<IgnorePreconditions>,
     Path((_bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let mut map = objects.lock().unwrap();
     let current = map.get(&key).map(|(_, n)| *n);
+    if ignore {
+        let n = current.unwrap_or(0) + 1;
+        map.insert(key, (body.to_vec(), n));
+        return ([("etag", etag(n))], StatusCode::OK).into_response();
+    }
     if headers.get("if-none-match").is_some_and(|v| v == "*") && current.is_some() {
         return StatusCode::PRECONDITION_FAILED.into_response();
     }
@@ -110,6 +121,15 @@ async fn list_objects(State(objects): State<Objects>, RawQuery(query): RawQuery)
 
 /// Start the fake on a free port; returns its endpoint and the shared objects
 async fn fake_s3() -> (String, Objects) {
+    fake_s3_with(false).await
+}
+
+/// A fake that accepts the precondition headers and ignores them
+async fn fake_s3_ignoring_preconditions() -> (String, Objects) {
+    fake_s3_with(true).await
+}
+
+async fn fake_s3_with(ignore_preconditions: bool) -> (String, Objects) {
     let objects = Objects::default();
     let app = Router::new()
         .route("/{bucket}", get(list_objects))
@@ -120,6 +140,7 @@ async fn fake_s3() -> (String, Objects) {
                 .put(put_object)
                 .delete(delete_object),
         )
+        .layer(Extension(IgnorePreconditions(ignore_preconditions)))
         .with_state(objects.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -832,4 +853,87 @@ async fn gcs_interop_endpoint_is_refused_and_bucket_flags_conflict() {
     let (code, _, err) = cli(&args(&["--gcs-prefix", "p"])).await;
     assert_eq!(code, 2, "{err}");
     assert!(err.contains("required"), "{err}");
+}
+
+#[tokio::test]
+async fn the_probe_passes_a_store_with_conditional_writes_and_leaves_nothing() {
+    set_credentials();
+    let (endpoint, objects) = fake_s3().await;
+    let s = S3StateStore::new(&options(&endpoint, "p/state")).unwrap();
+    s.check_conditional_writes().await.unwrap();
+    assert!(objects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_probe_refuses_a_store_that_ignores_conditional_writes() {
+    set_credentials();
+    let (endpoint, objects) = fake_s3_ignoring_preconditions().await;
+    let s = S3StateStore::new(&options(&endpoint, "p/state")).unwrap();
+    let err = s.check_conditional_writes().await.unwrap_err().to_string();
+    assert!(err.contains("s3://bkt/p/state"), "{err}");
+    assert!(err.contains("does not honour conditional writes"), "{err}");
+    assert!(
+        objects.lock().unwrap().is_empty(),
+        "the probe object is deleted"
+    );
+}
+
+/// `sync` and `serve` stop before touching a server when the bucket ignores conditional writes;
+/// `--s3-unsafe-no-conditional-writes` lets `sync` run anyway (#131)
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_and_serve_refuse_a_bucket_without_conditional_writes() {
+    set_credentials();
+    std::env::set_var("S3_PROBE_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3_ignoring_preconditions().await;
+    let reso = reso_server().await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_PROBE_TEST_TOKEN\"\n",
+            reso.uri()
+        ),
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let args = |command: &str, extra: &[&str]| -> Vec<String> {
+        [
+            command,
+            "--config",
+            config.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--s3-bucket",
+            "bkt",
+            "--s3-prefix",
+            "p",
+            "--s3-endpoint",
+            &endpoint,
+            "--s3-region",
+            "us-east-1",
+            "--s3-allow-http",
+            "--s3-single-delete",
+        ]
+        .iter()
+        .chain(extra)
+        .map(|s| s.to_string())
+        .collect()
+    };
+    for command in ["sync", "serve"] {
+        let (code, _, err) = cli(&args(command, &[])).await;
+        assert_eq!(code, 2, "{command}: {err}");
+        assert!(err.contains("does not honour conditional writes"), "{err}");
+        assert!(err.contains("--s3-unsafe-no-conditional-writes"), "{err}");
+    }
+    assert!(objects.lock().unwrap().is_empty());
+    assert!(reso.received_requests().await.unwrap().is_empty());
+
+    let (code, _, err) = cli(&args("sync", &["--s3-unsafe-no-conditional-writes"])).await;
+    assert_eq!(code, 0, "{err}");
+    assert!(!objects.lock().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }

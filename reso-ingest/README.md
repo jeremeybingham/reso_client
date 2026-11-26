@@ -272,7 +272,11 @@ Google Cloud). Run manifests (`manifest.<run>.json`) and
 `sync --media` manifests (`media.<run>.json`) go to `<prefix>/data/` next to the data files they list, and a copy of the
 newest run manifest is kept at `<prefix>/state/runs/last.json`, which `status` reads, so a worker with an empty `--out`
 sees the last run. Run ids are reserved in the bucket (`state/runs/<run>.reserved`, created with `If-None-Match`, removed
-once the manifest is delivered), so two workers started in the same second get different ids. `--out` is only a staging
+once the manifest is delivered), so two workers started in the same second get different ids. All of this relies on
+the store enforcing conditional writes, so `sync` and `serve` first probe it (#131): they create a throwaway object
+`state/.probe/<pid>-<nanos>`, try to create it again and to replace it with a stale version, delete it, and stop with an
+error (exit code 2) if either second write succeeds. That costs two or three `PUT`s and one `DELETE` per start.
+`--s3-unsafe-no-conditional-writes` skips the probe (logging a warning) for a bucket only one worker ever uses. `--out` is only a staging
 directory then (files are removed once the bucket has them; the `.run.<run>` markers stay). Not routed: the metrics file
 (`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`) and downloaded media files
 (`--media-dir`). The `media` command refuses a bucket, since the data files it reads are in the bucket: use
