@@ -101,6 +101,26 @@ impl SchemaSnapshot {
     }
 }
 
+/// A record key as the repeated-key check hashes it
+///
+/// String keys (what RESO keys are) are borrowed, so the check allocates nothing per record
+/// (#166). Other keys fall back to their JSON text, which keeps the string `"1"` and the number
+/// `1` distinct.
+#[derive(PartialEq, Eq, Hash)]
+enum SeenKey<'a> {
+    Str(&'a str),
+    Json(String),
+}
+
+impl<'a> SeenKey<'a> {
+    fn of(key: &'a Value) -> Self {
+        match key {
+            Value::String(s) => SeenKey::Str(s),
+            other => SeenKey::Json(other.to_string()),
+        }
+    }
+}
+
 /// A writer that counts keys repeated within one batch (page) and passes the records on unchanged
 ///
 /// The replication itself already stops a resource, with an error, on a record without a key and
@@ -138,12 +158,12 @@ impl<'a> CheckingWriter<'a> {
 
 impl RecordWriter for CheckingWriter<'_> {
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::with_capacity(records.len());
         for key in records
             .iter()
             .filter_map(|r| r.get(&self.key_field).filter(|k| !k.is_null()))
         {
-            if !seen.insert(key.to_string()) {
+            if !seen.insert(SeenKey::of(key)) {
                 self.duplicates += 1;
             }
         }
@@ -196,6 +216,19 @@ pub async fn count_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seen_keys_borrow_strings_and_keep_string_and_number_apart() {
+        let (s, n) = (serde_json::json!("1"), serde_json::json!(1));
+        assert!(matches!(SeenKey::of(&s), SeenKey::Str("1")));
+        let mut seen = HashSet::new();
+        assert!(seen.insert(SeenKey::of(&s)));
+        assert!(
+            seen.insert(SeenKey::of(&n)),
+            "the number 1 is not the string \"1\""
+        );
+        assert!(!seen.insert(SeenKey::of(&n)));
+    }
 
     fn snap(fields: &[(&str, &str, &str)], members: &[(&str, &str)]) -> SchemaSnapshot {
         let mut s = SchemaSnapshot::default();

@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `reso-client`: breaking: `Page::body` no longer holds the `value` array; the records are moved out of the body into
+  `Page::records` instead of copied, so each page's records are held once (#165, about 11% of a sync's CPU
+  instructions in the 100k profile). Every other member of the response (`@odata.context`, `@odata.count`,
+  `@odata.nextLink`, vendor annotations) stays in `body`. Read records from `records`.
+- `reso-ingest`: the repeated-key check (`CheckingWriter`) hashes string keys without copying them into a `String`
+  per record (#166).
 - `reso-client`: breaking: API review for 1.0 (#157). These types are now `#[non_exhaustive]`, so new fields or
   variants are no longer breaking changes; outside the crate, structs are built with their constructors and builders
   (or `Default` plus field assignment) instead of struct literals, and a `match` on the enums needs a `_` arm:
