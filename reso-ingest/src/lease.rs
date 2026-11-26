@@ -8,7 +8,7 @@
 //! store's conditional writes, so a lease is as strong as the backend's (see [`FileStateStore`](crate::FileStateStore)).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::checkpoint::sanitize;
 use crate::error::IngestError;
-use crate::state::{invalid, StateStore, Versioned};
+use crate::state::{invalid, StateStore, Versioned, Written};
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct LeaseFile {
@@ -122,7 +122,8 @@ pub(crate) async fn live_leases(
     store: &dyn StateStore,
 ) -> Result<Vec<(String, String)>, IngestError> {
     let mut found = Vec::new();
-    for key in store.list().await? {
+    // Leases are top-level keys: list that level only, not every key set and media index
+    for key in store.list_dir("").await? {
         if key.contains('/') || !key.ends_with(".lock") {
             continue;
         }
@@ -178,6 +179,9 @@ pub struct Lease {
     store: Arc<dyn StateStore>,
     key: String,
     token: String,
+    /// The version last written by this holder, when the store reported it: releasing then
+    /// needs no read first
+    version: Arc<Mutex<Option<String>>>,
     lost: Arc<AtomicBool>,
     heartbeat: Option<JoinHandle<()>>,
 }
@@ -209,8 +213,8 @@ impl Lease {
         let body = encode(store.as_ref(), &key, &mine)?;
         // Two tries: the second one follows removing a stale lease
         for _ in 0..2 {
-            if store.create(&key, &body).await? {
-                let lease = Self::start(Arc::clone(store), key, mine, ttl);
+            if let Written::Stored(version) = store.create_versioned(&key, &body).await? {
+                let lease = Self::start(Arc::clone(store), key, mine, version, ttl);
                 return Ok(LeaseOutcome::Acquired(lease));
             }
             let Some(found) = store.get(&key).await? else {
@@ -235,11 +239,19 @@ impl Lease {
         }
     }
 
-    fn start(store: Arc<dyn StateStore>, key: String, mut file: LeaseFile, ttl: Duration) -> Self {
+    fn start(
+        store: Arc<dyn StateStore>,
+        key: String,
+        mut file: LeaseFile,
+        version: Option<String>,
+        ttl: Duration,
+    ) -> Self {
         let lost = Arc::new(AtomicBool::new(false));
         let token = file.token.clone();
+        let version = Arc::new(Mutex::new(version));
         let heartbeat = {
             let (store, key, lost) = (Arc::clone(&store), key.clone(), Arc::clone(&lost));
+            let written = Arc::clone(&version);
             let every = (ttl / 3).max(Duration::from_secs(1));
             tokio::spawn(async move {
                 loop {
@@ -259,12 +271,14 @@ impl Lease {
                     };
                     file.expires_at = now_secs() + ttl.as_secs().max(1);
                     let renewed = match encode(store.as_ref(), &key, &file) {
-                        Ok(body) => store.replace(&key, &body, &found.version).await,
+                        Ok(body) => store.replace_versioned(&key, &body, &found.version).await,
                         Err(e) => Err(e),
                     };
-                    // `Ok(false)`: changed since it was read; the next round finds out by whom
-                    if let Err(e) = renewed {
-                        tracing::warn!(error = %e, "cannot renew the lease; will retry");
+                    match renewed {
+                        Ok(Written::Stored(v)) => set_version(&written, v),
+                        // Changed since it was read; the next round finds out by whom
+                        Ok(Written::Refused) => {}
+                        Err(e) => tracing::warn!(error = %e, "cannot renew the lease; will retry"),
                     }
                 }
             })
@@ -273,6 +287,7 @@ impl Lease {
             store,
             key,
             token,
+            version,
             lost,
             heartbeat: Some(heartbeat),
         }
@@ -290,11 +305,35 @@ impl Lease {
         if let Some(h) = self.heartbeat.take() {
             h.abort();
         }
-        release(&self.store, &self.key, &self.token).await;
+        let version = take_version(&self.version);
+        release(&self.store, &self.key, &self.token, version).await;
     }
 }
 
-async fn release(store: &Arc<dyn StateStore>, key: &str, token: &str) {
+fn set_version(slot: &Mutex<Option<String>>, version: Option<String>) {
+    if let Ok(mut v) = slot.lock() {
+        *v = version;
+    }
+}
+
+fn take_version(slot: &Mutex<Option<String>>) -> Option<String> {
+    slot.lock().ok().and_then(|mut v| v.take())
+}
+
+/// Remove the lease if it is still `token`'s: with the version this holder last wrote, one
+/// conditional delete; without one, or when that version is no longer current (a renewal cut off
+/// by the release, or another holder), read it first
+async fn release(store: &Arc<dyn StateStore>, key: &str, token: &str, version: Option<String>) {
+    if let Some(v) = version {
+        match store.delete(key, Some(&v)).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot release the lease; it runs out on its own");
+                return;
+            }
+        }
+    }
     let result = match store.get(key).await {
         Ok(Some(v)) if parse(&v).is_some_and(|f| f.token == token) => {
             store.delete(key, Some(&v.version)).await.map(|_| ())
@@ -317,7 +356,8 @@ impl Drop for Lease {
             let store = Arc::clone(&self.store);
             let key = std::mem::take(&mut self.key);
             let token = std::mem::take(&mut self.token);
-            rt.spawn(async move { release(&store, &key, &token).await });
+            let version = take_version(&self.version);
+            rt.spawn(async move { release(&store, &key, &token, version).await });
         }
     }
 }
@@ -359,6 +399,33 @@ mod tests {
             Lease::acquire(&s, "s", "R", TTL).await.unwrap(),
             LeaseOutcome::Acquired(_)
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn release_removes_a_lease_renewed_behind_its_back_but_not_anothers() {
+        // The version this holder wrote is stale (a renewal cut off by the release): the
+        // conditional delete misses, and the read finds the lease still ours
+        let (dir, s) = store("release-stale");
+        let LeaseOutcome::Acquired(a) = Lease::acquire(&s, "s", "R", TTL).await.unwrap() else {
+            panic!("must acquire");
+        };
+        let key = "s.R.lock";
+        let mut f = stored(&s, key).await;
+        f.expires_at += 5;
+        s.put(key, &serde_json::to_vec(&f).unwrap()).await.unwrap();
+        a.release().await;
+        assert!(s.get(key).await.unwrap().is_none(), "own lease left behind");
+
+        // Taken over by another holder: left alone
+        let LeaseOutcome::Acquired(b) = Lease::acquire(&s, "s", "R", TTL).await.unwrap() else {
+            panic!("must acquire");
+        };
+        let mut f = stored(&s, key).await;
+        f.token = "someone-else".into();
+        s.put(key, &serde_json::to_vec(&f).unwrap()).await.unwrap();
+        b.release().await;
+        assert_eq!(stored(&s, key).await.token, "someone-else");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

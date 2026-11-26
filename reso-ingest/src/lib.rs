@@ -129,5 +129,5 @@ pub use secrets::ClientHandle;
 pub use serve::{Daemon, ReloadSummary, ServeOptions};
 pub use shutdown::Shutdown;
 pub use sink::{FileSink, LocalDirSink};
-pub use state::{FileStateStore, StateStore, StoreFuture, Versioned};
+pub use state::{FileStateStore, StateStore, StoreFuture, Versioned, Written};
 pub use webhook::{post_summary, run_summary};

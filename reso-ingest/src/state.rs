@@ -163,6 +163,75 @@ pub trait StateStore: Send + Sync + Debug {
     /// Where `key` lives, for messages (a file path, a URL); never contains a secret
     fn location(&self, key: &str) -> String;
 
+    /// [`create`](Self::create) that also reports the version the value was stored at, so a
+    /// caller that later replaces or deletes it does not have to read it back first
+    ///
+    /// The provided version calls [`create`](Self::create) and reports no version; backends
+    /// that learn it from the write (an ETag, a generation, a content hash) override it.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the backend cannot be written.
+    fn create_versioned<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, Written> {
+        Box::pin(async move {
+            Ok(if self.create(key, bytes).await? {
+                Written::Stored(None)
+            } else {
+                Written::Refused
+            })
+        })
+    }
+
+    /// [`replace`](Self::replace) that also reports the new version, as
+    /// [`create_versioned`](Self::create_versioned) does
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the backend cannot be written.
+    fn replace_versioned<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+        version: &'a str,
+    ) -> StoreFuture<'a, Written> {
+        Box::pin(async move {
+            Ok(if self.replace(key, bytes, version).await? {
+                Written::Stored(None)
+            } else {
+                Written::Refused
+            })
+        })
+    }
+
+    /// The keys directly under `dir` (`""` for the top level, else a name such as `runs`), not
+    /// those at deeper levels, as full keys (`runs/a.reserved`)
+    ///
+    /// Run id reservations and leases are looked up this way, so a store holding many feeds' key
+    /// sets and media indexes is not listed in full on every run. The provided version filters
+    /// [`list`](Self::list); backends override it to list one level.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the backend cannot be listed.
+    fn list_dir<'a>(&'a self, dir: &'a str) -> StoreFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let prefix = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", dir.trim_end_matches('/'))
+            };
+            Ok(self
+                .list()
+                .await?
+                .into_iter()
+                .filter(|k| {
+                    k.strip_prefix(&prefix)
+                        .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+                })
+                .collect())
+        })
+    }
+
     /// Copy the value under `key` into the local file `dest` (created or replaced); `false` when
     /// there is no value
     ///
@@ -195,6 +264,15 @@ pub trait StateStore: Send + Sync + Debug {
             self.put(key, &bytes).await
         })
     }
+}
+
+/// What a conditional write did ([`StateStore::create_versioned`], [`StateStore::replace_versioned`])
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// The value was stored; its new version when the backend reports it
+    Stored(Option<String>),
+    /// Nothing was stored: there was a value already (create) or it had changed (replace)
+    Refused,
 }
 
 /// A [`StateStore`] in a local directory: one file per key
@@ -385,6 +463,63 @@ impl StateStore for FileStateStore {
         Box::pin(async move { self.walk() })
     }
 
+    fn create_versioned<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, Written> {
+        Box::pin(async move {
+            Ok(if self.create_new(key, bytes)? {
+                Written::Stored(Some(content_version(bytes)))
+            } else {
+                Written::Refused
+            })
+        })
+    }
+
+    fn replace_versioned<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+        version: &'a str,
+    ) -> StoreFuture<'a, Written> {
+        Box::pin(async move {
+            Ok(if self.replace(key, bytes, version).await? {
+                Written::Stored(Some(content_version(bytes)))
+            } else {
+                Written::Refused
+            })
+        })
+    }
+
+    fn list_dir<'a>(&'a self, dir: &'a str) -> StoreFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let path = if dir.is_empty() {
+                self.dir.clone()
+            } else {
+                self.path(dir.trim_end_matches('/'))
+            };
+            let entries = match fs::read_dir(&path) {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e) => return Err(io_error(&path, e)),
+            };
+            let prefix = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", dir.trim_end_matches('/'))
+            };
+            let mut keys = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| io_error(&path, e))?;
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                let file_type = entry.file_type().map_err(|e| io_error(&entry.path(), e))?;
+                if !file_type.is_dir() && !name.ends_with(".tmp") {
+                    keys.push(format!("{prefix}{name}"));
+                }
+            }
+            Ok(keys)
+        })
+    }
+
     fn location(&self, key: &str) -> String {
         self.path(key).display().to_string()
     }
@@ -438,6 +573,118 @@ mod tests {
         let d = std::env::temp_dir().join(format!("state-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
+    }
+
+    #[tokio::test]
+    async fn versioned_writes_report_the_version_a_read_sees() {
+        let d = tmp("versioned");
+        let s = FileStateStore::new(&d);
+        let Written::Stored(Some(v1)) = s.create_versioned("a.lock", b"one").await.unwrap() else {
+            panic!("create must store and report a version");
+        };
+        assert_eq!(s.get("a.lock").await.unwrap().unwrap().version, v1);
+        assert_eq!(
+            s.create_versioned("a.lock", b"two").await.unwrap(),
+            Written::Refused
+        );
+        let Written::Stored(Some(v2)) = s.replace_versioned("a.lock", b"two", &v1).await.unwrap()
+        else {
+            panic!("replace at the current version must store");
+        };
+        assert_eq!(s.get("a.lock").await.unwrap().unwrap().version, v2);
+        assert_eq!(
+            s.replace_versioned("a.lock", b"three", &v1).await.unwrap(),
+            Written::Refused
+        );
+        assert!(s.delete("a.lock", Some(&v2)).await.unwrap());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn list_dir_lists_one_level() {
+        let d = tmp("listdir");
+        let s = FileStateStore::new(&d);
+        assert!(s.list_dir("").await.unwrap().is_empty(), "no directory yet");
+        for k in [
+            "top.json",
+            "f.R.lock",
+            "runs/a.reserved",
+            "runs/deep/b.json",
+            "media/m.json",
+        ] {
+            s.put(k, b"{}").await.unwrap();
+        }
+        let mut top = s.list_dir("").await.unwrap();
+        top.sort();
+        assert_eq!(top, ["f.R.lock", "top.json"]);
+        assert_eq!(s.list_dir("runs").await.unwrap(), ["runs/a.reserved"]);
+        assert_eq!(s.list_dir("runs/").await.unwrap(), ["runs/a.reserved"]);
+        assert!(s.list_dir("none").await.unwrap().is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The provided methods, for backends that do not override them
+    #[derive(Debug)]
+    struct Plain(FileStateStore);
+
+    impl StateStore for Plain {
+        fn get<'a>(&'a self, key: &'a str) -> StoreFuture<'a, Option<Versioned>> {
+            self.0.get(key)
+        }
+        fn put<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, ()> {
+            self.0.put(key, bytes)
+        }
+        fn create<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, bool> {
+            self.0.create(key, bytes)
+        }
+        fn replace<'a>(
+            &'a self,
+            key: &'a str,
+            bytes: &'a [u8],
+            version: &'a str,
+        ) -> StoreFuture<'a, bool> {
+            self.0.replace(key, bytes, version)
+        }
+        fn delete<'a>(&'a self, key: &'a str, version: Option<&'a str>) -> StoreFuture<'a, bool> {
+            self.0.delete(key, version)
+        }
+        fn list(&self) -> StoreFuture<'_, Vec<String>> {
+            self.0.list()
+        }
+        fn location(&self, key: &str) -> String {
+            self.0.location(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn provided_methods_work_without_overrides() {
+        let d = tmp("provided");
+        let s = Plain(FileStateStore::new(&d));
+        assert_eq!(
+            s.create_versioned("x", b"1").await.unwrap(),
+            Written::Stored(None)
+        );
+        assert_eq!(
+            s.create_versioned("x", b"2").await.unwrap(),
+            Written::Refused
+        );
+        let v = s.get("x").await.unwrap().unwrap().version;
+        assert_eq!(
+            s.replace_versioned("x", b"2", &v).await.unwrap(),
+            Written::Stored(None)
+        );
+        assert_eq!(
+            s.replace_versioned("x", b"3", &v).await.unwrap(),
+            Written::Refused
+        );
+        for k in ["runs/a.reserved", "runs/deep/b.json", "top.lock"] {
+            s.put(k, b"{}").await.unwrap();
+        }
+        let mut top = s.list_dir("").await.unwrap();
+        top.sort();
+        assert_eq!(top, ["top.lock", "x"]);
+        assert_eq!(s.list_dir("runs").await.unwrap(), ["runs/a.reserved"]);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[tokio::test]

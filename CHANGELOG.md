@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Build with `--no-default-features` for the system allocator.
 
 ### Changed
+- `reso-ingest`: fewer state requests per `sync`, which matters with a bucket, where each one is a round trip (#162,
+  lead 6). A quiet sync of one resource makes 19 bucket requests instead of 21 (20 instead of 23 in a run that sweeps stale
+  run ids). The checkpoint is read once, not
+  twice. The schema snapshot is written only when it changed. A lease is released with one conditional delete (the
+  version from its create or last renewal) instead of a read and a delete. The lease lookup for a running backfill
+  and the stale run-id sweep list one level of `state/` (`StateStore::list_dir`) instead of every key, and the sweep
+  no longer reads the reservation it just made. The start-up check of conditional writes (6 requests) stays.
+- `reso-ingest`: `StateStore` has three new provided methods: `create_versioned` and `replace_versioned` (they also
+  report the version written, as `Written`) and `list_dir` (keys one level down). `FileStateStore` and
+  `S3StateStore` override them. Other backends keep working unchanged and can override them to save the same
+  requests.
 - `reso-ingest`: NDJSON `record` values keep the server's member order and number text (`1.50` stays `1.50`, an
   integer past 64 bits is no longer turned into a float) instead of being sorted and normalised by a parse and
   serialize round trip (#162). Line breaks between tokens are dropped. A consumer that compared lines byte for byte

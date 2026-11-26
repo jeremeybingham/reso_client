@@ -260,24 +260,31 @@ connection. Every record was read back from the bucket and checked.
 | local (/dev/shm) | 0.021 | 0.021 | 0.022 | 1 |
 | AWS S3 `us-east-1` | 1.76 | 1.72 | 2.73 | 1 |
 | GCS `us-east1` | 2.29 | 2.16 | 2.57 | 1 |
+| AWS S3 `us-east-1`, after lead 6 | 1.57 | 1.51 | 1.64 | 1 |
+| GCS `us-east1`, after lead 6 | 1.92 | 1.80 | 2.85 | 1 |
 
 Locally a quiet run is nothing. With a bucket it is round trips, one after another. Counted through a logging proxy
 in front of the local RustFS server, a quiet `sync` of one resource makes 24 bucket requests:
 
-| requests | what |
-|---|---|
-| 6 | the conditional-write check at start-up (`check_conditional_writes`: create, create again, replace with a wrong version, delete with a wrong version, head, delete) |
-| 4 | run id: reserve, head `manifest.<id>.json` and `media.<id>.json` in the sink, and at the end head + delete the reservation |
-| 2 | stale-reservation sweep: list all of `state/`, read each reservation (`runs::sweep_stale`; once an hour per process, so every run of a `sync` CronJob) |
-| 1 | list all of `state/` again to look for a running backfill's lease (`apply_rate_share`) |
-| 2 | schema snapshot: read, then written back even when unchanged |
-| 3 | lease: create, then read + conditional delete at release |
-| 2 | checkpoint read twice |
-| 3 | `runs/last.json`, the manifest and the access-log copy |
-| 1 | (first run only) the data file, after a head |
+| requests | what | after lead 6 |
+|---|---|---|
+| 6 | the conditional-write check at start-up (`check_conditional_writes`: create, create again, replace with a wrong version, delete with a wrong version, head, delete) | 6 (kept) |
+| 4 | run id: reserve, head `manifest.<id>.json` and `media.<id>.json` in the sink, and at the end head + delete the reservation | 4 |
+| 2 | stale-reservation sweep: list all of `state/`, read each reservation (`runs::sweep_stale`; once an hour per process, so every run of a `sync` CronJob) | 1: list `state/runs/` only, the new reservation not read |
+| 1 | list all of `state/` again to look for a running backfill's lease (`apply_rate_share`) | 1: the top level of `state/` only |
+| 2 | schema snapshot: read, then written back even when unchanged | 1: read |
+| 3 | lease: create, then read + conditional delete at release | 2: create, conditional delete |
+| 2 | checkpoint read twice | 1 |
+| 3 | `runs/last.json`, the manifest and the access-log copy | 3 |
+| 1 | (first run only) the data file, after a head | 1 |
 
 1.76 s over 24 requests is about 70 ms each, sequential. In `serve` the start-up check runs once per process, so a
 quiet sync there is about 18 requests. Lead 6 below lists what could go.
+
+After lead 6 a quiet run of a `sync` CronJob (with the sweep) makes 20 requests instead of 23, and 19 instead of 21
+without the sweep (the start-up check is 6 of them in both). Measured the same way on 2026-11-26 (rows "after
+lead 6" above; one set of 10 runs each over a home connection, so the run-to-run spread is large next to the gain):
+the median quiet run went from 1.76 s to 1.57 s on AWS and from 2.29 s to 1.92 s on GCS.
 
 ## Leads
 
@@ -294,12 +301,15 @@ Ranked by expected saving for the cost of the change. Sub-issues of #162 are lis
 5. **Done: Parquet from record text (above).** The arrow-json decoder reads each record's text as sent, with a
    fall-back to the parsed path for records that do not fit the column types: 4.56 G to 3.00 G instructions, about
    34% less CPU. The estimate was 45%; the decoder's own read of the text costs about 0.8 G of the 1.55 G it replaced.
-6. **Measured (above): bucket round trips per run.** 24 requests for a quiet sync. Could go without changing what is
-   checked: the second read of the checkpoint, the schema snapshot write when it has not changed, and the lease read
-   before its release (the version from the create is enough); the two listings of all of `state/` could list
-   `state/runs/` and the lease keys only, which matters once a bucket holds many feeds' key sets. Skipping the
-   start-up conditional-write check (6 requests) for a bucket that passed it recently would trade a safety check for
-   time: an owner decision.
+6. **Done: bucket round trips per run.** A quiet sync went from 23 requests to 20 with the hourly sweep, 21 to 19
+   without it (the table above; an in-process S3 fake counts them in
+   `s3_tests::a_quiet_sync_makes_few_bucket_requests`). The checkpoint is read once. The schema snapshot is written
+   only when it changed. A lease is released by one conditional delete with the version its create or last renewal
+   reported (`StateStore::create_versioned`, `replace_versioned`). The backfill-lease lookup lists the top level of
+   `state/` and the stale-reservation sweep lists `state/runs/` (`StateStore::list_dir`), so neither grows with the
+   feeds' key sets and media indexes. The sweep also no longer reads the reservation just made. Kept on purpose (owner
+   decision, 2026-11-26): the start-up conditional-write check (6 requests, #131). Left: the run-id reservation
+   is still released by a HEAD and a DELETE; a versioned delete would save one more request.
 7. Bucket uploads: bound by the connection here, not the code (above). Overlapping uploads with the pull and
    compressed NDJSON are possible later; not planned without a need from a real deployment.
 8. Not measured: `sync --media` (needs a fake file server in the load test), backfill client CPU against its pacing,

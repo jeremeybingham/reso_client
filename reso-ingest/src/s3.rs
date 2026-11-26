@@ -23,7 +23,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::signer::{HeaderName, HeaderValue, Method, SignedUrlOptions, Signer};
 use object_store::{
     ClientOptions, Error as ObjectError, ObjectMeta, ObjectStore, ObjectStoreExt, PutMode,
-    PutPayload, UpdateVersion, WriteMultipart,
+    PutPayload, PutResult, UpdateVersion, WriteMultipart,
 };
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,7 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::error::IngestError;
 use crate::media_store::{part_name, MediaStore, MediaUpload};
 use crate::sink::FileSink;
-use crate::state::{StateStore, StoreFuture, Versioned};
+use crate::state::{StateStore, StoreFuture, Versioned, Written};
 
 /// An error with its causes, `outer: cause: …` (reqwest says only `builder error` at the top
 /// when, for example, there is no CA bundle; the reason is further down). A cause whose text the
@@ -221,6 +221,14 @@ impl Versions {
         match self {
             Versions::ETag(_) => meta.e_tag.clone(),
             Versions::Generation(_) => meta.version.clone(),
+        }
+    }
+
+    /// The version a write reports, in the form [`of`](Self::of) reads it
+    fn of_put(&self, put: &PutResult) -> Option<String> {
+        match self {
+            Versions::ETag(_) => put.e_tag.clone(),
+            Versions::Generation(_) => put.version.clone(),
         }
     }
 
@@ -516,6 +524,15 @@ impl StateStore for S3StateStore {
 
     fn create<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, bool> {
         Box::pin(async move {
+            Ok(matches!(
+                self.create_versioned(key, bytes).await?,
+                Written::Stored(_)
+            ))
+        })
+    }
+
+    fn create_versioned<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> StoreFuture<'a, Written> {
+        Box::pin(async move {
             let path = self.path(key)?;
             let payload = PutPayload::from(bytes.to_vec());
             match self
@@ -523,9 +540,9 @@ impl StateStore for S3StateStore {
                 .put_opts(&path, payload, PutMode::Create.into())
                 .await
             {
-                Ok(_) => Ok(true),
+                Ok(put) => Ok(Written::Stored(self.versions.of_put(&put))),
                 Err(ObjectError::AlreadyExists { .. } | ObjectError::Precondition { .. }) => {
-                    Ok(false)
+                    Ok(Written::Refused)
                 }
                 Err(e) => Err(self.error(key, chain(&e))),
             }
@@ -539,6 +556,20 @@ impl StateStore for S3StateStore {
         version: &'a str,
     ) -> StoreFuture<'a, bool> {
         Box::pin(async move {
+            Ok(matches!(
+                self.replace_versioned(key, bytes, version).await?,
+                Written::Stored(_)
+            ))
+        })
+    }
+
+    fn replace_versioned<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+        version: &'a str,
+    ) -> StoreFuture<'a, Written> {
+        Box::pin(async move {
             let path = self.path(key)?;
             let payload = PutPayload::from(bytes.to_vec());
             match self
@@ -546,10 +577,12 @@ impl StateStore for S3StateStore {
                 .put_opts(&path, payload, self.versions.update(version).into())
                 .await
             {
-                Ok(_) => Ok(true),
+                Ok(put) => Ok(Written::Stored(self.versions.of_put(&put))),
                 // A changed ETag is a failed precondition; a value deleted meanwhile is NotFound
                 // on some stores and a precondition failure on others
-                Err(ObjectError::Precondition { .. } | ObjectError::NotFound { .. }) => Ok(false),
+                Err(ObjectError::Precondition { .. } | ObjectError::NotFound { .. }) => {
+                    Ok(Written::Refused)
+                }
                 Err(e) => Err(self.error(key, chain(&e))),
             }
         })
@@ -598,6 +631,35 @@ impl StateStore for S3StateStore {
                 .map_err(|e| self.error("", chain(&e)))?;
             let skip = self.prefix.as_ref().map_or(0, |p| p.parts().count());
             Ok(metas
+                .into_iter()
+                .map(|m| {
+                    m.location
+                        .parts()
+                        .skip(skip)
+                        .map(|p| p.as_ref().to_string())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .collect())
+        })
+    }
+
+    fn list_dir<'a>(&'a self, dir: &'a str) -> StoreFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let dir = dir.trim_end_matches('/');
+            let prefix = if dir.is_empty() {
+                self.prefix.clone()
+            } else {
+                Some(self.path(dir)?)
+            };
+            let listed = self
+                .store
+                .list_with_delimiter(prefix.as_ref())
+                .await
+                .map_err(|e| self.error(dir, chain(&e)))?;
+            let skip = self.prefix.as_ref().map_or(0, |p| p.parts().count());
+            Ok(listed
+                .objects
                 .into_iter()
                 .map(|m| {
                     m.location
@@ -1114,6 +1176,37 @@ mod tests {
     fn store(prefix: &str) -> S3StateStore {
         S3StateStore::with_store(Arc::new(InMemory::new()), prefix, "s3://test".to_string())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn versioned_writes_and_one_level_listing() {
+        let s = store("p/state");
+        let Written::Stored(Some(v1)) = s.create_versioned("f.R.lock", b"a").await.unwrap() else {
+            panic!("create must report the ETag");
+        };
+        assert_eq!(s.get("f.R.lock").await.unwrap().unwrap().version, v1);
+        assert_eq!(
+            s.create_versioned("f.R.lock", b"b").await.unwrap(),
+            Written::Refused
+        );
+        let Written::Stored(Some(v2)) = s.replace_versioned("f.R.lock", b"b", &v1).await.unwrap()
+        else {
+            panic!("replace must report the new ETag");
+        };
+        assert_eq!(s.get("f.R.lock").await.unwrap().unwrap().version, v2);
+        assert!(s.delete("f.R.lock", Some(&v2)).await.unwrap());
+
+        for k in [
+            "top.json",
+            "runs/a.reserved",
+            "runs/deep/b.json",
+            "media/m.json",
+        ] {
+            s.put(k, b"{}").await.unwrap();
+        }
+        assert_eq!(s.list_dir("").await.unwrap(), ["top.json"]);
+        assert_eq!(s.list_dir("runs").await.unwrap(), ["runs/a.reserved"]);
+        assert!(s.list_dir("none").await.unwrap().is_empty());
     }
 
     #[derive(Debug)]

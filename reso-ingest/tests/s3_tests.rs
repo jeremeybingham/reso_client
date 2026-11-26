@@ -139,23 +139,38 @@ async fn delete_object(
 
 async fn list_objects(State(objects): State<Objects>, RawQuery(query): RawQuery) -> Response {
     // The client sends `prefix=reso%2Fstate%2F`; the keys here contain no characters that need more
+    let query = query.unwrap_or_default();
     let prefix = query
-        .unwrap_or_default()
         .split('&')
         .find_map(|kv| kv.strip_prefix("prefix="))
         .unwrap_or_default()
         .replace("%2F", "/");
+    // `delimiter=%2F`: one level only, deeper keys folded into common prefixes
+    let one_level = query.split('&').any(|kv| kv == "delimiter=%2F");
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult><IsTruncated>false</IsTruncated>",
     );
+    let mut folders = std::collections::BTreeSet::new();
     for (key, (bytes, n)) in objects.lock().unwrap().iter() {
-        if key.starts_with(&prefix) {
+        let Some(rest) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        if let Some((folder, _)) = rest.split_once('/').filter(|_| one_level) {
+            folders.insert(format!("{prefix}{folder}/"));
+            continue;
+        }
+        {
             xml.push_str(&format!(
                 "<Contents><Key>{key}</Key><LastModified>2026-11-25T10:00:00.000Z</LastModified>\
                  <ETag>\"etag{n}\"</ETag><Size>{}</Size></Contents>",
                 bytes.len()
             ));
         }
+    }
+    for folder in folders {
+        xml.push_str(&format!(
+            "<CommonPrefixes><Prefix>{folder}</Prefix></CommonPrefixes>"
+        ));
     }
     xml.push_str("</ListBucketResult>");
     ([("content-type", "application/xml")], xml).into_response()
@@ -183,8 +198,16 @@ async fn fake_s3_with(ignore: Ignore) -> (String, Objects) {
 
 /// A fake that also records its HEAD and DELETE requests
 async fn fake_s3_logged(ignore: Ignore) -> (String, Objects, Requests) {
+    let (endpoint, objects, requests, _) = fake_s3_counted(ignore).await;
+    (endpoint, objects, requests)
+}
+
+/// A fake that also records every request as `METHOD /bucket/key?query`
+async fn fake_s3_counted(ignore: Ignore) -> (String, Objects, Requests, Requests) {
     let objects = Objects::default();
     let requests = Requests::default();
+    let calls = Requests::default();
+    let log = calls.clone();
     let app = Router::new()
         .route("/{bucket}", get(list_objects))
         .route(
@@ -196,11 +219,19 @@ async fn fake_s3_logged(ignore: Ignore) -> (String, Objects, Requests) {
         )
         .layer(Extension(ignore))
         .layer(Extension(requests.clone()))
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                log.lock()
+                    .unwrap()
+                    .push(format!("{} {}", req.method(), req.uri()));
+                next.run(req)
+            },
+        ))
         .with_state(objects.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}"), objects, requests)
+    (format!("http://{addr}"), objects, requests, calls)
 }
 
 fn options(endpoint: &str, prefix: &str) -> S3Options {
@@ -425,6 +456,88 @@ async fn sync_keeps_manifests_and_last_run_in_the_bucket() {
     let (code, _, e) = cli(&args(&["media", "--config", config.to_str().unwrap()])).await;
     assert_eq!(code, 2);
     assert!(e.contains("sync --media"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A quiet `sync` (nothing new) against a bucket makes only the requests it needs (#162 lead 6):
+/// the checkpoint is read once, an unchanged schema snapshot is not written back, the lease is
+/// released without reading it first and no listing covers all of `state/`
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quiet_sync_makes_few_bucket_requests() {
+    set_credentials();
+    std::env::set_var("S3_CLI_TEST_TOKEN", "t");
+    let (endpoint, _objects, _, calls) = fake_s3_counted(Ignore::Nothing).await;
+    let reso = reso_server().await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-quiet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n\
+             [server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_CLI_TEST_TOKEN\"\n",
+            reso.uri()
+        ),
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let args: Vec<String> = [
+        "sync",
+        "--config",
+        config.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+        "--s3-bucket",
+        "bkt",
+        "--s3-prefix",
+        "p",
+        "--s3-endpoint",
+        &endpoint,
+        "--s3-region",
+        "us-east-1",
+        "--s3-allow-http",
+        "--s3-single-delete",
+    ]
+    .map(String::from)
+    .to_vec();
+    let (code, o, e) = cli(&args).await;
+    assert_eq!(code, 0, "{o}{e}");
+    calls.lock().unwrap().clear();
+
+    let (code, o, e) = cli(&args).await;
+    assert_eq!(code, 0, "{o}{e}");
+    let calls = calls.lock().unwrap().clone();
+    let count = |what: &str| calls.iter().filter(|c| c.contains(what)).count();
+    let listings: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.starts_with("GET /bkt?"))
+        .collect();
+    assert!(
+        listings.iter().all(|c| c.contains("delimiter=%2F")),
+        "a listing of every key: {calls:#?}"
+    );
+    assert_eq!(count("GET /bkt/p/state/mls.Property.json"), 1, "{calls:#?}");
+    assert_eq!(
+        count("PUT /bkt/p/state/mls.%40schema.json"),
+        0,
+        "{calls:#?}"
+    );
+    assert_eq!(count("GET /bkt/p/state/mls.Property.lock"), 0, "{calls:#?}");
+    assert_eq!(
+        count("HEAD /bkt/p/state/mls.Property.lock"),
+        0,
+        "{calls:#?}"
+    );
+    assert_eq!(
+        count("DELETE /bkt/p/state/mls.Property.lock"),
+        1,
+        "{calls:#?}"
+    );
+    // 6 of them are the start-up check, kept on purpose (#131); 21 before lead 6 (no sweep here:
+    // it runs once an hour per process)
+    assert!(calls.len() <= 19, "{} requests: {calls:#?}", calls.len());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
