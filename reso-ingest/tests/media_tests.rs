@@ -153,6 +153,22 @@ fn files_in(dir: &Path) -> Vec<String> {
     names
 }
 
+/// The name a file is stored under: its SHA-256, then the extension of its content type
+fn stored(body: &str, ext: &str) -> String {
+    let hash = reso_ingest::sha256_hex(body.as_bytes());
+    match ext {
+        "" => hash,
+        ext => format!("{hash}.{ext}"),
+    }
+}
+
+/// `stored` for several files, in the order `files_in` lists them
+fn stored_all(files: &[(&str, &str)]) -> Vec<String> {
+    let mut names: Vec<String> = files.iter().map(|(b, e)| stored(b, e)).collect();
+    names.sort();
+    names
+}
+
 fn file_requests(requests: &[Request], path: &str) -> usize {
     requests.iter().filter(|r| r.url.path() == path).count()
 }
@@ -200,9 +216,12 @@ async fn sync_then_media_downloads_retries_and_skips_unchanged() {
     assert!(stdout.contains("1 without MediaURL"), "{stdout}");
     assert!(stdout.contains("C: "), "{stdout}");
     let media_dir = out.join("media").join("srv");
-    assert_eq!(files_in(&media_dir), ["A.jpg", "B.png"]);
     assert_eq!(
-        std::fs::read_to_string(media_dir.join("A.jpg")).unwrap(),
+        files_in(&media_dir),
+        stored_all(&[("AAAA", "jpg"), ("BB", "png")])
+    );
+    assert_eq!(
+        std::fs::read_to_string(media_dir.join(stored("AAAA", "jpg"))).unwrap(),
         "AAAA"
     );
 
@@ -230,7 +249,10 @@ async fn sync_then_media_downloads_retries_and_skips_unchanged() {
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("1 downloaded, 1 not modified"), "{stdout}");
     assert!(stdout.contains("0 failed, 0 pending"), "{stdout}");
-    assert_eq!(files_in(&media_dir), ["A.jpg", "B.png", "C.jpg"]);
+    assert_eq!(
+        files_in(&media_dir),
+        stored_all(&[("AAAA", "jpg"), ("BB", "png"), ("C", "jpg")])
+    );
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
@@ -331,7 +353,10 @@ async fn limit_leaves_the_rest_for_the_next_run() {
     assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("2 downloaded"), "{stdout}");
     // An unknown content type gets no extension
-    assert_eq!(files_in(&media_dir.join("srv")), ["A.jpg", "B.png", "N"]);
+    assert_eq!(
+        files_in(&media_dir.join("srv")),
+        stored_all(&[("AAAA", "jpg"), ("BB", "png"), ("N", "")])
+    );
 }
 
 /// Writes a manifest and its NDJSON data file the way `sync` does
@@ -378,7 +403,7 @@ async fn delete_event_removes_file_and_entry() {
             line("r1", media("B", Some(format!("{base}/files/b")), "t", "t2")),
         ],
     );
-    let report = sync_media(&client, "srv", Default::default(), &options, |_| {}).await;
+    let report = sync_media(&client, "srv", Default::default(), 2, &options, |_| {}).await;
     assert_eq!(report.downloaded, 2, "{report:?}");
 
     write_run(
@@ -389,13 +414,16 @@ async fn delete_event_removes_file_and_entry() {
             "event": "delete", "key": "A"
         })],
     );
-    let report = sync_media(&client, "srv", Default::default(), &options, |_| {}).await;
+    let report = sync_media(&client, "srv", Default::default(), 2, &options, |_| {}).await;
     assert_eq!(report.deleted, 1, "{report:?}");
     assert_eq!(
         report.files_read, 1,
         "the first data file is not read again"
     );
-    assert_eq!(files_in(&options.media_dir.join("srv")), ["B.png"]);
+    assert_eq!(
+        files_in(&options.media_dir.join("srv")),
+        [stored("BB", "png")]
+    );
     let index = MediaIndex::load(options.state.as_ref(), "srv")
         .await
         .unwrap();
@@ -419,7 +447,7 @@ async fn damaged_index_stops_the_server_without_downloading() {
         "t",
     ))
     .unwrap();
-    let report = sync_media(&client, "srv", Default::default(), &options, |_| {}).await;
+    let report = sync_media(&client, "srv", Default::default(), 2, &options, |_| {}).await;
     assert!(report.error.is_some());
     assert!(!report.is_clean());
 }

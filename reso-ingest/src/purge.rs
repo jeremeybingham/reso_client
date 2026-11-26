@@ -11,7 +11,8 @@
 //!   the server's files, since reading every object for its tag would be slow and costly. Only the
 //!   NDJSON objects named like the server's that no manifest lists (a run killed before its
 //!   manifest was delivered) are downloaded and judged by their tag.
-//! - **Media files**: the server's directory under the media directory (`<media_dir>/<server>/`).
+//! - **Media files**: the server's [`MediaStore`]: its directory under the media directory
+//!   (`<media_dir>/<server>/`), or `<prefix>/media/<server>/` in the bucket (#89).
 //! - **State keys**: the server's checkpoints, key sets, event sequences, schema snapshot and lease
 //!   keys (`<server>.*`) and its media index (`media/<server>.json`).
 //!
@@ -42,6 +43,7 @@ use crate::checkpoint::sanitize;
 use crate::error::IngestError;
 use crate::lease::{live_holder, Lease, LeaseHolder, LeaseOutcome};
 use crate::media::{encode_name, MediaIndex};
+use crate::media_store::MediaStore;
 use crate::output::{new_run_id, now_rfc3339, output_error};
 use crate::sink::{FileSink, LocalDirSink};
 use crate::state::StateStore;
@@ -70,11 +72,11 @@ pub struct PurgePlan {
     pub server: String,
     /// Data files in the output directory
     pub files: Vec<PurgedFile>,
-    /// The server's media directory
-    pub media_dir: PathBuf,
-    /// Files in the media directory
+    /// Where the server's media files are (a directory or a bucket prefix)
+    pub media: String,
+    /// Media files stored
     pub media_files: u64,
-    /// Bytes in the media directory
+    /// Bytes of media stored
     pub media_bytes: u64,
     /// State keys of the server
     pub state_keys: Vec<String>,
@@ -120,7 +122,7 @@ pub struct PurgeRecord {
     pub files: Vec<PurgedFile>,
     /// Records (lines) in the deleted data files
     pub records: u64,
-    /// The media directory deleted
+    /// Where the media files deleted were (a directory or a bucket prefix)
     pub media_dir: String,
     /// Media files deleted
     pub media_files: u64,
@@ -165,25 +167,26 @@ pub async fn plan_purge(
     server: &str,
     out: &Path,
     files: Option<&dyn FileSink>,
-    media_dir: &Path,
+    media: &dyn MediaStore,
     state: &dyn StateStore,
 ) -> Result<PurgePlan, IngestError> {
     let local = LocalDirSink::existing(out);
     let files = files.unwrap_or(&local);
-    plan(server, out, files, media_dir, state, &BTreeSet::new()).await
+    plan(server, out, files, media, state, &BTreeSet::new()).await
 }
 
 async fn plan(
     server: &str,
     out: &Path,
     sink: &dyn FileSink,
-    media_dir: &Path,
+    media: &dyn MediaStore,
     state: &dyn StateStore,
     own_leases: &BTreeSet<String>,
 ) -> Result<PurgePlan, IngestError> {
     let (files, not_purged) = data_files(server, sink, out)?;
-    let media_dir = media_dir.join(encode_name(server));
-    let (media_files, media_bytes) = dir_size(&media_dir)?;
+    let listed = media.list().await?;
+    let media_files = listed.len() as u64;
+    let media_bytes = listed.iter().map(|(_, n)| n).sum();
 
     let prefix = format!("{}.", sanitize(server));
     let media_key = MediaIndex::key(server);
@@ -216,7 +219,7 @@ async fn plan(
     Ok(PurgePlan {
         server: server.to_string(),
         files,
-        media_dir,
+        media: media.location(""),
         media_files,
         media_bytes,
         state_keys,
@@ -243,11 +246,11 @@ pub async fn execute_purge(
     server: &str,
     out: &Path,
     files: Option<&dyn FileSink>,
-    media_dir: &Path,
+    media: &dyn MediaStore,
     state: &Arc<dyn StateStore>,
     by: &str,
 ) -> Result<PurgeOutcome, IngestError> {
-    let first = plan_purge(server, out, files, media_dir, state.as_ref()).await?;
+    let first = plan_purge(server, out, files, media, state.as_ref()).await?;
     if !first.held.is_empty() {
         return Ok(PurgeOutcome::Held(first.held));
     }
@@ -271,7 +274,7 @@ pub async fn execute_purge(
             }
         }
     }
-    let result = delete(server, out, files, media_dir, state.as_ref(), &own, by).await;
+    let result = delete(server, out, files, media, state.as_ref(), &own, by).await;
     release_all(leases).await;
     result
 }
@@ -280,7 +283,7 @@ async fn delete(
     server: &str,
     out: &Path,
     bucket: Option<&dyn FileSink>,
-    media_dir: &Path,
+    media: &dyn MediaStore,
     state: &dyn StateStore,
     own: &BTreeSet<String>,
     by: &str,
@@ -288,7 +291,7 @@ async fn delete(
     let local = LocalDirSink::existing(out);
     let files = bucket.unwrap_or(&local);
     // Plan again now that the feeds are held, so nothing written in between is missed
-    let plan = plan(server, out, files, media_dir, state, own).await?;
+    let plan = plan(server, out, files, media, state, own).await?;
     if !plan.held.is_empty() {
         return Ok(PurgeOutcome::Held(plan.held));
     }
@@ -304,13 +307,15 @@ async fn delete(
         error: None,
         files: Vec::new(),
         records: 0,
-        media_dir: plan.media_dir.display().to_string(),
+        media_dir: plan.media.clone(),
         media_files: 0,
         media_bytes: 0,
         state_keys: Vec::new(),
         not_purged: plan.not_purged.clone(),
     };
-    let error = delete_planned(&plan, files, state, &mut record).await.err();
+    let error = delete_planned(&plan, files, media, state, &mut record)
+        .await
+        .err();
     if let Some(e) = error {
         tracing::error!(server, error = %e, "purge stopped");
         record.status = "failed".into();
@@ -389,6 +394,7 @@ async fn delete(
 async fn delete_planned(
     plan: &PurgePlan,
     files: &dyn FileSink,
+    media: &dyn MediaStore,
     state: &dyn StateStore,
     record: &mut PurgeRecord,
 ) -> Result<(), IngestError> {
@@ -397,14 +403,9 @@ async fn delete_planned(
             record.files.push(f.clone());
         }
     }
-    match fs::remove_dir_all(&plan.media_dir) {
-        Ok(()) => {
-            record.media_files = plan.media_files;
-            record.media_bytes = plan.media_bytes;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(output_error(&plan.media_dir, e)),
-    }
+    let (media_files, media_bytes) = media.clear().await?;
+    record.media_files = media_files;
+    record.media_bytes = media_bytes;
     for key in &plan.state_keys {
         if state.delete(key, None).await? {
             record.state_keys.push(key.clone());
@@ -596,31 +597,6 @@ fn plain_name(name: &str) -> bool {
 }
 
 /// Files and bytes under `dir`, at all levels; zero when it does not exist
-fn dir_size(dir: &Path) -> Result<(u64, u64), IngestError> {
-    let (mut files, mut bytes) = (0, 0);
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(d) = pending.pop() {
-        let entries = match fs::read_dir(&d) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(output_error(&d, e)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|e| output_error(&d, e))?;
-            let meta = entry
-                .metadata()
-                .map_err(|e| output_error(&entry.path(), e))?;
-            if meta.is_dir() {
-                pending.push(entry.path());
-            } else {
-                files += 1;
-                bytes += meta.len();
-            }
-        }
-    }
-    Ok((files, bytes))
-}
-
 fn file_name(path: &Path) -> String {
     path.file_name()
         .and_then(|n| n.to_str())

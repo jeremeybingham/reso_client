@@ -1,31 +1,47 @@
-//! Media file download: the `Media` records `sync` wrote, turned into files on disk
+//! Media file download: the `Media` records `sync` wrote, turned into stored files
 //!
-//! [`sync_media`] reads the NDJSON data files of the `Media` resource that the run manifests in
-//! the output directory list, keeps the newest record per `MediaKey`, and downloads each new or
-//! changed `MediaURL` with a [`Downloader`] (its own retry, rate limit and token rule). A
-//! per-server [`MediaIndex`] (state store key `media/<server>.json`) records which data files were read
-//! and what each file was saved from, so a run only downloads what changed and picks up failed
-//! files again.
+//! Files go to a [`MediaStore`]: a directory (`<media_dir>/<server>/`) or, with a bucket, the
+//! bucket (`<prefix>/media/<server>/`), streamed there without a local copy (#89). Each file is
+//! named by the SHA-256 of its content plus an extension from `Content-Type`
+//! (`<sha256>.jpg`), so a photo that several `MediaKey`s point at, or that comes back unchanged
+//! under a new timestamp, is stored once. A per-server [`MediaIndex`] (state store key
+//! `media/<server>.json`) maps each `MediaKey` to its file and records which data files were read,
+//! so a run only downloads what changed and picks up failed files again.
+//!
+//! Downloads run in their own worker pool ([`MediaWorkers`], `[server.media] workers`) with the
+//! `[server.media]` rate limits, apart from the API's: `sync --media` hands each page's new and
+//! changed files to the pool and goes on with the next page at once, so a slow media server never
+//! holds up record syncs. [`sync_media`] (the `media` command) feeds the same pool from the data
+//! files of earlier runs.
 //!
 //! A file is downloaded again when the record's `MediaModificationTimestamp` (or, when absent,
 //! `ModificationTimestamp`) changes. A changed URL alone does not count, because signed CDN URLs
 //! change on every pull; the index keeps the newest URL for the next download. A record with no
 //! timestamp at all is downloaded again when its URL changes. Re-downloads send the saved
-//! `ETag`/`Last-Modified`, so an unchanged file costs a 304. A delete event for a `MediaKey`
-//! removes its file and index entry.
+//! `ETag`/`Last-Modified`, so an unchanged file costs a 304, and a body whose hash is the one
+//! already stored is not written again. A delete event for a `MediaKey` removes its index entry,
+//! and its file once no other key points at it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use reso_client::{DownloadConfig, DownloadOutcome, ResoClient, Validators};
+use reso_client::{
+    DownloadConfig, DownloadOutcome, DownloadTarget, Downloader, ResoClient, ResoError, SavedFile,
+    Validators,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::error::IngestError;
+use crate::media_store::{MediaStore, MediaUpload};
 use crate::output::now_rfc3339;
+use crate::shutdown::Shutdown;
 use crate::state::{invalid, StateStore};
 
 /// The resource whose records point at files
@@ -33,8 +49,10 @@ pub const MEDIA_RESOURCE: &str = "Media";
 const KEY_FIELD: &str = "MediaKey";
 const URL_FIELD: &str = "MediaURL";
 const STAMP_FIELDS: [&str; 2] = ["MediaModificationTimestamp", "ModificationTimestamp"];
-/// Save the index after this many downloads, so a crash loses little
+/// Save the index after this many finished downloads, so a crash loses little
 const SAVE_EVERY: u64 = 50;
+/// Download workers per server when `[server.media] workers` is not set
+pub const DEFAULT_WORKERS: usize = 4;
 
 /// What is known about one `MediaKey`
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,8 +63,11 @@ pub struct MediaEntry {
     pub stamp: Option<String>,
     /// The file still has to be downloaded (new, changed, or the last attempt failed)
     pub pending: bool,
-    /// File name in the server's media directory, once saved
+    /// Name of the stored file (`<sha256>.<ext>`), once saved; other keys may share it
     pub file: Option<String>,
+    /// SHA-256 (hex) of the stored file's content
+    #[serde(default)]
+    pub sha256: Option<String>,
     /// `ETag` of the saved file
     pub etag: Option<String>,
     /// `Last-Modified` of the saved file
@@ -66,6 +87,9 @@ pub struct MediaIndex {
     pub read_files: BTreeSet<String>,
     /// One entry per `MediaKey`
     pub entries: BTreeMap<String, MediaEntry>,
+    /// How many entries point at each stored file (rebuilt on load)
+    #[serde(skip)]
+    refs: HashMap<String, u64>,
 }
 
 impl MediaIndex {
@@ -83,12 +107,22 @@ impl MediaIndex {
     /// is an error, not a fresh start, so it never triggers a full re-download silently).
     pub async fn load(store: &dyn StateStore, server: &str) -> Result<Self, IngestError> {
         let key = Self::key(server);
-        match store.get(&key).await? {
+        let mut index: Self = match store.get(&key).await? {
             Some(v) => {
-                serde_json::from_slice(&v.bytes).map_err(|e| invalid(store, &key, e.to_string()))
+                serde_json::from_slice(&v.bytes).map_err(|e| invalid(store, &key, e.to_string()))?
             }
-            None => Ok(Self::default()),
+            None => Self::default(),
+        };
+        index.refs.clear();
+        let names: Vec<String> = index
+            .entries
+            .values()
+            .filter_map(|e| e.file.clone())
+            .collect();
+        for name in names {
+            *index.refs.entry(name).or_default() += 1;
         }
+        Ok(index)
     }
 
     /// Save the index of `server`, replacing the old one whole
@@ -100,6 +134,43 @@ impl MediaIndex {
         let key = Self::key(server);
         let text = serde_json::to_string(self).map_err(|e| invalid(store, &key, e.to_string()))?;
         store.put(&key, text.as_bytes()).await
+    }
+
+    /// How many entries point at the stored file `name`
+    pub fn references(&self, name: &str) -> u64 {
+        self.refs.get(name).copied().unwrap_or(0)
+    }
+
+    /// Point `key`'s entry at the stored file `name`; returns the file it pointed at before when
+    /// no entry points at that one any more (the caller deletes it)
+    fn link(&mut self, key: &str, name: &str) -> Option<String> {
+        let entry = self.entries.get_mut(key)?;
+        let old = entry.file.replace(name.to_string());
+        *self.refs.entry(name.to_string()).or_default() += 1;
+        match old {
+            Some(old) => self.unlink(&old).then_some(old),
+            None => None,
+        }
+    }
+
+    /// One reference to `name` fewer; `true` when none is left
+    fn unlink(&mut self, name: &str) -> bool {
+        match self.refs.get_mut(name) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            _ => {
+                self.refs.remove(name);
+                true
+            }
+        }
+    }
+
+    /// Remove `key`'s entry; returns its file when no other entry points at it
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        let file = self.entries.remove(key)?.file?;
+        self.unlink(&file).then_some(file)
     }
 
     /// Take in one `Media` record; returns `false` when it has no `MediaKey`
@@ -125,9 +196,7 @@ impl MediaIndex {
         }
         true
     }
-}
 
-impl MediaIndex {
     /// Take in the media records nested in `parent` under `field` (an array, as `$expand=Media`
     /// returns it); the keys of the entries touched are pushed onto `keys`
     ///
@@ -142,109 +211,455 @@ impl MediaIndex {
         }
         without_key
     }
+
+    /// Entries still to download (pending, with a URL)
+    fn pending(&self) -> u64 {
+        self.entries
+            .values()
+            .filter(|e| e.pending && e.url.is_some())
+            .count() as u64
+    }
 }
 
 /// The nested-array field that holds media records when none is configured
 pub const DEFAULT_NESTED_FIELD: &str = "Media";
 
-/// Downloads the media files of each page `sync --media` writes, while the page's URLs are fresh
+/// What the producer and the workers of one server share
+struct Shared {
+    server: String,
+    state: Arc<dyn StateStore>,
+    store: Arc<dyn MediaStore>,
+    index: Mutex<MediaIndex>,
+    report: Mutex<MediaReport>,
+    /// Keys in the queue and not yet taken by a worker, so a key seen on two pages is queued once
+    queued: Mutex<HashSet<String>>,
+    /// Saves run one at a time, so an older snapshot never lands after a newer one
+    save_lock: tokio::sync::Mutex<()>,
+    finished: AtomicU64,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A panic while holding the lock leaves plain data behind: carry on with it
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Shared {
+    async fn save(&self) -> Result<(), IngestError> {
+        let _serial = self.save_lock.lock().await;
+        let key = MediaIndex::key(&self.server);
+        let text = serde_json::to_string(&*lock(&self.index))
+            .map_err(|e| invalid(self.state.as_ref(), &key, e.to_string()))?;
+        self.state.put(&key, text.as_bytes()).await
+    }
+
+    async fn delete_files(&self, names: Vec<String>) {
+        for name in names {
+            if let Err(e) = self.store.delete(&name).await {
+                tracing::warn!(file = %self.store.location(&name), error = %e, "cannot delete a media file");
+            }
+        }
+    }
+}
+
+/// Set up the media pipeline of one server: a [`PageMedia`] that takes in pages and queues their
+/// files, and the [`MediaWorkers`] that download them
+///
+/// Run the workers next to the record sync (`tokio::join!`); they end once the `PageMedia` is
+/// dropped and the queue is empty, or when `shutdown` is triggered (what is left stays pending).
+///
+/// # Errors
+///
+/// [`IngestError::Output`] when the index is unreadable or the HTTP client cannot be built.
+pub async fn page_pipeline<'a>(
+    client: &'a ResoClient,
+    server: &str,
+    download: DownloadConfig,
+    options: PipelineOptions,
+) -> Result<(PageMedia, MediaWorkers<'a>), IngestError> {
+    let index = MediaIndex::load(options.state.as_ref(), server).await?;
+    let (tx, workers) = workers(client, server, download, &options, index)?;
+    Ok((
+        PageMedia {
+            nested_field: options
+                .nested_field
+                .unwrap_or_else(|| DEFAULT_NESTED_FIELD.to_string()),
+            shared: Arc::clone(&workers.shared),
+            tx,
+        },
+        workers,
+    ))
+}
+
+/// Where the media pipeline of one server keeps its index and files, and how hard it works
+#[derive(Debug, Clone)]
+pub struct PipelineOptions {
+    /// The state store holding the index
+    pub state: Arc<dyn StateStore>,
+    /// Where the files go
+    pub store: Arc<dyn MediaStore>,
+    /// Field of a record that holds its nested media records (default [`DEFAULT_NESTED_FIELD`])
+    pub nested_field: Option<String>,
+    /// Download workers (at least 1)
+    pub workers: usize,
+    /// Stops the workers between files
+    pub shutdown: Shutdown,
+}
+
+fn workers<'a>(
+    client: &'a ResoClient,
+    server: &str,
+    download: DownloadConfig,
+    options: &PipelineOptions,
+    index: MediaIndex,
+) -> Result<(UnboundedSender<String>, MediaWorkers<'a>), IngestError> {
+    let downloader = client
+        .downloader(download)
+        .map_err(|e| output_error(options.store.location(""), e))?;
+    let (tx, rx) = unbounded_channel();
+    let shared = Arc::new(Shared {
+        server: server.to_string(),
+        state: Arc::clone(&options.state),
+        store: Arc::clone(&options.store),
+        index: Mutex::new(index),
+        report: Mutex::new(MediaReport {
+            server: server.to_string(),
+            ..MediaReport::default()
+        }),
+        queued: Mutex::new(HashSet::new()),
+        save_lock: tokio::sync::Mutex::new(()),
+        finished: AtomicU64::new(0),
+    });
+    Ok((
+        tx,
+        MediaWorkers {
+            shared,
+            rx: tokio::sync::Mutex::new(rx),
+            downloader,
+            workers: options.workers.max(1),
+            shutdown: options.shutdown.clone(),
+        },
+    ))
+}
+
+/// Takes in the pages `sync --media` writes and queues their new and changed files for the
+/// [`MediaWorkers`], while the page's URLs are fresh
 ///
 /// For the top-level [`MEDIA_RESOURCE`] each record is a media record; for any other resource the
 /// media records nested in each record (`$expand=Media`) are taken. Only files that are new or
-/// changed (or failed earlier) *and* whose record is in this page are downloaded, so a signed
-/// URL is never older than one page. A file that fails stays pending and is fetched again when
-/// a later sync sees its record again.
-pub struct PageMedia<'a> {
+/// changed (or failed earlier) *and* whose record is in this page are queued. [`page`](Self::page)
+/// never waits for a download. A file that fails stays pending and is fetched again when a later
+/// sync sees its record again.
+pub struct PageMedia {
     nested_field: String,
-    dir: PathBuf,
-    store: Arc<dyn StateStore>,
-    server: String,
-    index: MediaIndex,
-    downloader: reso_client::Downloader<'a>,
-    report: MediaReport,
+    shared: Arc<Shared>,
+    tx: UnboundedSender<String>,
 }
 
-impl<'a> PageMedia<'a> {
-    /// Open the index of `server` and make a downloader
-    ///
-    /// # Errors
-    ///
-    /// [`IngestError::Output`] when the index is unreadable or the HTTP client cannot be built.
-    pub async fn new(
-        client: &'a ResoClient,
-        server: &str,
-        download: DownloadConfig,
-        state: Arc<dyn StateStore>,
-        media_dir: &Path,
-        nested_field: Option<&str>,
-    ) -> Result<Self, IngestError> {
-        let dir = media_dir.join(encode_name(server));
-        let index = MediaIndex::load(state.as_ref(), server).await?;
-        let downloader = client
-            .downloader(download)
-            .map_err(|e| output_error(&dir, e))?;
-        Ok(Self {
-            nested_field: nested_field.unwrap_or(DEFAULT_NESTED_FIELD).to_string(),
-            dir,
-            store: state,
-            server: server.to_string(),
-            index,
-            downloader,
-            report: MediaReport {
-                server: server.to_string(),
-                ..MediaReport::default()
-            },
-        })
-    }
-
-    /// Take in one written page of `resource` and download its pending files
+impl PageMedia {
+    /// Take in one written page of `resource`, queue its pending files and save the index
     ///
     /// # Errors
     ///
     /// [`IngestError::Output`] when the index cannot be saved.
     pub async fn page(&mut self, resource: &str, batch: &[Value]) -> Result<(), IngestError> {
         let mut keys = Vec::new();
-        for record in batch {
-            if resource == MEDIA_RESOURCE {
-                match key_string(&record[KEY_FIELD]) {
-                    Some(key) if self.index.add_record(record) => keys.push(key),
-                    _ => self.report.records_without_key += 1,
+        {
+            let mut index = lock(&self.shared.index);
+            let mut report = lock(&self.shared.report);
+            for record in batch {
+                if resource == MEDIA_RESOURCE {
+                    match key_string(&record[KEY_FIELD]) {
+                        Some(key) if index.add_record(record) => keys.push(key),
+                        _ => report.records_without_key += 1,
+                    }
+                    report.records += 1;
+                } else {
+                    report.records_without_key +=
+                        index.add_nested(record, &self.nested_field, &mut keys);
                 }
-                self.report.records += 1;
-            } else {
-                self.report.records_without_key +=
-                    self.index.add_nested(record, &self.nested_field, &mut keys);
             }
+            keys.sort();
+            keys.dedup();
+            keys.retain(|key| match index.entries.get(key) {
+                Some(e) if e.pending && e.url.is_none() => {
+                    report.without_url += 1;
+                    false
+                }
+                Some(e) => e.pending,
+                None => false,
+            });
+            let mut queued = lock(&self.shared.queued);
+            keys.retain(|key| queued.insert(key.clone()));
+            report.queued += keys.len() as u64;
         }
-        keys.sort();
-        keys.dedup();
         for key in keys {
-            let Some(entry) = self.index.entries.get_mut(&key) else {
-                continue;
-            };
-            if !entry.pending {
-                continue;
-            }
-            if entry.url.is_none() {
-                self.report.without_url += 1;
-                continue;
-            }
-            download_one(&self.downloader, &self.dir, &key, entry, &mut self.report).await;
+            // The workers are gone only after a shutdown: the file stays pending
+            let _ = self.tx.send(key);
         }
-        self.index.save(self.store.as_ref(), &self.server).await
+        self.shared.save().await
+    }
+}
+
+/// The download workers of one server; see [`page_pipeline`] and [`sync_media`]
+pub struct MediaWorkers<'a> {
+    shared: Arc<Shared>,
+    rx: tokio::sync::Mutex<UnboundedReceiver<String>>,
+    downloader: Downloader<'a>,
+    workers: usize,
+    shutdown: Shutdown,
+}
+
+impl MediaWorkers<'_> {
+    /// Download queued files until the queue is closed and empty (or a shutdown), then save the
+    /// index and return the report
+    pub async fn run(self) -> MediaReport {
+        self.run_with(None).await
     }
 
-    /// Final report: files still pending (their records were not seen again) and bytes
-    pub fn finish(mut self) -> MediaReport {
-        self.report.bytes = self.downloader.stats().bytes;
-        self.report.pending = self
-            .index
-            .entries
-            .values()
-            .filter(|e| e.pending && e.url.is_some())
-            .count() as u64;
-        self.report
+    async fn run_with(self, progress: Option<(&(dyn Fn(String) + Sync), u64)>) -> MediaReport {
+        let workers: Vec<_> = (0..self.workers)
+            .map(|_| Box::pin(self.worker(progress)))
+            .collect();
+        join_all(workers).await;
+        let save = self.shared.save().await;
+        let mut report = lock(&self.shared.report).clone();
+        report.bytes = self.downloader.stats().bytes;
+        report.pending = lock(&self.shared.index).pending();
+        if let Err(e) = save {
+            report.error.get_or_insert(e.to_string());
+        }
+        report
     }
+
+    async fn worker(&self, progress: Option<(&(dyn Fn(String) + Sync), u64)>) {
+        loop {
+            if self.shutdown.is_triggered() {
+                return;
+            }
+            let Some(key) = self.rx.lock().await.recv().await else {
+                return;
+            };
+            lock(&self.shared.queued).remove(&key);
+            if self.shutdown.is_triggered() {
+                return;
+            }
+            self.fetch(&key).await;
+            let n = self.shared.finished.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some((progress, total)) = progress {
+                if n == 1 || n.is_multiple_of(10) || n == total {
+                    progress(format!(
+                        "##progress step={n}/{total} label={}/media",
+                        self.shared.server
+                    ));
+                }
+            }
+            if n.is_multiple_of(SAVE_EVERY) {
+                if let Err(e) = self.shared.save().await {
+                    tracing::warn!(error = %e, "cannot save the media index");
+                }
+            }
+        }
+    }
+
+    /// Download one key's file and record the result
+    async fn fetch(&self, key: &str) {
+        let shared = &self.shared;
+        let job = {
+            let index = lock(&shared.index);
+            match index.entries.get(key) {
+                Some(e) if e.pending && e.url.is_some() => e.clone(),
+                _ => return,
+            }
+        };
+        let Some(url) = job.url.clone() else {
+            return;
+        };
+        // Validators only make sense while the stored copy is still there
+        let stored = match &job.file {
+            Some(f) => shared.store.exists(f).await.unwrap_or(false),
+            None => false,
+        };
+        let validators = match stored {
+            true => Validators {
+                etag: job.etag.clone(),
+                last_modified: job.last_modified.clone(),
+            },
+            false => Validators::default(),
+        };
+        let mut target = HashingTarget {
+            store: shared.store.as_ref(),
+            upload: None,
+            hasher: Sha256::new(),
+            content_type: None,
+            name: None,
+            stored_new: false,
+            error: None,
+        };
+        let outcome = self
+            .downloader
+            .download_into(&url, &validators, &mut target)
+            .await;
+
+        let mut orphans = Vec::new();
+        {
+            let mut index = lock(&shared.index);
+            let mut report = lock(&shared.report);
+            // The record changed (or was deleted) while this file was on its way: the newer job
+            // decides, this one only cleans up after itself
+            let current = index
+                .entries
+                .get(key)
+                .is_some_and(|e| e.stamp == job.stamp && (job.stamp.is_some() || e.url == job.url));
+            match outcome {
+                Ok(DownloadOutcome::NotModified) => {
+                    report.not_modified += 1;
+                    if let (true, Some(e)) = (current, index.entries.get_mut(key)) {
+                        e.pending = false;
+                        e.error = None;
+                    }
+                }
+                Ok(DownloadOutcome::Saved(saved)) => {
+                    let name = target.name.clone().unwrap_or_default();
+                    if job.file.as_deref() == Some(name.as_str()) {
+                        report.unchanged += 1;
+                    } else if target.stored_new {
+                        report.downloaded += 1;
+                    } else {
+                        report.shared += 1;
+                    }
+                    if current {
+                        orphans.extend(index.link(key, &name));
+                        if let Some(e) = index.entries.get_mut(key) {
+                            e.sha256 = target.name.as_deref().map(hash_of).map(str::to_owned);
+                            e.etag = saved.etag;
+                            e.last_modified = saved.last_modified;
+                            e.content_type = saved.content_type;
+                            e.bytes = Some(saved.bytes);
+                            e.pending = false;
+                            e.error = None;
+                        }
+                    } else if target.stored_new && index.references(&name) == 0 {
+                        orphans.push(name);
+                    }
+                }
+                Err(e) => {
+                    let error = target.error.take().unwrap_or_else(|| e.to_string());
+                    if is_expired(&e) {
+                        report.expired += 1;
+                    }
+                    report.failed.push(MediaFailure {
+                        key: key.to_string(),
+                        error: error.clone(),
+                    });
+                    if let (true, Some(entry)) = (current, index.entries.get_mut(key)) {
+                        entry.error = Some(error);
+                    }
+                }
+            }
+        }
+        shared.delete_files(orphans).await;
+    }
+}
+
+/// A signed or single-use URL that is no longer valid: 401, 403 or 410 from the file host
+fn is_expired(e: &ResoError) -> bool {
+    matches!(
+        e,
+        ResoError::Unauthorized { .. }
+            | ResoError::Forbidden { .. }
+            | ResoError::ODataError {
+                status_code: 410,
+                ..
+            }
+    )
+}
+
+/// Wait for every future (a minimal `join_all`, without the `futures` crate)
+async fn join_all<F: std::future::Future<Output = ()> + Unpin>(mut futures: Vec<F>) {
+    std::future::poll_fn(|cx| {
+        futures.retain_mut(|f| std::pin::Pin::new(f).poll(cx).is_pending());
+        if futures.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// Streams a body into a [`MediaUpload`] while hashing it; names the file `<sha256>.<ext>`
+struct HashingTarget<'s> {
+    store: &'s dyn MediaStore,
+    upload: Option<Box<dyn MediaUpload>>,
+    hasher: Sha256,
+    content_type: Option<String>,
+    /// Set by `finish`
+    name: Option<String>,
+    /// `finish` stored a new file (not one already there)
+    stored_new: bool,
+    /// The store's error text, kept whole for the report
+    error: Option<String>,
+}
+
+impl HashingTarget<'_> {
+    fn fail(&mut self, e: IngestError) -> ResoError {
+        let text = e.to_string();
+        self.error = Some(text.clone());
+        ResoError::Io(text)
+    }
+}
+
+impl DownloadTarget for HashingTarget<'_> {
+    async fn start(&mut self, file: &SavedFile) -> reso_client::Result<()> {
+        if let Some(mut old) = self.upload.take() {
+            let _ = old.abort().await;
+        }
+        self.hasher = Sha256::new();
+        self.content_type = file.content_type.clone();
+        self.upload = Some(self.store.upload());
+        Ok(())
+    }
+
+    async fn write(&mut self, chunk: &[u8]) -> reso_client::Result<()> {
+        self.hasher.update(chunk);
+        let result = match self.upload.as_mut() {
+            Some(up) => up.write(chunk).await,
+            None => return Err(ResoError::Io("upload not started".into())),
+        };
+        result.map_err(|e| self.fail(e))
+    }
+
+    async fn finish(&mut self) -> reso_client::Result<()> {
+        let hash = hex(&std::mem::take(&mut self.hasher).finalize());
+        let name = match self.content_type.as_deref().and_then(extension_for) {
+            Some(ext) => format!("{hash}.{ext}"),
+            None => hash,
+        };
+        let result = match self.upload.as_mut() {
+            Some(up) => up.finish(&name).await,
+            None => return Err(ResoError::Io("upload not started".into())),
+        };
+        self.upload = None;
+        let stored = result.map_err(|e| self.fail(e))?;
+        self.stored_new = stored;
+        self.name = Some(name);
+        Ok(())
+    }
+
+    async fn abort(&mut self) {
+        if let Some(mut up) = self.upload.take() {
+            let _ = up.abort().await;
+        }
+    }
+}
+
+/// The hash part of a stored name (`<sha256>.<ext>`)
+fn hash_of(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Where `sync_media` reads and writes
@@ -269,7 +684,7 @@ pub struct MediaFailure {
     pub error: String,
 }
 
-/// What `sync_media` did for one server
+/// What a media run did for one server
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MediaReport {
     /// Server name
@@ -282,16 +697,24 @@ pub struct MediaReport {
     pub records_without_key: u64,
     /// Data files listed in manifests but not read (not NDJSON)
     pub files_skipped: Vec<String>,
-    /// Files downloaded and saved
+    /// Files handed to the download workers
+    pub queued: u64,
+    /// Files downloaded and stored as new files
     pub downloaded: u64,
+    /// Files downloaded whose content was the one already stored for the key (nothing written)
+    pub unchanged: u64,
+    /// Files downloaded whose content another key's file already holds (stored once, shared)
+    pub shared: u64,
     /// Files the server said were unchanged (304)
     pub not_modified: u64,
-    /// Files removed after a delete event
+    /// Entries removed after a delete event
     pub deleted: u64,
     /// Entries with no `MediaURL` (nothing to download)
     pub without_url: u64,
     /// Files that failed; they stay pending for the next run
     pub failed: Vec<MediaFailure>,
+    /// Failures whose URL was refused as expired (401, 403 or 410); also in `failed`
+    pub expired: u64,
     /// Files still pending after this run (failures and those over `--limit`)
     pub pending: u64,
     /// Bytes downloaded
@@ -307,19 +730,12 @@ impl MediaReport {
     }
 }
 
-/// Download the new and changed media files of `server`
+/// Download the new and changed media files of `server` from earlier `sync` output
 ///
 /// Reads the NDJSON data files of the `Media` resource that the run manifests (`manifest.*.json`)
 /// in `options.out` list and that the [`MediaIndex`] has not seen, then downloads each pending
-/// `MediaURL` into `<media_dir>/<server>/`, named by [`encode_name`] of the `MediaKey` plus an
-/// extension from `Content-Type`.
-///
-/// A file is downloaded again when the record's `MediaModificationTimestamp` (or, when absent,
-/// `ModificationTimestamp`) changes. A changed URL alone does not count, because signed CDN URLs
-/// change on every pull; the index keeps the newest URL for the next download. A record with no
-/// timestamp at all is downloaded again when its URL changes. Re-downloads send the saved
-/// `ETag`/`Last-Modified`, so an unchanged file costs a 304. A delete event for a `MediaKey`
-/// removes its file and index entry.
+/// `MediaURL` with `workers` download workers (at least 1) into `<media_dir>/<server>/`, each file
+/// named by the SHA-256 of its content (`<sha256>.<ext>`) and stored once however many keys show it.
 ///
 /// Errors on single files are recorded in the report's `failed` list and the run goes on;
 /// an error that stops the whole server (an unreadable manifest or index) is the report's
@@ -328,32 +744,58 @@ pub async fn sync_media(
     client: &ResoClient,
     server: &str,
     download: DownloadConfig,
+    workers: usize,
     options: &MediaOptions,
-    progress: impl Fn(String),
+    progress: impl Fn(String) + Sync,
 ) -> MediaReport {
     let mut report = MediaReport {
         server: server.to_string(),
         ..MediaReport::default()
     };
-    if let Err(e) = run(client, server, download, options, &progress, &mut report).await {
-        report.error = Some(e.to_string());
+    let job = Job {
+        client,
+        server,
+        download,
+        workers,
+    };
+    match run(job, options, &progress, &mut report).await {
+        Ok(Some(done)) => done,
+        Ok(None) => report,
+        Err(e) => {
+            report.error = Some(e.to_string());
+            report
+        }
     }
-    report
+}
+
+/// One server's `sync_media`
+struct Job<'a> {
+    client: &'a ResoClient,
+    server: &'a str,
+    download: DownloadConfig,
+    workers: usize,
 }
 
 async fn run(
-    client: &ResoClient,
-    server: &str,
-    download: DownloadConfig,
+    job: Job<'_>,
     options: &MediaOptions,
-    progress: &impl Fn(String),
+    progress: &(dyn Fn(String) + Sync),
     report: &mut MediaReport,
-) -> Result<(), IngestError> {
-    let store = options.state.as_ref();
-    let mut index = MediaIndex::load(store, server).await?;
-    let dir = options.media_dir.join(encode_name(server));
+) -> Result<Option<MediaReport>, IngestError> {
+    let Job {
+        client,
+        server,
+        download,
+        workers: worker_count,
+    } = job;
+    let state = options.state.as_ref();
+    let mut index = MediaIndex::load(state, server).await?;
+    let store: Arc<dyn MediaStore> = Arc::new(crate::media_store::LocalMediaStore::new(
+        options.media_dir.join(encode_name(server)),
+    ));
 
     // 1. Read the Media data files not read before, oldest run first
+    let mut orphans = Vec::new();
     for name in media_files(&options.out, server)? {
         if index.read_files.contains(&name) {
             continue;
@@ -362,13 +804,22 @@ async fn run(
             report.files_skipped.push(name);
             continue;
         }
-        read_data_file(&options.out.join(&name), server, &mut index, &dir, report)?;
+        read_data_file(
+            &options.out.join(&name),
+            server,
+            &mut index,
+            &mut orphans,
+            report,
+        )?;
         index.read_files.insert(name);
         report.files_read += 1;
     }
-    index.save(store, server).await?;
+    index.save(state, server).await?;
+    for name in orphans {
+        store.delete(&name).await?;
+    }
 
-    // 2. Download what is pending
+    // 2. Download what is pending, with the worker pool
     let mut todo: Vec<String> = Vec::new();
     for (key, entry) in &index.entries {
         if !entry.pending {
@@ -383,103 +834,33 @@ async fn run(
     let total = options
         .limit
         .map_or(todo.len(), |n| todo.len().min(n as usize));
-    let downloader = client
-        .downloader(download)
-        .map_err(|e| output_error(&dir, e))?;
-    for (i, key) in todo.iter().take(total).enumerate() {
-        if i.is_multiple_of(10) {
-            progress(format!(
-                "##progress step={}/{total} label={server}/media",
-                i + 1
-            ));
-        }
-        let Some(entry) = index.entries.get_mut(key) else {
-            continue;
-        };
-        download_one(&downloader, &dir, key, entry, report).await;
-        if (i as u64 + 1).is_multiple_of(SAVE_EVERY) {
-            index.save(store, server).await?;
-        }
+    let pipeline = PipelineOptions {
+        state: Arc::clone(&options.state),
+        store,
+        nested_field: None,
+        workers: worker_count,
+        shutdown: Shutdown::new(),
+    };
+    let (tx, workers) = workers(client, server, download, &pipeline, index)?;
+    *lock(&workers.shared.report) = MediaReport {
+        queued: total as u64,
+        ..report.clone()
+    };
+    for key in todo.into_iter().take(total) {
+        let _ = tx.send(key);
     }
-    report.bytes = downloader.stats().bytes;
-    report.pending = index
-        .entries
-        .values()
-        .filter(|e| e.pending && e.url.is_some())
-        .count() as u64;
-    index.save(store, server).await
+    drop(tx);
+    let done = workers.run_with(Some((progress, total as u64))).await;
+    Ok(Some(done))
 }
 
-async fn download_one(
-    downloader: &reso_client::Downloader<'_>,
-    dir: &Path,
-    key: &str,
-    entry: &mut MediaEntry,
-    report: &mut MediaReport,
-) {
-    let Some(url) = entry.url.clone() else {
-        return;
-    };
-    let base = encode_name(key);
-    let old = entry.file.as_ref().map(|f| dir.join(f));
-    // Validators only make sense while the saved copy is still on disk
-    let validators = match &old {
-        Some(path) if path.exists() => Validators {
-            etag: entry.etag.clone(),
-            last_modified: entry.last_modified.clone(),
-        },
-        _ => Validators::default(),
-    };
-    let fail = |entry: &mut MediaEntry, report: &mut MediaReport, error: String| {
-        entry.error = Some(error.clone());
-        report.failed.push(MediaFailure {
-            key: key.to_string(),
-            error,
-        });
-    };
-
-    match downloader
-        .download_to(&url, &dir.join(&base), &validators)
-        .await
-    {
-        Ok(DownloadOutcome::NotModified) => {
-            entry.pending = false;
-            entry.error = None;
-            report.not_modified += 1;
-        }
-        Ok(DownloadOutcome::Saved(saved)) => {
-            let name = match saved.content_type.as_deref().and_then(extension_for) {
-                Some(ext) => format!("{base}.{ext}"),
-                None => base.clone(),
-            };
-            if name != base {
-                if let Err(e) = fs::rename(dir.join(&base), dir.join(&name)) {
-                    fail(entry, report, format!("cannot rename: {}", e.kind()));
-                    return;
-                }
-            }
-            if let Some(old) = old.filter(|p| *p != dir.join(&name)) {
-                let _ = fs::remove_file(old);
-            }
-            entry.file = Some(name);
-            entry.etag = saved.etag;
-            entry.last_modified = saved.last_modified;
-            entry.content_type = saved.content_type;
-            entry.bytes = Some(saved.bytes);
-            entry.pending = false;
-            entry.error = None;
-            report.downloaded += 1;
-        }
-        Err(e) => fail(entry, report, e.to_string()),
-    }
-}
-
-/// Apply one NDJSON data file to the index: records update entries, delete events remove files
+/// Apply one NDJSON data file to the index: records update entries, delete events remove
+/// entries (files no entry points at any more go to `orphans`)
 fn read_data_file(
     path: &Path,
     server: &str,
     index: &mut MediaIndex,
-    dir: &Path,
+    orphans: &mut Vec<String>,
     report: &mut MediaReport,
 ) -> Result<(), IngestError> {
     let file = fs::File::open(path).map_err(|e| output_error(path, e.kind()))?;
@@ -496,10 +877,8 @@ fn read_data_file(
         }
         if value["event"].as_str() == Some("delete") {
             if let Some(key) = key_string(&value["key"]) {
-                if let Some(entry) = index.entries.remove(&key) {
-                    if let Some(f) = entry.file {
-                        let _ = fs::remove_file(dir.join(f));
-                    }
+                if index.entries.contains_key(&key) {
+                    orphans.extend(index.remove(&key));
                     report.deleted += 1;
                 }
             }
@@ -605,9 +984,9 @@ fn extension_for(content_type: &str) -> Option<&'static str> {
     })
 }
 
-fn output_error(path: &Path, e: impl std::fmt::Display) -> IngestError {
+fn output_error(path: impl AsRef<Path>, e: impl std::fmt::Display) -> IngestError {
     IngestError::Output {
-        path: path.display().to_string(),
+        path: path.as_ref().display().to_string(),
         message: e.to_string(),
     }
 }

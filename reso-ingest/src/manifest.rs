@@ -291,8 +291,9 @@ pub async fn sync_resource(
     .await
 }
 
-/// [`sync_resource`] that also downloads the media files of each page right after the page is
-/// written and checkpointed (see [`PageMedia`]), so signed URLs are used while fresh
+/// [`sync_resource`] that also queues the media files of each page right after the page is
+/// written and checkpointed (see [`PageMedia`]), so signed URLs are used while fresh; the
+/// download workers fetch them while the next pages are pulled
 ///
 /// A media error (an unreadable or unwritable index) stops this resource and is recorded in the
 /// entry; single file failures are only in the [`PageMedia`] report.
@@ -305,7 +306,7 @@ pub async fn sync_resource_media(
     writer: &mut dyn RecordWriter,
     store: &CheckpointStore,
     start_over: bool,
-    media: Option<&mut PageMedia<'_>>,
+    media: Option<&mut PageMedia>,
     shutdown: &Shutdown,
 ) -> ResourceEntry {
     let setup = if start_over {
@@ -354,7 +355,7 @@ async fn pull(
     spec: StandardReplication,
     writer: &mut dyn RecordWriter,
     store: Option<&CheckpointStore>,
-    mut media: Option<&mut PageMedia<'_>>,
+    mut media: Option<&mut PageMedia>,
     shutdown: &Shutdown,
 ) -> ResourceEntry {
     let mut run = client.replicate(spec);

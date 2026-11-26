@@ -8,7 +8,7 @@
 //! put with `If-Match` on the ETag; on GCS both use `x-goog-if-generation-match` on the object
 //! generation, and a versioned delete is a `DELETE` with the same precondition. So a lease is held
 //! by exactly one worker. [`S3FileSink`] uploads finished output
-//! files to the same kind of bucket.
+//! files to the same kind of bucket, and [`S3MediaStore`] streams media files into it (#89).
 //!
 //! GCS through its S3 interoperability endpoint is refused: it accepts the S3 precondition headers
 //! and ignores them (#115, #130).
@@ -29,6 +29,7 @@ use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::IngestError;
+use crate::media_store::{part_name, MediaStore, MediaUpload};
 use crate::sink::FileSink;
 use crate::state::{StateStore, StoreFuture, Versioned};
 
@@ -817,6 +818,213 @@ impl S3FileSink {
     }
 }
 
+/// Media files up to this size are held in memory and stored with one conditional `PUT`; larger
+/// ones stream out as a multipart upload
+const MEDIA_BUFFER_MAX: usize = 8 * 1024 * 1024;
+
+/// A [`MediaStore`] in a bucket: one server's media files under `<prefix>/` (the command uses
+/// `<prefix>/media/<server>/`)
+///
+/// Files are streamed: a file up to 8 MiB is held in memory until complete (its content hash is
+/// its name) and then stored with one `PUT` that never replaces an existing object; a larger one
+/// goes up as a multipart upload to a temporary `.part-*` name, then is copied to its final name
+/// inside the store and the temporary object deleted. Nothing is written to local disk.
+#[derive(Clone)]
+pub struct S3MediaStore {
+    store: Arc<dyn ObjectStore>,
+    dir: ObjectPath,
+    label: String,
+}
+
+impl fmt::Debug for S3MediaStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3MediaStore")
+            .field("location", &self.label)
+            .finish()
+    }
+}
+
+impl S3MediaStore {
+    /// A store for the bucket in `options`, under its prefix
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when no client can be built (see [`S3Options`]).
+    pub fn new(options: &S3Options) -> Result<Self, IngestError> {
+        Self::with_store(
+            options.build()?.store,
+            &options.prefix,
+            options.location(""),
+        )
+    }
+
+    /// A store over any `object_store` implementation (tests use the in-memory one)
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when `prefix` is not a valid object path.
+    pub fn with_store(
+        store: Arc<dyn ObjectStore>,
+        prefix: &str,
+        label: String,
+    ) -> Result<Self, IngestError> {
+        let dir = ObjectPath::parse(prefix.trim_matches('/')).map_err(|e| IngestError::Output {
+            path: label.clone(),
+            message: chain(&e),
+        })?;
+        Ok(Self { store, dir, label })
+    }
+
+    fn error(label: &str, name: &str, e: impl fmt::Display) -> IngestError {
+        IngestError::Output {
+            path: format!("{}/{name}", label.trim_end_matches('/')),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl MediaStore for S3MediaStore {
+    fn upload(&self) -> Box<dyn MediaUpload> {
+        Box::new(S3Upload {
+            store: Arc::clone(&self.store),
+            dir: self.dir.clone(),
+            label: self.label.clone(),
+            buf: Vec::new(),
+            multipart: None,
+        })
+    }
+
+    fn exists<'a>(&'a self, name: &'a str) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            match self.store.head(&self.dir.clone().join(name)).await {
+                Ok(_) => Ok(true),
+                Err(ObjectError::NotFound { .. }) => Ok(false),
+                Err(e) => Err(Self::error(&self.label, name, chain(&e))),
+            }
+        })
+    }
+
+    fn delete<'a>(&'a self, name: &'a str) -> StoreFuture<'a, ()> {
+        Box::pin(async move {
+            match self.store.delete(&self.dir.clone().join(name)).await {
+                Ok(()) | Err(ObjectError::NotFound { .. }) => Ok(()),
+                Err(e) => Err(Self::error(&self.label, name, chain(&e))),
+            }
+        })
+    }
+
+    fn list(&self) -> StoreFuture<'_, Vec<(String, u64)>> {
+        Box::pin(async move {
+            let metas: Vec<_> = self
+                .store
+                .list(Some(&self.dir))
+                .try_collect()
+                .await
+                .map_err(|e| Self::error(&self.label, "", chain(&e)))?;
+            let skip = self.dir.parts().count();
+            let mut files: Vec<(String, u64)> = metas
+                .into_iter()
+                .filter_map(|m| {
+                    let mut parts = m.location.parts().skip(skip);
+                    let name = parts.next()?.as_ref().to_string();
+                    parts.next().is_none().then_some((name, m.size))
+                })
+                .collect();
+            files.sort();
+            Ok(files)
+        })
+    }
+
+    fn location(&self, name: &str) -> String {
+        match name.is_empty() {
+            true => self.label.clone(),
+            false => format!("{}/{name}", self.label.trim_end_matches('/')),
+        }
+    }
+}
+
+/// One media file on its way into a bucket: in memory, or a multipart upload past 8 MiB
+struct S3Upload {
+    store: Arc<dyn ObjectStore>,
+    dir: ObjectPath,
+    label: String,
+    buf: Vec<u8>,
+    multipart: Option<(WriteMultipart, ObjectPath)>,
+}
+
+impl MediaUpload for S3Upload {
+    fn write<'a>(&'a mut self, chunk: &'a [u8]) -> StoreFuture<'a, ()> {
+        Box::pin(async move {
+            let error = |e: ObjectError| S3MediaStore::error(&self.label, "upload", chain(&e));
+            if self.multipart.is_none() {
+                self.buf.extend_from_slice(chunk);
+                if self.buf.len() <= MEDIA_BUFFER_MAX {
+                    return Ok(());
+                }
+                let staging = self.dir.clone().join(part_name());
+                let upload = self.store.put_multipart(&staging).await.map_err(error)?;
+                let mut writer = WriteMultipart::new_with_chunk_size(upload, PART_SIZE);
+                writer.write(&std::mem::take(&mut self.buf));
+                self.multipart = Some((writer, staging));
+            } else if let Some((writer, _)) = self.multipart.as_mut() {
+                writer.write(chunk);
+            }
+            if let Some((writer, _)) = self.multipart.as_mut() {
+                writer.wait_for_capacity(4).await.map_err(error)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn finish<'a>(&'a mut self, name: &'a str) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            let error = |e: ObjectError| S3MediaStore::error(&self.label, name, chain(&e));
+            let dest = self.dir.clone().join(name);
+            let Some((writer, staging)) = self.multipart.take() else {
+                let payload = PutPayload::from(std::mem::take(&mut self.buf));
+                return match self
+                    .store
+                    .put_opts(&dest, payload, PutMode::Create.into())
+                    .await
+                {
+                    Ok(_) => Ok(true),
+                    Err(ObjectError::AlreadyExists { .. } | ObjectError::Precondition { .. }) => {
+                        Ok(false)
+                    }
+                    Err(e) => Err(error(e)),
+                };
+            };
+            writer.finish().await.map_err(error)?;
+            let stored = match self.store.head(&dest).await {
+                Ok(_) => false,
+                Err(ObjectError::NotFound { .. }) => {
+                    if let Err(e) = self.store.copy(&staging, &dest).await {
+                        let _ = self.store.delete(&staging).await;
+                        return Err(error(e));
+                    }
+                    true
+                }
+                Err(e) => {
+                    let _ = self.store.delete(&staging).await;
+                    return Err(error(e));
+                }
+            };
+            self.store.delete(&staging).await.map_err(error)?;
+            Ok(stored)
+        })
+    }
+
+    fn abort(&mut self) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            self.buf = Vec::new();
+            if let Some((writer, _)) = self.multipart.take() {
+                let _ = writer.abort().await;
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Run an async call from synchronous code inside a multi-threaded Tokio runtime
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
@@ -1181,5 +1389,57 @@ mod tests {
             assert!(std::fs::read(&dest).unwrap() == bytes, "size {size}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[tokio::test]
+    async fn media_files_stream_in_whole_or_in_parts_and_are_stored_once() {
+        let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let media =
+            S3MediaStore::with_store(Arc::clone(&mem), "p/media/srv", "s3://b/p/media/srv".into())
+                .unwrap();
+        for (name, size) in [("small.jpg", 10usize), ("big.mp4", MEDIA_BUFFER_MAX + 7)] {
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let mut up = media.upload();
+            for chunk in bytes.chunks(1024 * 1024) {
+                up.write(chunk).await.unwrap();
+            }
+            assert!(up.finish(name).await.unwrap(), "{name}");
+            let got = mem
+                .get(&ObjectPath::from(format!("p/media/srv/{name}")))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            assert!(got.as_ref() == bytes.as_slice(), "{name}");
+            // The same name again is not stored a second time
+            let mut again = media.upload();
+            for chunk in bytes.chunks(1024 * 1024) {
+                again.write(chunk).await.unwrap();
+            }
+            assert!(!again.finish(name).await.unwrap(), "{name}");
+        }
+        // No temporary objects are left
+        let names: Vec<String> = media
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.0)
+            .collect();
+        assert_eq!(names, ["big.mp4", "small.jpg"]);
+        assert!(media.exists("small.jpg").await.unwrap());
+        media.delete("small.jpg").await.unwrap();
+        media.delete("small.jpg").await.unwrap();
+        assert!(!media.exists("small.jpg").await.unwrap());
+
+        let mut dropped = media.upload();
+        dropped
+            .write(&vec![1u8; MEDIA_BUFFER_MAX + 1])
+            .await
+            .unwrap();
+        dropped.abort().await.unwrap();
+        assert_eq!(media.list().await.unwrap().len(), 1);
+        assert_eq!(media.location("x"), "s3://b/p/media/srv/x");
+        assert!(format!("{media:?}").contains("s3://b/p/media/srv"));
     }
 }

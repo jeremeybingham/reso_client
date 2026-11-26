@@ -36,8 +36,9 @@ field names are plain strings and records are raw JSON, so any server schema wor
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
 - `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is finished.
 - Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output), and
-  `reso-ingest sync --media` downloads them page by page during the sync, including `Media` arrays expanded inside other
-  records. Checked against the reference server's `Media` records, not yet against a vendor's file host (signed
+  `reso-ingest sync --media` queues them page by page for its own download workers during the sync (a slow file host
+  does not slow the sync), including `Media` arrays expanded inside other records; each file is stored once, by its
+  content hash, in a directory or a bucket. Checked against the reference server's `Media` records, not yet against a vendor's file host (signed
   single-use URLs, media limits).
 - Vendor differences taken from public documentation (MLS Grid, Trestle) are supported but unconfirmed until #32: a
   filter required on every request, related records served only by `$expand`, deletes signalled by a flag field
@@ -129,7 +130,7 @@ What else the client does:
   navigation properties, enum types.
 - File downloads (`ResoClient::downloader`): a `Downloader` with its own retries, rate limit, timeout and counters,
   so `Media` files do not use up the API's budget. Each download is a conditional GET (`ETag`, `Last-Modified`) written
-  to a `.part` file and renamed when complete; the API token goes only to the API's own host unless `SendToken` says
+  to a `.part` file and renamed when complete (`download_into` streams to any `DownloadTarget` instead); the API token goes only to the API's own host unless `SendToken` says
   otherwise.
 - Bridge Interactive's `/replication` endpoint and `dataset_id` path segment, as a vendor mode.
 - Typed errors (`ResoError`: `Unauthorized`, `RateLimited`, `ODataError`, `Network` and others); secrets are never
@@ -177,7 +178,7 @@ let client = ResoClient::with_config(config)?;
 
 ```sh
 cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server
-cargo run -p reso-ingest -- sync --config servers.toml --media        # same, downloading each page's media files as it goes
+cargo run -p reso-ingest -- sync --config servers.toml --media        # same, downloading each page's media files alongside
 cargo run -p reso-ingest -- media --config servers.toml --out data/   # download new and changed Media files
 cargo run -p reso-ingest -- serve --config servers.toml --listen 127.0.0.1:9090   # daemon: per-resource intervals, /healthz /readyz /metrics /status
 cargo run -p reso-ingest -- discover --config servers.toml            # each server's $metadata model as JSON

@@ -353,10 +353,16 @@ async fn a_failed_copy_to_the_bucket_keeps_the_local_record() {
     }
     let sink = RemoteRefusingPuts(reso_ingest::LocalDirSink::new(&bucket).unwrap());
     let state: Arc<dyn StateStore> = Arc::new(FileStateStore::new(out.join("state")));
-    let outcome =
-        reso_ingest::execute_purge("alpha", &out, Some(&sink), &out.join("media"), &state, "t")
-            .await
-            .unwrap();
+    let outcome = reso_ingest::execute_purge(
+        "alpha",
+        &out,
+        Some(&sink),
+        &reso_ingest::LocalMediaStore::new(out.join("media").join("alpha")),
+        &state,
+        "t",
+    )
+    .await
+    .unwrap();
     let reso_ingest::PurgeOutcome::Done {
         record,
         path,

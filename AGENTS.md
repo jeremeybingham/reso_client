@@ -68,7 +68,7 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 ```
 src/lib.rs          public API, re-exports, crate docs
 src/client.rs       ResoClient, ClientConfig, HTTP operations
-src/download.rs     Downloader, DownloadConfig, SendToken: file downloads with their own limits (Media files)
+src/download.rs     Downloader, DownloadConfig, SendToken, DownloadTarget: file downloads with their own limits (Media files), to a path or streamed to a target
 src/auth.rs         Auth, ClientCredentials, token fetch, cache and renewal (OAuth2 client credentials)
 src/queries.rs      QueryBuilder, Query, ReplicationQueryBuilder
 src/metadata.rs     Metadata model parsed from $metadata (roxmltree): entity sets, types, keys, properties, enums
@@ -87,7 +87,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/manifest.rs   RunManifest, pull_resource, sync_resource, sync_resource_media
   src/state.rs      StateStore: async key-value trait with conditional writes (state backends, #85); FileStateStore
   src/sink.rs       FileSink (put_file, exists; list, get_file, delete for purge, #139), LocalDirSink: where finished data files go; writers take one with `with_sink` (#85, S3 in #107)
-  src/s3.rs         S3Options, Provider, S3StateStore, S3FileSink: state and data files in an S3-compatible or GCS bucket via `object_store` (feature `s3`; `--s3-*` and `--gcs-bucket` options, #107, #130)
+  src/s3.rs         S3Options, Provider, S3StateStore, S3FileSink, S3MediaStore: state, data and media files in an S3-compatible or GCS bucket via `object_store` (feature `s3`; `--s3-*` and `--gcs-bucket` options, #107, #130)
   src/audit.rs      AccessLog, AccessEntry: append-only `audit/access.ndjson`, one line per resource pull (#93); per-run copy to the sink
   src/purge.rs      plan_purge, execute_purge, PurgeRecord: `purge` of one server's files, media and state; record + SHA-256 in audit/ (#93); in a bucket too (#139)
   src/runs.rs       run id reservation in the state store (stale ones swept after 7 days), manifest delivery to the sink, `runs/last.json` for `status` (with a sink only)
@@ -101,17 +101,18 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
                     `sync` skips a feed another process holds
   src/deletes.rs    reconcile_deletes, EventFeed, FlagDeleteWriter: delete events by key diff, EntityEvent or flag field;
                     DeleteLimits holds a mass delete back (`--allow-mass-deletes` releases it)
-  src/media.rs      sync_media, MediaIndex, MediaManifest, PageMedia: Media files from sync output (`media`) or per page (`sync --media`)
+  src/media.rs      sync_media, page_pipeline, MediaIndex, MediaManifest, PageMedia, MediaWorkers: Media files from sync output (`media`) or per page (`sync --media`) with a worker pool; files named by SHA-256 (#89)
+  src/media_store.rs  MediaStore, MediaUpload, LocalMediaStore, MediaRoot: where media files go (a directory; S3MediaStore in s3.rs)
   src/cli.rs, main.rs  the `reso-ingest` binary (sync, serve, media, discover, status, purge); run() takes writers so tests run in-process,
                     run_main() also installs the log subscriber
   src/logging.rs    LogFormat, log_subscriber: text or JSON log lines, RUST_LOG filter; run/server/resource spans
-  src/metrics.rs    render_prometheus: freshness lag and per-run metrics as Prometheus text; write_metrics_file; parse_rfc3339
+  src/metrics.rs    render_prometheus: freshness lag and per-run metrics as Prometheus text; render_media_prometheus (media counts); write_metrics_file; parse_rfc3339
   src/checks.rs     SchemaSnapshot ($metadata diff), CheckingWriter (repeated keys), count_warning; findings are warnings
   src/webhook.rs    run_summary, post_summary: the run-summary webhook (URL from `webhook_url_env`)
   src/error.rs      IngestError
   examples/loadtest.rs  load-test harness (#90): fake server with 1M records, faults, kill and resume; results in LOADTEST.md
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
-  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a `purge` in the bucket, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
+  servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a `purge` in the bucket, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket and `sync --media` into a bucket with its purge, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media; media_scale_tests.rs for many media records, dedupe and a slow file host (#89);
                     log_json.rs for JSON log lines, own binary; run_main.rs for the log format and global subscriber of run_main, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; audit_tests.rs for the access log; purge_tests.rs for purge; lease_tests.rs for held feeds; backfill_tests.rs for sync --backfill; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon;
                     secret_rotation.rs for rotated secret files and no secrets in logs, own binary)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),

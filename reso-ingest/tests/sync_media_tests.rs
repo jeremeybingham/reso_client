@@ -85,8 +85,9 @@ async fn server(records: Arc<Mutex<Vec<Value>>>) -> MockServer {
                     return ResponseTemplate::new(429);
                 }
                 seen.push(uri);
-                return ResponseTemplate::new(200)
-                    .set_body_raw(path.as_bytes().to_vec(), "image/jpeg");
+                // The body changes with the signature, so a changed record brings a new file
+                let body = format!("{path}?{}", req.url.query().unwrap_or(""));
+                return ResponseTemplate::new(200).set_body_raw(body.into_bytes(), "image/jpeg");
             }
             ResponseTemplate::new(404)
         })
@@ -176,8 +177,19 @@ async fn nested_media_are_downloaded_during_sync_and_single_use_urls_are_not_ret
     assert_eq!(code, 0, "{stdout}{err}");
     assert!(stdout.contains("2 downloaded"), "{stdout}");
     let files = out.join("media/srv");
-    assert_eq!(std::fs::read(files.join("M1.jpg")).unwrap(), b"/files/m1");
-    assert!(files.join("M2.jpg").exists());
+    let index = MediaIndex::load(&FileStateStore::new(out.join("state")), "srv")
+        .await
+        .unwrap();
+    let name = |key: &str| index.entries[key].file.clone().unwrap();
+    assert_eq!(
+        name("M1"),
+        format!("{}.jpg", reso_ingest::sha256_hex(b"/files/m1?sig=1"))
+    );
+    assert_eq!(
+        std::fs::read(files.join(name("M1"))).unwrap(),
+        b"/files/m1?sig=1"
+    );
+    assert!(files.join(name("M2")).exists());
     assert!(out.read_dir().unwrap().any(|e| e
         .unwrap()
         .file_name()
@@ -206,6 +218,8 @@ async fn nested_media_are_downloaded_during_sync_and_single_use_urls_are_not_ret
         file_requests(&server.received_requests().await.unwrap(), "/files/"),
         3
     );
+    // The old file of M1 is gone, the new one and M2's remain
+    assert_eq!(std::fs::read_dir(&files).unwrap().count(), 2);
 
     // Run 4: M1 changes again, but the host refuses its URL (single use already spent)
     {
@@ -263,7 +277,7 @@ async fn sync_without_media_flag_downloads_nothing() {
 #[tokio::test]
 async fn top_level_media_pages_count_records_without_key_or_url() {
     use reso_client::{ClientConfig, DownloadConfig, ResoClient};
-    use reso_ingest::{PageMedia, MEDIA_RESOURCE};
+    use reso_ingest::{page_pipeline, LocalMediaStore, PipelineOptions, Shutdown, MEDIA_RESOURCE};
 
     let srv = MockServer::start().await;
     Mock::given(method("GET"))
@@ -280,19 +294,21 @@ async fn top_level_media_pages_count_records_without_key_or_url() {
         json!({"MediaURL": url}),
         json!({"MediaKey": "B"}),
     ];
-    let mut media = PageMedia::new(
-        &client,
-        "mls",
-        DownloadConfig::default(),
-        Arc::clone(&state),
-        &dir.join("media"),
-        None,
-    )
-    .await
-    .unwrap();
+    let options = PipelineOptions {
+        state: Arc::clone(&state),
+        store: Arc::new(LocalMediaStore::new(dir.join("media").join("mls"))),
+        nested_field: None,
+        workers: 2,
+        shutdown: Shutdown::new(),
+    };
+    let (mut media, workers) = page_pipeline(&client, "mls", DownloadConfig::default(), options)
+        .await
+        .unwrap();
     media.page(MEDIA_RESOURCE, &batch).await.unwrap();
     media.page(MEDIA_RESOURCE, &batch[..1]).await.unwrap();
-    let report = media.finish();
+    drop(media);
+    let report = workers.run().await;
+    assert_eq!(report.queued, 1, "{report:?}");
     assert_eq!(report.records, 4);
     assert_eq!(report.records_without_key, 1);
     assert_eq!(report.without_url, 1);
