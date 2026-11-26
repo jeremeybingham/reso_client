@@ -9,7 +9,9 @@
 //! failure stands.
 //!
 //! A new client starts with an empty rate-limit window and fresh counters; rotation is rare, so
-//! this is accepted. Secret values are compared in memory and never logged.
+//! this is accepted. The same holds when the handle's rate share changes
+//! ([`ClientHandle::set_rate_percent`], while a backfill of the server runs, #88). Secret values are
+//! compared in memory and never logged.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -54,6 +56,10 @@ pub struct ClientHandle {
 struct Current {
     client: Arc<ResoClient>,
     secrets: Secrets,
+    /// Percent of the configured rate limits the client was built with
+    percent: u8,
+    /// Percent the next client should have
+    wanted: u8,
 }
 
 impl std::fmt::Debug for ClientHandle {
@@ -81,12 +87,32 @@ impl ClientHandle {
     ) -> Result<Self, IngestError> {
         let lookup: Arc<Lookup> = Arc::new(lookup);
         let secrets = server.read_secrets(lookup.as_ref())?;
-        let client = build(server, &secrets)?;
+        let client = build(server, &secrets, 100)?;
         Ok(Self {
             server: server.clone(),
             lookup,
-            current: Mutex::new(Current { client, secrets }),
+            current: Mutex::new(Current {
+                client,
+                secrets,
+                percent: 100,
+                wanted: 100,
+            }),
         })
+    }
+
+    /// Use `percent` of the configured rate limits from the next [`client`](Self::client) on (100
+    /// is all of them); a change builds a new client, whose rate-limit window starts empty
+    pub(crate) fn set_rate_percent(&self, percent: u8) {
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        current.wanted = percent.clamp(1, 100);
+    }
+
+    /// The percent of the rate limits the current client was built with
+    pub(crate) fn rate_percent(&self) -> u8 {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .percent
     }
 
     /// The client to use now: the secrets are read again, and a new client is built when one changed
@@ -124,17 +150,25 @@ impl ClientHandle {
                 return (Arc::clone(&current.client), false);
             }
         };
-        if secrets == current.secrets {
+        let secrets_changed = secrets != current.secrets;
+        if !secrets_changed && current.percent == current.wanted {
             return (Arc::clone(&current.client), false);
         }
-        match build(&self.server, &secrets) {
+        let percent = current.wanted;
+        match build(&self.server, &secrets, percent) {
             Ok(client) => {
-                tracing::info!(server = %self.server.name, "secrets changed: using a new client");
+                if secrets_changed {
+                    tracing::info!(server = %self.server.name, "secrets changed: using a new client");
+                } else {
+                    tracing::info!(server = %self.server.name, rate_percent = percent, "rate share changed: using a new client");
+                }
                 *current = Current {
                     client: Arc::clone(&client),
                     secrets,
+                    percent,
+                    wanted: percent,
                 };
-                (client, true)
+                (client, secrets_changed)
             }
             Err(e) => {
                 tracing::warn!(server = %self.server.name, error = %e, "cannot build a client with the changed secrets; keeping the current one");
@@ -144,8 +178,12 @@ impl ClientHandle {
     }
 }
 
-fn build(server: &ServerConfig, secrets: &Secrets) -> Result<Arc<ResoClient>, IngestError> {
-    let config = server.client_config_from(secrets)?;
+fn build(
+    server: &ServerConfig,
+    secrets: &Secrets,
+    percent: u8,
+) -> Result<Arc<ResoClient>, IngestError> {
+    let config = server.client_config_share(secrets, percent)?;
     ResoClient::with_config(config)
         .map(Arc::new)
         .map_err(|e| IngestError::Server {

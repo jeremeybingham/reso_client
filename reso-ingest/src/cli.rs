@@ -18,12 +18,13 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tracing::Instrument;
 
 use crate::audit::{credential_id, AccessEntry, AccessLog};
+use crate::backfill::{self, BackfillEntry, BackfillWindow, ProgressWriter};
 use crate::checkpoint::CheckpointStore;
 use crate::checks::{count_warning, CheckingWriter, SchemaSnapshot};
 use crate::config::{Config, ServerConfig};
 use crate::deletes::{reconcile_deletes, DeleteTarget, EventFeed, FlagDeleteWriter};
 use crate::error::IngestError;
-use crate::lease::{Lease, LeaseOutcome};
+use crate::lease::{live_leases, Lease, LeaseHolder, LeaseOutcome};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
 use crate::manifest::{sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
 use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
@@ -104,6 +105,25 @@ enum Command {
         /// Delete the saved checkpoints of the selected resources first
         #[arg(long)]
         start_over: bool,
+        /// Backfill: report progress and time left, and run within the backfill's share of the
+        /// rate limits ([server.backfill] rate_percent)
+        ///
+        /// Asks the server's count of the records left, prints `##progress` lines after every
+        /// page, and holds a marker other syncs of the server see: while it runs they use the rest
+        /// of the rate limits, and they do not start a full load of a feed it is loading. Stops and
+        /// resumes like any sync.
+        #[arg(long)]
+        backfill: bool,
+        /// Backfill only records with ModificationTimestamp at or after this time (RFC 3339)
+        ///
+        /// A window has its own checkpoint, so windows can run on separate workers. A window with
+        /// no --to ends at the present; when it finishes and the feed has no checkpoint yet, its
+        /// checkpoint becomes the feed's.
+        #[arg(long, requires = "backfill", conflicts_with = "deletes")]
+        from: Option<String>,
+        /// Backfill only records with ModificationTimestamp before this time (RFC 3339)
+        #[arg(long, requires = "backfill", conflicts_with = "deletes")]
+        to: Option<String>,
         /// Start a new data file after this many MiB
         #[arg(long, default_value_t = DEFAULT_MAX_FILE_MB, value_parser = clap::value_parser!(u64).range(1..))]
         max_file_mb: u64,
@@ -321,6 +341,7 @@ struct Args {
     allow_mass_deletes: bool,
     media: bool,
     start_over: bool,
+    backfill: Option<BackfillWindow>,
     max_file_mb: Option<u64>,
     format: Format,
     media_dir: Option<PathBuf>,
@@ -549,11 +570,21 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             media,
             media_dir,
             start_over,
+            backfill,
+            from,
+            to,
             max_file_mb,
             format,
             metrics_file,
             storage,
         } => {
+            let backfill = match backfill.then(|| BackfillWindow::new(from, to)).transpose() {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = writeln!(err, "error: {e}");
+                    return 2;
+                }
+            };
             let args = Args {
                 config: Some(config),
                 servers,
@@ -565,6 +596,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 media,
                 media_dir,
                 start_over,
+                backfill,
                 max_file_mb: Some(max_file_mb),
                 format,
                 metrics_file,
@@ -800,6 +832,8 @@ pub(crate) struct SyncOptions {
     pub(crate) allow_mass_deletes: bool,
     pub(crate) media: Option<PathBuf>,
     pub(crate) start_over: bool,
+    /// `sync --backfill` and its window
+    pub(crate) backfill: Option<BackfillWindow>,
     pub(crate) max_file_bytes: u64,
     pub(crate) format: Format,
     /// Where finished data files go; `None` leaves them in `out`
@@ -838,6 +872,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
                 .unwrap_or_else(|| args.out().join("media"))
         }),
         start_over: args.start_over,
+        backfill: args.backfill.clone(),
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
         format: args.format,
         access: AccessLog::new(&args.out()),
@@ -982,6 +1017,7 @@ pub(crate) async fn sync_server_with(
                 .get_or_insert_with(|| format!("access log: {e}"));
         }
     };
+    let mut backfills = apply_rate_share(handle, &server, &options, &tx).await;
     let mut client = handle.client();
     let metadata = match client.fetch_metadata_model().await {
         Ok(m) => Ok(m),
@@ -1070,10 +1106,37 @@ pub(crate) async fn sync_server_with(
             continue;
         };
 
-        // One writer per feed: a second process syncing this server and resource skips it
-        let lease = match Lease::acquire(&options.state, &name, resource, LEASE_TTL).await {
-            Ok(LeaseOutcome::Acquired(lease)) => lease,
-            Ok(LeaseOutcome::Held(holder)) => {
+        if i > 0 {
+            backfills = apply_rate_share(handle, &server, &options, &tx).await;
+        }
+        // A feed with no checkpoint is left to the backfill loading it
+        let store_main = store.clone();
+        if options.backfill.is_none()
+            && backfills
+                .iter()
+                .any(|b| backfill::is_marker(b, Some(resource)))
+            && matches!(store_main.load(&name, resource).await, Ok(None))
+        {
+            let message = "skipped: a backfill is loading this feed".to_string();
+            span.in_scope(|| tracing::warn!("feed skipped: a backfill is loading it"));
+            send(&tx, format!("[{label}] {message}"));
+            let mut entry = failed_entry(&name, resource, "");
+            entry.error = None;
+            entry.warnings.push(message);
+            entries.push(entry);
+            continue;
+        }
+
+        // One writer per feed: a second process syncing this server and resource skips it. A
+        // backfill also holds its marker; a window holds only its marker (its checkpoint is its own).
+        let lease_names: Vec<String> = match &options.backfill {
+            None => vec![resource.clone()],
+            Some(w) if w.is_whole() => vec![resource.clone(), w.marker(resource)],
+            Some(w) => vec![w.marker(resource)],
+        };
+        let leases = match take_leases(&options.state, &name, &lease_names).await {
+            Ok(Ok(leases)) => leases,
+            Ok(Err(holder)) => {
                 let message = format!("skipped: another process is syncing this feed ({holder})");
                 span.in_scope(
                     || tracing::warn!(%holder, "feed skipped: leased by another process"),
@@ -1107,14 +1170,25 @@ pub(crate) async fn sync_server_with(
                 let mut entry = failed_entry(&name, resource, &e.to_string());
                 audit(&mut entry, None);
                 entries.push(entry);
-                lease.release().await;
+                release(leases).await;
                 continue;
             }
         };
         let started = std::time::Instant::now();
         client = handle.client();
         let mut stats_before = client.stats();
-        let filter = server.filter_for(resource);
+        let filter = join_filters(
+            server.filter_for(resource),
+            options
+                .backfill
+                .as_ref()
+                .and_then(|w| w.filter(TIMESTAMP_FIELD)),
+        );
+        // A backfill window keeps its own checkpoint
+        let store = match &options.backfill {
+            Some(w) => store_main.scoped(&w.checkpoint_suffix()),
+            None => store_main.clone(),
+        };
         let mut spec = StandardReplication::new(resource, &plan.key);
         if let Some(n) = server.page_size_for(resource) {
             spec = spec.page_size(n);
@@ -1133,11 +1207,55 @@ pub(crate) async fn sync_server_with(
         // A full load when there is no checkpoint to start from
         let saved = store.load(&name, resource).await;
         let full_load = options.start_over || matches!(saved, Ok(None) | Err(_));
-        let window_start = match saved {
-            Ok(Some(c)) if !full_load => Some(c.timestamp),
+        let window_start = match &saved {
+            Ok(Some(c)) if !full_load => Some(c.timestamp.clone()),
             _ => None,
         };
-        let mut checked = CheckingWriter::new(writer.as_mut(), &plan.key);
+        let backfill_entry = match &options.backfill {
+            Some(w) => {
+                let mut filters: Vec<String> = filter.iter().cloned().collect();
+                if let Ok(Some(cp)) = &saved {
+                    if !options.start_over {
+                        filters.push(backfill::after_checkpoint(cp, TIMESTAMP_FIELD, &plan.key));
+                    }
+                }
+                let remaining = backfill::count(&client, resource, &filters)
+                    .instrument(span.clone())
+                    .await;
+                let rate_percent = handle.rate_percent();
+                span.in_scope(|| {
+                    tracing::info!(remaining, rate_percent, from = ?w.from, to = ?w.to, "backfill started")
+                });
+                send(
+                    &tx,
+                    format!(
+                        "[{label}] backfill: {} records left, {rate_percent}% of the rate limits",
+                        remaining.map_or("unknown".into(), |n| n.to_string())
+                    ),
+                );
+                Some(BackfillEntry {
+                    from: w.from.clone(),
+                    to: w.to.clone(),
+                    remaining_at_start: remaining,
+                    rate_percent,
+                })
+            }
+            None => None,
+        };
+        let mut progress;
+        let inner: &mut dyn RecordWriter = match &backfill_entry {
+            Some(b) => {
+                progress = ProgressWriter::new(
+                    writer.as_mut(),
+                    tx.clone(),
+                    format!("##progress step={}/{total} label={label}", i + 1),
+                    b.remaining_at_start,
+                );
+                &mut progress
+            }
+            None => writer.as_mut(),
+        };
+        let mut checked = CheckingWriter::new(inner, &plan.key);
         let mut pull = Pull {
             handle,
             client: &mut client,
@@ -1160,6 +1278,13 @@ pub(crate) async fn sync_server_with(
             pull.run(&mut checked).await
         };
         entry.warnings = checked.warnings();
+        entry.backfill = backfill_entry;
+        if let Some(w) = options.backfill.as_ref().filter(|w| !w.is_whole()) {
+            if w.to.is_none() && entry.error.is_none() && !entry.interrupted {
+                hand_over_checkpoint(&store, &store_main, &name, resource, &span, &tx, &label)
+                    .await;
+            }
+        }
         if full_load && entry.error.is_none() && !entry.interrupted {
             // A full load should hold what the server counts (servers without $count are skipped)
             let written = entry.records;
@@ -1233,9 +1358,143 @@ pub(crate) async fn sync_server_with(
         );
         audit(&mut entry, window_start);
         entries.push(entry);
-        lease.release().await;
+        release(leases).await;
     }
     Ok((entries, page_media.map(PageMedia::finish), schema_changes))
+}
+
+/// Set the rate share of `handle` for what this sync is about to do, and return the marker leases
+/// of the backfills of this server running now (empty for a backfill itself)
+///
+/// A backfill uses `[server.backfill] rate_percent` of the rate limits; any other sync uses the
+/// rest while a backfill of the server runs, else all of them (#88).
+async fn apply_rate_share(
+    handle: &ClientHandle,
+    server: &ServerConfig,
+    options: &SyncOptions,
+    tx: &UnboundedSender<String>,
+) -> Vec<String> {
+    let share = server.backfill.rate_percent();
+    let (percent, running) = if options.backfill.is_some() {
+        (share, Vec::new())
+    } else {
+        let running: Vec<String> = match live_leases(options.state.as_ref()).await {
+            Ok(leases) => leases
+                .into_iter()
+                .filter(|(s, r)| *s == server.name && backfill::is_marker(r, None))
+                .map(|(_, r)| r)
+                .collect(),
+            Err(e) => {
+                tracing::warn!(server = %server.name, error = %e, "cannot list leases to look for a running backfill");
+                Vec::new()
+            }
+        };
+        let percent = if running.is_empty() { 100 } else { 100 - share };
+        (percent, running)
+    };
+    if percent != handle.rate_percent() {
+        let why = if options.backfill.is_some() {
+            "backfill"
+        } else if percent < 100 {
+            "a backfill is running"
+        } else {
+            "no backfill running"
+        };
+        tracing::info!(server = %server.name, rate_percent = percent, "rate share: {why}");
+        send(
+            tx,
+            format!(
+                "[{}] using {percent}% of the rate limits ({why})",
+                server.name
+            ),
+        );
+        handle.set_rate_percent(percent);
+    }
+    running
+}
+
+/// Take the leases named `names` on `server`, all or none: `Ok(Err(holder))` when another process
+/// holds one
+async fn take_leases(
+    state: &Arc<dyn StateStore>,
+    server: &str,
+    names: &[String],
+) -> Result<Result<Vec<Lease>, LeaseHolder>, IngestError> {
+    let mut taken = Vec::new();
+    for name in names {
+        match Lease::acquire(state, server, name, LEASE_TTL).await {
+            Ok(LeaseOutcome::Acquired(lease)) => taken.push(lease),
+            Ok(LeaseOutcome::Held(holder)) => {
+                release(taken).await;
+                return Ok(Err(holder));
+            }
+            Err(e) => {
+                release(taken).await;
+                return Err(e);
+            }
+        }
+    }
+    Ok(Ok(taken))
+}
+
+async fn release(leases: Vec<Lease>) {
+    for lease in leases {
+        lease.release().await;
+    }
+}
+
+/// `a and b` when both are set, each in parentheses
+fn join_filters(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("({a}) and ({b})")),
+        (a, b) => a.or(b),
+    }
+}
+
+/// A backfill window that runs to the present has finished: when the feed has no checkpoint yet,
+/// the window's becomes the feed's, so incremental syncs continue from it
+async fn hand_over_checkpoint(
+    window: &CheckpointStore,
+    feed: &CheckpointStore,
+    server: &str,
+    resource: &str,
+    span: &tracing::Span,
+    tx: &UnboundedSender<String>,
+    label: &str,
+) {
+    let result = async {
+        if feed.load(server, resource).await?.is_some() {
+            return Ok(false);
+        }
+        match window.load(server, resource).await? {
+            Some(cp) => feed.save(server, resource, &cp).await.map(|()| true),
+            None => Ok(false),
+        }
+    }
+    .await;
+    match result {
+        Ok(true) => {
+            span.in_scope(|| {
+                tracing::info!("backfill window finished: the feed continues from its checkpoint")
+            });
+            send(
+                tx,
+                format!(
+                    "[{label}] backfill finished: incremental syncs continue from its checkpoint"
+                ),
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            span.in_scope(
+                || tracing::warn!(error = %e, "cannot hand the backfill checkpoint to the feed"),
+            );
+            send(
+                tx,
+                format!("[{label}] cannot hand the backfill checkpoint to the feed: {e}"),
+            );
+        }
+    }
 }
 
 /// One resource's records pull, tried once more with a new client when it failed to authenticate
@@ -1392,6 +1651,7 @@ fn failed_entry(server: &str, resource: &str, error: &str) -> ResourceEntry {
         warnings: Vec::new(),
         deletes_held: 0,
         interrupted: false,
+        backfill: None,
     }
 }
 

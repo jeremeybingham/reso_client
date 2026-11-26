@@ -14,6 +14,7 @@ run locally; not yet run against a vendor server
 cargo run -p reso-ingest -- sync --config servers.toml --out data/
 cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --deletes
 cargo run -p reso-ingest -- sync --config servers.toml --server mlsgrid --media
+cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --backfill
 cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
 cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
 cargo run -p reso-ingest -- status --out data/
@@ -27,6 +28,8 @@ cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J
   be repeated). `--deletes` also writes delete events. `--start-over` drops the selected checkpoints first.
   `--max-file-mb` (default 256) starts a new data file after that size. `--media` downloads each page's media files
   right after the page is written, into `--media-dir` (see [Media during sync](#media-during-sync-sync---media)).
+  `--backfill` runs a first load with progress on its own share of the rate limits, optionally for a
+  `--from`/`--to` window (see [Backfill](#backfill)).
 - **`media`** downloads the files that the top-level `Media` records from `sync` point at (see
   [Media files](#media-files)).
 - **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums.
@@ -80,6 +83,8 @@ The rest describe the run just finished. Labels are `server` and `resource` unle
 | `reso_ingest_last_run_responses` (also `class`) | Responses by `2xx` (3xx included), `429`, `4xx`, `5xx` |
 | `reso_ingest_last_run_warnings`, `_deletes_held` | Check findings and held deletes (see [Run checks](#run-checks)) |
 | `reso_ingest_schema_changes` (`server` only) | `$metadata` changes against the previous run (absent when none) |
+| `reso_ingest_backfill_remaining_records` | With `--backfill`: records left at the end of the run (the server's count at the start, less those written; absent when the server gives no count) |
+| `reso_ingest_backfill_rate_percent` | With `--backfill`: the share of the rate limits the backfill ran with |
 | `reso_ingest_server_failed` (`server` only) | 1 for a server that failed as a whole |
 | `reso_ingest_last_run_finished_timestamp_seconds`, `_resources` | No labels: when the run ended, resources handled |
 
@@ -124,6 +129,9 @@ client_secret_env = "MLS_ONE_CLIENT_SECRET"
 [server.limits]                     # optional; default 5 retries, no rate limit
 per_second = 2
 
+[server.backfill]                   # optional; share of [server.limits] for `sync --backfill`
+rate_percent = 50                   # 1 to 99 (default 50); other syncs of the server get the rest meanwhile
+
 [server.media]                      # optional; file downloads, separate from the API limits
 per_second = 4                      # also per_hour, per_day, bytes_per_hour, bytes_per_day, max_retries, *_backoff_ms
 timeout_secs = 300                  # per file; default 120
@@ -164,6 +172,36 @@ record, untouched; they carry no flag and get no events, so a consumer replaces 
 a new copy of the parent.
 
 To download the files of expanded `Media` arrays, use `sync --media` (see [Media files](#media-files)).
+
+## Backfill
+
+The first pull of a large feed can take days. `sync --backfill` runs it so that it can be watched and does not starve
+the incremental syncs of the same server:
+
+- **Progress.** At the start it asks the server how many records are left (`$count=true&$top=0` with the same filters,
+  after the checkpoint when resuming) and logs `backfill: N records left`. After each page a progress line says how far
+  along it is and the time left, `##progress step=1/1 label=mls/Property sub=120000/4500000 eta=3h07m`, and a
+  `backfill progress` log line follows at most every 30 seconds. A server that gives no count gets `msg=N_records`
+  instead. The manifest's resource entry has a `backfill` object (`remaining_at_start`, `rate_percent`, the window), and
+  the metrics file the two `reso_ingest_backfill_*` metrics.
+- **Its own rate budget.** The backfill uses `rate_percent` (default 50) of every limit in `[server.limits]`. While it
+  holds its lease, every other `sync` or `serve` feed of that server, in any process sharing the state, uses the rest
+  (`100 - rate_percent`), and goes back to the whole limits once no backfill is running. Shares are rounded down, with
+  at least 1 of each limit. The share is checked at the start of each resource; when it changes, the server's client is
+  rebuilt, and its rate window starts empty.
+- **Stop and resume.** It saves its checkpoint after each page like any sync, so a stopped backfill (Ctrl-C, SIGTERM,
+  a crash) carries on where it stopped when run again. While it runs, a plain `sync` of a feed with no checkpoint yet
+  skips it ("a backfill is loading this feed") instead of starting a second full load; feeds that already have one
+  sync as usual.
+- **Windows.** `--from` and `--to` (RFC 3339 with a time zone, `--from` inclusive, `--to` exclusive) load only records
+  whose `ModificationTimestamp` is in that range, with a checkpoint of their own, so several windows can run at once
+  and each resumes by itself. When a window with no `--to` finishes and the feed has no checkpoint of its own, the
+  window's checkpoint becomes the feed's, and incremental syncs continue from there. Windows cannot be combined with
+  `--deletes` (a key comparison needs the whole feed).
+
+The backfill marks itself with a lease named `<resource>~backfill` (plus the window, `state/<server>.<resource>_backfill....lock`
+in a state directory); a whole-feed backfill also takes the feed's own lease, a window does not. `serve` has no backfill
+mode: run the backfill as a separate `sync` beside it.
 
 ## Run checks
 

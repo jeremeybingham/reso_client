@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest`: `sync --backfill` for the first pull of a large feed (#88). It counts the records left with `$count`,
+  prints `##progress` lines with the time left after every page, records `backfill` in the manifest and
+  `reso_ingest_backfill_remaining_records`/`_rate_percent` in the metrics, and uses `[server.backfill] rate_percent`
+  (default 50) of the server's rate limits while other syncs of the server use the rest. `--from`/`--to` load one
+  `ModificationTimestamp` window with its own checkpoint. `ServerConfig` gains a `backfill` field and `ResourceEntry` a
+  `backfill` field (struct literals need them).
 - `reso-ingest`: Google Cloud Storage through its own API (#130). `S3Options` gains `provider` (`Provider::S3`, the
   default, or `Provider::Gcs`); the commands take `--gcs-bucket` (env `RESO_GCS_BUCKET`, prefix from `--s3-prefix` or
   its alias `--gcs-prefix`), with credentials from a service-account key (`GOOGLE_SERVICE_ACCOUNT`). Versions on GCS

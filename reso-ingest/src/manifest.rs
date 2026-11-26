@@ -92,6 +92,10 @@ pub struct ResourceEntry {
     /// True when a shutdown request stopped this resource before its end; what was written and
     /// checkpointed is consistent and the next run continues from it
     pub interrupted: bool,
+    /// Set for a `sync --backfill`: its window, the count of records left at the start and its
+    /// rate share
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill: Option<crate::backfill::BackfillEntry>,
 }
 
 /// A server that failed as a whole (for example a task error from `run_servers`)
@@ -325,6 +329,7 @@ pub async fn sync_resource_media(
                 warnings: Vec::new(),
                 deletes_held: 0,
                 interrupted: false,
+                backfill: None,
             };
         }
     }
@@ -444,6 +449,7 @@ async fn pull(
         warnings: Vec::new(),
         deletes_held: 0,
         interrupted,
+        backfill: None,
     }
 }
 

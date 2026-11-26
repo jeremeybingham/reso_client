@@ -96,6 +96,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/serve.rs      Daemon, ServeOptions: `reso-ingest serve`, one task per feed (interval, jitter, backoff), axum endpoints
                     (/healthz, /readyz, /metrics, /status); each sync is `cli::sync_server_with` for one resource
   src/shutdown.rs   Shutdown: a flag `sync` checks between pages; the binary sets it on SIGTERM/Ctrl-C (cli::watch_signals), exit code 3
+  src/backfill.rs   BackfillWindow, BackfillEntry, ProgressWriter: `sync --backfill` (#88): progress lines, rate share, windows
   src/lease.rs      Lease: lock key per (server, resource) in the StateStore, expiry and renewal by conditional write;
                     `sync` skips a feed another process holds
   src/deletes.rs    reconcile_deletes, EventFeed, FlagDeleteWriter: delete events by key diff, EntityEvent or flag field;
@@ -111,7 +112,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   examples/loadtest.rs  load-test harness (#90): fake server with 1M records, faults, kill and resume; results in LOADTEST.md
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
   servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a `purge` in the bucket, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media;
-                    log_json.rs for JSON log lines, own binary; run_main.rs for the log format and global subscriber of run_main, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; audit_tests.rs for the access log; purge_tests.rs for purge; lease_tests.rs for held feeds; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon;
+                    log_json.rs for JSON log lines, own binary; run_main.rs for the log format and global subscriber of run_main, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; audit_tests.rs for the access log; purge_tests.rs for purge; lease_tests.rs for held feeds; backfill_tests.rs for sync --backfill; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon;
                     secret_rotation.rs for rotated secret files and no secrets in logs, own binary)
 tests/              queries_tests.rs (URL building), client_http_tests.rs (wiremock servers),
                     paging_tests.rs (wiremock multi-page walks),

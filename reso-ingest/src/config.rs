@@ -120,6 +120,33 @@ pub struct ServerConfig {
     /// Media file downloads: their own limits, and where the token goes
     #[serde(default)]
     pub media: MediaConfig,
+    /// `sync --backfill`: the backfill's share of the rate limits
+    #[serde(default)]
+    pub backfill: BackfillConfig,
+}
+
+/// The share of a server's `[server.limits]` rate limits a backfill runs within (`sync --backfill`)
+///
+/// While a backfill of the server runs, it gets `rate_percent` of each request and byte limit and
+/// every other sync of the server (another process, or `serve`) gets the rest, so the two together
+/// stay within the limits and incremental syncs keep their freshness. Without a backfill running,
+/// other syncs use the whole limits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackfillConfig {
+    /// Percent of each rate limit for the backfill, 1 to 99 (default 50)
+    #[serde(default)]
+    pub rate_percent: Option<u8>,
+}
+
+/// The backfill's share of the rate limits when `rate_percent` is not set
+pub const DEFAULT_BACKFILL_RATE_PERCENT: u8 = 50;
+
+impl BackfillConfig {
+    /// The backfill's percent of each rate limit
+    pub fn rate_percent(&self) -> u8 {
+        self.rate_percent.unwrap_or(DEFAULT_BACKFILL_RATE_PERCENT)
+    }
 }
 
 /// Vendor delete signalling (`deletes = { flag_field = "MlgCanView" }`)
@@ -468,6 +495,24 @@ impl MediaConfig {
     }
 }
 
+/// `percent` of each limit in `limit`, rounded down but at least 1; 100 or more leaves it whole
+pub(crate) fn share_of(limit: &RateLimit, percent: u8) -> RateLimit {
+    if percent >= 100 {
+        return limit.clone();
+    }
+    let p = u128::from(percent);
+    // Below `n`, so it fits back into the type it came from
+    let cut = |n: u64| ((u128::from(n) * p / 100) as u64).max(1);
+    let cut32 = |n: u32| cut(u64::from(n)) as u32;
+    RateLimit {
+        per_second: limit.per_second.map(cut32),
+        per_hour: limit.per_hour.map(cut32),
+        per_day: limit.per_day.map(cut32),
+        bytes_per_hour: limit.bytes_per_hour.map(cut),
+        bytes_per_day: limit.bytes_per_day.map(cut),
+    }
+}
+
 fn rate_limit(
     per_second: Option<u32>,
     per_hour: Option<u32>,
@@ -667,6 +712,13 @@ impl ServerConfig {
                 ));
             }
         }
+        if self
+            .backfill
+            .rate_percent
+            .is_some_and(|p| !(1..=99).contains(&p))
+        {
+            return Err("backfill.rate_percent must be between 1 and 99".into());
+        }
         if self.media.timeout_secs == Some(0) {
             return Err("media.timeout_secs must be at least 1".into());
         }
@@ -842,5 +894,41 @@ impl ServerConfig {
             l.bytes_per_hour,
             l.bytes_per_day,
         )))
+    }
+
+    /// Like [`client_config_from`](Self::client_config_from), with each rate limit cut to
+    /// `percent` of the configured one (at least 1); 100 leaves them as they are
+    pub(crate) fn client_config_share(
+        &self,
+        secrets: &Secrets,
+        percent: u8,
+    ) -> Result<ClientConfig, IngestError> {
+        let config = self.client_config_from(secrets)?;
+        let limit = share_of(&config.rate_limit, percent);
+        Ok(config.with_rate_limit(limit))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{share_of, RateLimit};
+
+    #[test]
+    fn shares_round_down_but_keep_one() {
+        let limit = RateLimit {
+            per_second: Some(3),
+            per_hour: Some(7200),
+            per_day: None,
+            bytes_per_hour: Some(1),
+            bytes_per_day: Some(u64::MAX),
+        };
+        let half = share_of(&limit, 50);
+        assert_eq!(half.per_second, Some(1));
+        assert_eq!(half.per_hour, Some(3600));
+        assert_eq!(half.per_day, None);
+        assert_eq!(half.bytes_per_hour, Some(1));
+        assert_eq!(half.bytes_per_day, Some(u64::MAX / 2));
+        assert_eq!(share_of(&limit, 10).per_second, Some(1));
+        assert_eq!(share_of(&limit, 100), limit);
     }
 }
