@@ -108,7 +108,8 @@ is not exported; the text format needs no new dependency, and collectors can scr
 
 `monitoring/` holds an example Grafana dashboard (`grafana-dashboard.json`: import it and pick the Prometheus data
 source) and Prometheus alert rules (`alert-rules.yml`: stale feed, failed resource or server, repeated 429s, no run
-finished, held deletes, schema changes, check findings). A test checks that both use only the metrics above. Their thresholds are starting points.
+finished, held deletes, schema changes, check findings), each with a `runbook_url` to its runbook in
+[docs/OPERATIONS.md](../docs/OPERATIONS.md). A test checks that both use only the metrics above and that every alert has a runbook. Their thresholds are starting points.
 
 ## Configuration
 

@@ -47,7 +47,10 @@ field names are plain strings and records are raw JSON, so any server schema wor
 - Vendor differences taken from public documentation (MLS Grid, Trestle) are supported but unconfirmed until #32: a
   filter required on every request, related records served only by `$expand`, deletes signalled by a flag field
   (`MlgCanView`), and request and byte limits per second, hour and day.
-- Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md).
+- Pre-1.0: breaking changes can come in any minor release and are listed in the [changelog](CHANGELOG.md); what 1.0
+  will promise is in [docs/STABILITY.md](docs/STABILITY.md). Which servers have been checked:
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Running `reso-ingest` in production, alert runbooks and support:
+  [docs/OPERATIONS.md](docs/OPERATIONS.md); security reports: [SECURITY.md](SECURITY.md).
 
 ### Data Dictionary 2.1
 
@@ -74,7 +77,7 @@ reso-client = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Rust 1.87 or later.
+Rust 1.87 or later for `reso-client`, 1.89 for `reso-ingest` (policy in [docs/STABILITY.md](docs/STABILITY.md)).
 
 ## Quick start
 
@@ -292,8 +295,11 @@ what is left needs a real server or someone else:
   ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), rate-limit budget and per-feed request counts
   ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds: config directories,
   pausing, `serve` reload, `reset`/`replay`/`history`, onboarding
-  ([#94](https://github.com/jeremeybingham/reso_client/issues/94)). Open: product readiness
-  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)). Built only on request: a Postgres state store, a
+  ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness: compatibility table, 1.0 plan,
+  `cargo-deny`, semver and MSRV checks in CI, operator guide and runbooks
+  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)). Open before 1.0: the API review
+  ([#157](https://github.com/jeremeybingham/reso_client/issues/157)) and SBOMs and signed releases
+  ([#158](https://github.com/jeremeybingham/reso_client/issues/158)). Built only on request: a Postgres state store, a
   stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
   advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso_client/issues/51)).
