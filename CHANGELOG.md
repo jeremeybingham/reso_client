@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Planned as 0.4.0, the first release of both crates with shared version numbers.
+
 ### Added
+- `reso-ingest`: first published release, at the same version as `reso-client` (#178). Built and tested against mock
+  servers and RESO's reference server; not yet run against a vendor server (#32, #76), so 0.5.0 may change its
+  options, configuration and output. `Cargo.lock` is now committed, so `cargo install --locked reso-ingest` uses the
+  versions CI tested. The package leaves out the integration tests (they read files elsewhere in the repository) and
+  load-test results.
 - `reso-ingest`: `serve --ui` (`ServeOptions::ui`) adds read-only HTML status pages: `/` (one row per feed, failing
   and paused rows highlighted), `/feed/<server>/<resource>` (last error, checkpoint, last 20 runs) and `/runs` (latest
   100 runs). Hand-written HTML, no scripts, reloads every 15 s, every value escaped. Feature `ui`, on by default, adds

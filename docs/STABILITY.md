@@ -7,10 +7,14 @@ happen first. Releasing and publishing stay the owner's call.
 
 - `reso-client` follows Cargo's semver rules for 0.x: a **minor** bump (0.3 → 0.4) may break the API, a **patch** bump
   may not. Every breaking change is marked "breaking" in [`CHANGELOG.md`](../CHANGELOG.md).
-- `reso-ingest` is unpublished (version 0.0.1) until 0.4.0, when it is first published with the same version as
-  `reso-client` (#178; the two share version numbers from then on). Before 1.0 its command-line options,
-  configuration file, output layout and metrics may change in a minor release; changes are recorded in the changelog,
-  and renamed options and settings follow the deprecation policy below.
+- `reso-ingest` is first published at 0.4.0, with the same version as `reso-client` (#178); the two share version
+  numbers from then on. It ships marked as not yet run against a vendor server; the #76 pass may change it in 0.5.0.
+  Before 1.0 its command-line options, configuration file, output layout and metrics may change in a minor release;
+  changes are recorded in the changelog, and renamed options and settings follow the deprecation policy below.
+- `reso-ingest`'s **library API** is not covered by `cargo semver-checks` before 1.0 and may change in any minor
+  release without a deprecation; it exists for the binary. Its command line and configuration file are what users
+  rely on, and they follow the deprecation policy.
+- `Cargo.lock` is committed, so `cargo install --locked reso-ingest` builds with the dependency versions CI tested.
 - CI runs `cargo semver-checks` on `reso-client` against the last release on crates.io. While the version in
   `Cargo.toml` is still the released one, the job reports breaking changes without failing (they are expected before
   the next minor release); once `Cargo.toml` is bumped for a release, it fails on any change that version does not allow.
@@ -100,10 +104,15 @@ The release plan is the tracker [#179](https://github.com/jeremeybingham/reso_cl
 ## Release checklist
 
 1. `git fetch origin`; on an up-to-date `main`.
-2. Bump `version` in `Cargo.toml` (and `reso-ingest/Cargo.toml` if it is released), move the changelog's "Unreleased"
-   section under the new version.
+2. Bump `version` in `Cargo.toml` and in `reso-ingest/Cargo.toml`, together with its `reso-client` dependency's
+   `version` (the crates share version numbers), and move the changelog's "Unreleased" section under the new version.
 3. `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
    `cargo test --workspace --all-features`, `cargo doc --no-deps --all-features`.
 4. `cargo semver-checks -p reso-client` passes for the new version; `cargo deny --workspace --all-features check`
    passes; the MSRV job is green.
-5. Tag `vX.Y.Z` (signed once #158 is done) and push the tag; `cargo publish -p reso-client`.
+5. `cargo package --workspace` builds both packages from their `.crate` files (it resolves `reso-client` from the
+   workspace, so it works before the client is on crates.io); check `cargo package -p reso-ingest --list` ships no
+   test data, `local-data/` or secrets.
+6. Tag `vX.Y.Z` (signed once #158 is done) and push the tag.
+7. Publish in order: `cargo publish -p reso-client` first; once that version shows on crates.io,
+   `cargo publish --dry-run -p reso-ingest`, then `cargo publish -p reso-ingest`.

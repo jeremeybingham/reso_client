@@ -7,7 +7,7 @@ default-members = [".", "reso-ingest"]
 
 [package]
 name = "reso-client"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.87.0"
 authors = ["Jeremey Bingham <jeremeybingham@gh-email.com>"]
@@ -25,6 +25,16 @@ exclude = [
     "*.json",
     "dev_summary.md",
     ".env*",
+    # repository files for reso-ingest, CI and agents, not part of the library
+    ".cargo/",
+    ".dockerignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Dockerfile",
+    "deny.toml",
+    "deploy/",
+    "docs/",
+    "scripts/",
 ]
 
 [lib]

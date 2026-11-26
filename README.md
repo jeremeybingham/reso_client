@@ -13,7 +13,7 @@ This repository holds two crates:
 | Crate | What it is | Status |
 |---|---|---|
 | [`reso-client`](https://crates.io/crates/reso-client) | Async client for one server: queries, standard paging and replication, OAuth2, retries and rate limits, a parsed `$metadata` model, file downloads | v0.3.0 on crates.io |
-| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection, and download the `Media` files they point at | In this repository only, not published |
+| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection, and download the `Media` files they point at | First published at 0.4.0 (with `reso-client` 0.4.0); not yet run against a vendor server |
 
 Together they form an **ingest layer**: they connect to many servers, follow the API's rules, keep each copy current,
 and hand the records over **raw**, tagged with where they came from. Mapping fields, de-duplicating across MLSs,
@@ -288,8 +288,9 @@ what is left is the two releases below, and work that needs a real server or som
   `$count=true`, `Downloader::download_into`, raw record text, `#[non_exhaustive]` API review, metadata fixes; see
   the [changelog](CHANGELOG.md)) and the first `reso-ingest` publish at the same version
   ([#178](https://github.com/jeremeybingham/reso_client/issues/178)), released before any vendor server and marked as
-  not yet checked against one. Before the tag: clean-ups ([#177](https://github.com/jeremeybingham/reso_client/issues/177))
-  and fewer bucket requests per quiet run ([#162](https://github.com/jeremeybingham/reso_client/issues/162) lead 6).
+  not yet checked against one. The clean-ups ([#177](https://github.com/jeremeybingham/reso_client/issues/177)), fewer
+  bucket requests per quiet run ([#162](https://github.com/jeremeybingham/reso_client/issues/162) lead 6) and the
+  publish preparation (#178) are done; what is left is the tag and `cargo publish`, the owner's call.
 - **Release 0.5.0** (milestone `0.5.0`): the #76 pass on a real server and its fixes, a filled-in
   [compatibility table](docs/COMPATIBILITY.md), realistic load fixtures
   ([#163](https://github.com/jeremeybingham/reso_client/issues/163)), SBOMs, signed tags and a published container
