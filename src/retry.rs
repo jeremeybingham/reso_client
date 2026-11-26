@@ -12,17 +12,20 @@
 //!   retried.
 //! - [`RateLimit`]: a ceiling on requests per second, hour and day and bytes per hour and day for one
 //!   client (one server). Requests wait their turn instead of failing.
-//! - [`ClientStats`]: counters of requests sent, retries made and body bytes received.
+//! - [`ClientStats`]: counters of requests sent, retries made and body bytes received, for a
+//!   client as a whole or (with [`count_requests`]) for one piece of work.
+//! - [`RateUsage`]: how much of each configured [`RateLimit`] window is used now.
 //!
 //! The defaults retry nothing and limit nothing, so a client behaves as before until configured.
 
 use std::collections::hash_map::RandomState;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 /// How a failed request is repeated
@@ -311,35 +314,106 @@ impl LimiterState {
     }
 }
 
+/// How much of one [`RateLimit`] window is used: requests started, or response bytes received,
+/// in the window that ends now
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowUsage {
+    /// Requests or bytes counted in the window
+    pub used: u64,
+    /// The configured ceiling
+    pub limit: u64,
+}
+
+impl WindowUsage {
+    /// `used / limit` (0 for a limit of 0); above 1 when a large response overshot a byte ceiling
+    pub fn fraction(&self) -> f64 {
+        if self.limit == 0 {
+            0.0
+        } else {
+            self.used as f64 / self.limit as f64
+        }
+    }
+}
+
+/// How much of a client's [`RateLimit`] is used now, from
+/// [`ResoClient::rate_usage`](crate::ResoClient::rate_usage) or
+/// [`Downloader::rate_usage`](crate::Downloader::rate_usage)
+///
+/// One field per window of the limit; a window with no ceiling configured is `None`. Windows
+/// roll: `per_hour` counts the requests started in the hour that ends now. A client whose limit
+/// was replaced (a new client after a rate share or secret change) starts again from zero, while
+/// the server may still count the old client's requests.
+///
+/// # Examples
+///
+/// ```
+/// # use reso_client::{ClientConfig, RateLimit, ResoClient};
+/// let config = ClientConfig::new("https://api.mls.com/odata", "token")
+///     .with_rate_limit(RateLimit::default().per_hour(7_200));
+/// let client = ResoClient::with_config(config)?;
+/// let usage = client.rate_usage();
+/// assert_eq!(usage.per_hour.map(|w| (w.used, w.limit)), Some((0, 7_200)));
+/// assert_eq!(usage.per_second, None);
+/// # Ok::<(), reso_client::ResoError>(())
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RateUsage {
+    /// Requests started in the last second
+    pub per_second: Option<WindowUsage>,
+    /// Requests started in the last hour
+    pub per_hour: Option<WindowUsage>,
+    /// Requests started in the last 24 hours
+    pub per_day: Option<WindowUsage>,
+    /// Response bytes received in the last hour
+    pub bytes_per_hour: Option<WindowUsage>,
+    /// Response bytes received in the last 24 hours
+    pub bytes_per_day: Option<WindowUsage>,
+}
+
 /// Paces requests to a [`RateLimit`]
+///
+/// Two locks: `queue` is held by one waiting request at a time (across its sleep), so waiters are
+/// released in arrival order; `state` is held only for moments, so [`usage`](Self::usage) never
+/// waits behind a throttled request.
 pub(crate) struct Limiter {
     limit: RateLimit,
-    state: Mutex<LimiterState>,
+    queue: tokio::sync::Mutex<()>,
+    state: std::sync::Mutex<LimiterState>,
 }
 
 impl Limiter {
     pub(crate) fn new(limit: RateLimit) -> Self {
         Self {
             limit,
-            state: Mutex::new(LimiterState::default()),
+            queue: tokio::sync::Mutex::new(()),
+            state: std::sync::Mutex::new(LimiterState::default()),
         }
     }
 
-    /// Wait until a request may start, then count it. Waiters queue on the lock, so they are
+    fn state(&self) -> std::sync::MutexGuard<'_, LimiterState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wait until a request may start, then count it. Waiters queue on a lock, so they are
     /// released one at a time in arrival order.
     pub(crate) async fn acquire(&self) {
         if self.limit == RateLimit::default() {
             return;
         }
-        let mut state = self.state.lock().await;
+        let _turn = self.queue.lock().await;
         loop {
-            let now = Instant::now();
-            state.prune(&self.limit, now);
-            match state.wait(&self.limit, now) {
-                None => {
+            let wait = {
+                let now = Instant::now();
+                let mut state = self.state();
+                state.prune(&self.limit, now);
+                let wait = state.wait(&self.limit, now);
+                if wait.is_none() {
                     state.starts.push_back(now);
-                    return;
                 }
+                wait
+            };
+            match wait {
+                None => return,
                 Some(wait) => tokio::time::sleep(wait).await,
             }
         }
@@ -350,8 +424,42 @@ impl Limiter {
         if (self.limit.bytes_per_day.is_none() && self.limit.bytes_per_hour.is_none()) || n == 0 {
             return;
         }
-        let mut state = self.state.lock().await;
-        state.bytes.push_back((Instant::now(), n));
+        self.state().bytes.push_back((Instant::now(), n));
+    }
+
+    /// How much of each configured window is used now
+    pub(crate) fn usage(&self) -> RateUsage {
+        let now = Instant::now();
+        let mut state = self.state();
+        state.prune(&self.limit, now);
+        let requests = |max: Option<u32>, window: Duration| {
+            max.map(|limit| WindowUsage {
+                used: state
+                    .starts
+                    .iter()
+                    .filter(|t| now.duration_since(**t) < window)
+                    .count() as u64,
+                limit: u64::from(limit),
+            })
+        };
+        let bytes = |max: Option<u64>, window: Duration| {
+            max.map(|limit| WindowUsage {
+                used: state
+                    .bytes
+                    .iter()
+                    .filter(|(t, _)| now.duration_since(*t) < window)
+                    .map(|(_, n)| n)
+                    .sum(),
+                limit,
+            })
+        };
+        RateUsage {
+            per_second: requests(self.limit.per_second, SECOND),
+            per_hour: requests(self.limit.per_hour, HOUR),
+            per_day: requests(self.limit.per_day, DAY),
+            bytes_per_hour: bytes(self.limit.bytes_per_hour, HOUR),
+            bytes_per_day: bytes(self.limit.bytes_per_day, DAY),
+        }
     }
 }
 
@@ -443,6 +551,57 @@ impl Counters {
             server_errors: self.server_errors.load(Ordering::Relaxed),
         }
     }
+}
+
+/// Counters of one [`count_requests`] scope, with the scope it is nested in
+struct Scope {
+    counters: Counters,
+    parent: Option<Arc<Scope>>,
+}
+
+tokio::task_local! {
+    static SCOPE: Arc<Scope>;
+}
+
+/// Run `future` and count the requests [`ResoClient`](crate::ResoClient)s make while it runs
+///
+/// A client's [`stats`](crate::ResoClient::stats) count everything it did; when several tasks share
+/// one client (feeds of one server syncing at once), the difference of two snapshots mixes their
+/// requests. This counts only what `future` itself does, with any client: requests made inside a
+/// task spawned from it are not counted, nor are [`Downloader`](crate::Downloader) requests (it
+/// has its own [`stats`](crate::Downloader::stats)). Scopes nest: an inner scope's requests are
+/// counted in the outer one too.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use reso_client::{count_requests, QueryBuilder, ResoClient};
+/// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+/// let query = QueryBuilder::new("Property").top(10).build()?;
+/// let (result, stats) = count_requests(client.execute(&query)).await;
+/// let records = result?;
+/// println!("{} requests, {} bytes", stats.requests, stats.bytes);
+/// # Ok(())
+/// # }
+/// ```
+pub async fn count_requests<F: Future>(future: F) -> (F::Output, ClientStats) {
+    let scope = Arc::new(Scope {
+        counters: Counters::default(),
+        parent: SCOPE.try_with(Arc::clone).ok(),
+    });
+    let output = SCOPE.scope(Arc::clone(&scope), future).await;
+    (output, scope.counters.snapshot())
+}
+
+/// Apply `count` to the counters of every [`count_requests`] scope the current task is in
+pub(crate) fn count_in_scopes(count: impl Fn(&Counters)) {
+    let _ = SCOPE.try_with(|scope| {
+        let mut next = Some(scope);
+        while let Some(s) = next {
+            count(&s.counters);
+            next = s.parent.as_ref();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -606,5 +765,80 @@ mod tests {
     async fn no_limit_never_waits() {
         let times = start_times(RateLimit::default(), 100).await;
         assert!(times.iter().all(|t| *t == Duration::ZERO));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn usage_counts_each_configured_window() {
+        let limiter = Limiter::new(
+            RateLimit::default()
+                .per_second(10)
+                .per_hour(100)
+                .bytes_per_day(1000),
+        );
+        assert_eq!(limiter.usage().per_day, None);
+        for _ in 0..3 {
+            limiter.acquire().await;
+        }
+        limiter.record_bytes(400).await;
+        let usage = limiter.usage();
+        assert_eq!(usage.per_second, Some(WindowUsage { used: 3, limit: 10 }));
+        assert_eq!(
+            usage.per_hour,
+            Some(WindowUsage {
+                used: 3,
+                limit: 100
+            })
+        );
+        assert_eq!(usage.bytes_per_hour, None);
+        assert_eq!(usage.bytes_per_day.map(|w| w.used), Some(400));
+        assert!((usage.bytes_per_day.unwrap().fraction() - 0.4).abs() < 1e-9);
+        // The second window empties, the hour and day ones do not
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let usage = limiter.usage();
+        assert_eq!(usage.per_second.map(|w| w.used), Some(0));
+        assert_eq!(usage.per_hour.map(|w| w.used), Some(3));
+        assert_eq!(usage.bytes_per_day.map(|w| w.used), Some(400));
+        assert_eq!(
+            Limiter::new(RateLimit::default()).usage(),
+            RateUsage::default()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn usage_does_not_wait_behind_a_held_request() {
+        let limiter = Arc::new(Limiter::new(RateLimit::default().per_hour(1)));
+        limiter.acquire().await;
+        // The second request waits an hour, holding its place in the queue
+        let waiting = tokio::spawn({
+            let limiter = Arc::clone(&limiter);
+            async move { limiter.acquire().await }
+        });
+        tokio::task::yield_now().await;
+        let usage = limiter.usage();
+        assert_eq!(usage.per_hour, Some(WindowUsage { used: 1, limit: 1 }));
+        assert!(!waiting.is_finished());
+        waiting.await.unwrap();
+        assert_eq!(limiter.usage().per_hour.map(|w| w.used), Some(1));
+    }
+
+    #[tokio::test]
+    async fn scopes_nest_and_count_only_their_own_work() {
+        let (((), inner), outer) = count_requests(async {
+            count_in_scopes(Counters::request);
+            count_requests(async { count_in_scopes(|c| c.bytes(5)) }).await
+        })
+        .await;
+        assert_eq!((inner.requests, inner.bytes), (0, 5));
+        assert_eq!((outer.requests, outer.bytes), (1, 5));
+        // Outside any scope nothing is counted, and nothing fails
+        count_in_scopes(Counters::request);
+        // A second scope running at the same time keeps its own counts
+        let a = count_requests(async { count_in_scopes(Counters::request) });
+        let b = count_requests(async {
+            count_in_scopes(Counters::request);
+            count_in_scopes(Counters::request);
+        });
+        let (((), a), ((), b)) = tokio::join!(a, b);
+        assert_eq!((a.requests, b.requests), (1, 2));
     }
 }

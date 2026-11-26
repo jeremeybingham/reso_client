@@ -77,7 +77,7 @@ src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), r
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`, vendor mode)
 src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
 src/network.rs      NetworkOptions: proxy, extra CA certificates, User-Agent, connection pool (#91); used by the client and Downloader
-src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter, ClientStats counters
+src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter (RateUsage), ClientStats counters, count_requests scopes
 src/error.rs        ResoError and the Result alias
 reso-ingest/        second workspace crate (unpublished); README.md documents the command
   src/config.rs     Config: multi-server TOML, secrets read from the variables (`*_env`) or files (`*_file`) named; server filter,

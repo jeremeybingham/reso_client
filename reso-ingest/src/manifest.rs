@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reso_client::{Checkpoint, ClientStats, ResoClient, StandardReplication};
+use reso_client::{Checkpoint, ClientStats, RateUsage, ResoClient, StandardReplication};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -116,6 +116,48 @@ pub struct SchemaChanges {
     pub changes: Vec<String>,
 }
 
+/// How much of one rate-limit window a server's client had used when its sync finished
+///
+/// One per configured window (`[server.rate_limit]`); servers with no limit have none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RateBudget {
+    /// Server name
+    pub server: String,
+    /// `requests` or `bytes`
+    pub unit: &'static str,
+    /// `second`, `hour` or `day` (a rolling window ending when the sync finished)
+    pub window: &'static str,
+    /// Requests started or response bytes received in the window
+    pub used: u64,
+    /// The ceiling the client paces to (a backfill's or sync's share of `[server.rate_limit]`
+    /// while a backfill runs)
+    pub limit: u64,
+}
+
+impl RateBudget {
+    /// One entry per configured window of `usage`
+    pub fn from_usage(server: &str, usage: &RateUsage) -> Vec<RateBudget> {
+        [
+            ("requests", "second", usage.per_second),
+            ("requests", "hour", usage.per_hour),
+            ("requests", "day", usage.per_day),
+            ("bytes", "hour", usage.bytes_per_hour),
+            ("bytes", "day", usage.bytes_per_day),
+        ]
+        .into_iter()
+        .filter_map(|(unit, window, w)| {
+            w.map(|w| RateBudget {
+                server: server.to_owned(),
+                unit,
+                window,
+                used: w.used,
+                limit: w.limit,
+            })
+        })
+        .collect()
+    }
+}
+
 /// The record of one run: counts, files, checkpoints and errors
 ///
 /// Build it while the run goes, then call [`write`](Self::write), also when servers failed.
@@ -133,6 +175,9 @@ pub struct RunManifest {
     pub server_failures: Vec<ServerFailure>,
     /// `$metadata` changes since the previous run, per server (servers with none are absent)
     pub schema_changes: Vec<SchemaChanges>,
+    /// Rate-limit windows of each server's client when its sync finished (servers with a
+    /// `[server.rate_limit]` only)
+    pub rate_budget: Vec<RateBudget>,
     /// True when a shutdown request (SIGTERM, Ctrl-C) ended the run early: resources in the list
     /// are consistent with their checkpoints, and resources not started are absent
     pub interrupted: bool,
@@ -148,6 +193,7 @@ impl RunManifest {
             resources: Vec::new(),
             server_failures: Vec::new(),
             schema_changes: Vec::new(),
+            rate_budget: Vec::new(),
             interrupted: false,
         }
     }
@@ -173,6 +219,12 @@ impl RunManifest {
                 changes,
             });
         }
+    }
+
+    /// Add a server's rate-limit use (ignored when it has no limit)
+    pub fn add_rate_usage(&mut self, server: &str, usage: &RateUsage) {
+        self.rate_budget
+            .extend(RateBudget::from_usage(server, usage));
     }
 
     /// Every check finding of the run as `server/resource: text` or `server: text` lines

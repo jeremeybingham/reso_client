@@ -127,7 +127,8 @@ What else the client does:
   another host is refused so the token is never sent elsewhere.
 - OAuth2 client credentials: the token is fetched on first use, renewed at 90% of its lifetime and once after a 401.
 - Retries with backoff and `Retry-After` for network errors (also a response body cut off partway) and 429/502/503/504; client-side limits on requests per
-  second, hour and day and on response bytes per hour and day; request counters (`ResoClient::stats`). Off by default.
+  second, hour and day and on response bytes per hour and day; request counters (`ResoClient::stats`, or `count_requests` for one task's requests when tasks share a client); how much of
+  each limit window is used (`ResoClient::rate_usage`). Off by default.
 - `StandardReplication`: keyset paging on `ModificationTimestamp` and key, checkpoints to resume, and `expand` for servers
   that serve related records only inline.
 - `$metadata` as raw XML (`fetch_metadata`) or a model (`fetch_metadata_model`): entity sets, keys, properties,
@@ -288,8 +289,9 @@ what is left needs a real server or someone else:
   harness, delete detection at millions of keys, backfill, media at scale, media index saves
   ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
   ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
-  ([#91](https://github.com/jeremeybingham/reso_client/issues/91)). Open: observability follow-ups
-  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds
+  ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), rate-limit budget and per-feed request counts
+  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)). Open: lookup values in the schema check
+  ([#109](https://github.com/jeremeybingham/reso_client/issues/109), optional), operating many feeds
   ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness
   ([#95](https://github.com/jeremeybingham/reso_client/issues/95)); Postgres and stream backends wait on an owner
   decision ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).

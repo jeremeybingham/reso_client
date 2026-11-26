@@ -117,6 +117,8 @@ struct FeedStatus {
 
 struct Shared {
     feeds: Mutex<BTreeMap<(String, String), FeedStatus>>,
+    /// Each scheduled server's client, for its rate-limit use in `/metrics`
+    clients: Vec<(String, Arc<ClientHandle>)>,
     state: Arc<dyn StateStore>,
     started_at: String,
 }
@@ -183,6 +185,10 @@ impl Daemon {
 
         let shared = Arc::new(Shared {
             feeds: Mutex::new(BTreeMap::new()),
+            clients: plans
+                .iter()
+                .map(|(server, client, _)| (server.name.clone(), Arc::clone(client)))
+                .collect(),
             state: Arc::clone(&options.state),
             started_at: now_rfc3339(),
         });
@@ -443,10 +449,11 @@ async fn sync_once(
             manifest.add_server_failure(&server.name, &message);
             Outcome::Failed(message, None)
         }
-        Ok((entries, media, changes)) => {
-            media_reports.extend(media);
-            manifest.add_schema_changes(&server.name, changes);
-            let entry = entries.into_iter().find(|e| e.resource == resource);
+        Ok(done) => {
+            media_reports.extend(done.media);
+            manifest.add_schema_changes(&server.name, done.schema_changes);
+            manifest.add_rate_usage(&server.name, &done.rate_usage);
+            let entry = done.entries.into_iter().find(|e| e.resource == resource);
             if let Some(e) = &entry {
                 manifest.add_resource(e.clone());
             }
@@ -533,6 +540,9 @@ async fn metrics(
     let mut manifest = RunManifest::new("serve");
     manifest.started_at = shared.started_at.clone();
     manifest.resources = feeds.iter().filter_map(|f| f.last_entry.clone()).collect();
+    for (server, client) in &shared.clients {
+        manifest.add_rate_usage(server, &client.rate_usage());
+    }
     let mut text = render_prometheus(&manifest);
     let media: Vec<(String, MediaCounts)> = feeds
         .iter()

@@ -2,7 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-use reso_client::{ClientConfig, QueryBuilder, RateLimit, ResoClient, ResoError, RetryPolicy};
+use reso_client::{
+    count_requests, ClientConfig, QueryBuilder, RateLimit, ResoClient, ResoError, RetryPolicy,
+    WindowUsage,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -275,4 +278,55 @@ async fn complete_but_invalid_json_is_not_retried() {
     }
     let stats = c.stats();
     assert_eq!((stats.requests, stats.retries), (1, 0));
+}
+
+#[tokio::test]
+async fn scoped_counts_separate_tasks_sharing_one_client() {
+    // A retry in one task must not show up in the other's counts (#109)
+    let server = flaky(503, 1, None).await;
+    let c = std::sync::Arc::new(client(&server, fast(2)));
+    let one = count_requests({
+        let c = std::sync::Arc::clone(&c);
+        async move { c.execute(&query()).await.unwrap() }
+    });
+    let two = count_requests({
+        let c = std::sync::Arc::clone(&c);
+        async move {
+            c.execute(&query()).await.unwrap();
+            c.execute(&query()).await.unwrap();
+        }
+    });
+    let (one, two) = tokio::join!(tokio::spawn(one), tokio::spawn(two));
+    let ((_, a), ((), b)) = (one.unwrap(), two.unwrap());
+    // One of them met the 503 and retried; together they add up to the client's counts
+    assert_eq!(a.requests + b.requests, c.stats().requests);
+    assert_eq!(a.retries + b.retries, 1);
+    assert_eq!(a.requests - a.retries, 1);
+    assert_eq!(b.requests - b.retries, 2);
+    assert_eq!(a.bytes + b.bytes, c.stats().bytes);
+}
+
+#[tokio::test]
+async fn rate_usage_counts_requests_and_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .respond_with(ok())
+        .mount(&server)
+        .await;
+    let config = ClientConfig::new(server.uri(), "t")
+        .with_rate_limit(RateLimit::default().per_hour(100).bytes_per_day(1_000_000));
+    let c = ResoClient::with_config(config).unwrap();
+    c.execute(&query()).await.unwrap();
+    c.execute(&query()).await.unwrap();
+    let usage = c.rate_usage();
+    assert_eq!(
+        usage.per_hour,
+        Some(WindowUsage {
+            used: 2,
+            limit: 100
+        })
+    );
+    assert_eq!(usage.per_second, None);
+    assert_eq!(usage.bytes_per_day.map(|w| w.used), Some(c.stats().bytes));
 }

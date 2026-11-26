@@ -15,7 +15,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use reso_client::ResoClient;
+use reso_client::{RateUsage, ResoClient};
 
 use crate::config::{Secrets, ServerConfig};
 use crate::error::IngestError;
@@ -121,6 +121,18 @@ impl ClientHandle {
     /// built, the current client is kept and a warning is logged.
     pub fn client(&self) -> Arc<ResoClient> {
         self.refresh().0
+    }
+
+    /// How much of its rate limit the current client has used; see [`RateUsage`]
+    ///
+    /// Does not read the secrets again (unlike [`client`](Self::client)), so a scrape of the
+    /// metrics never replaces the client.
+    pub fn rate_usage(&self) -> RateUsage {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .client
+            .rate_usage()
     }
 
     /// After `failed` hit an authentication failure: a newer client when the secrets changed (now,
