@@ -19,6 +19,7 @@ are not a whole record.
 | `clean` | One full sync, no faults | every record exactly once |
 | `faults` | `--fault-percent` (default 5) of `/Property` requests get a fault, split evenly: 503, 429 with `Retry-After: 1`, a 300 ms slow page, the connection closed before the response, or the body cut off halfway. A failed sync is run again, as a scheduler would, up to `--max-runs` | no record missing, none repeated |
 | `kill` | The sync gets SIGKILL `--kills` times (default 3) at even points of the pull; each time a new sync resumes | no record missing; at most one page repeated per kill |
+| `backfill` | `sync --backfill --resource Property` (#88) with `per_second = --limit-rps` (default 100) and `rate_percent = --rate-percent` (default 50), killed once halfway and resumed, while `sync --resource Member` runs every second against a Member feed that grows by `--members-per-second` (default 50). Not in `all` | every record, at most one page repeated; a `##progress` line with `sub=` and `eta=` per page, ending complete; the resumed run counts only the records left; Property requests within the backfill's share; every Member sync succeeds, using the rest of the limits |
 | `deletes` | `sync --deletes` key comparison only (a checkpoint at the last record is seeded, so no records are pulled): a baseline run, a run after every `--gone-every`-th record (default 100, so 1%) left the server, and a run with nothing new. Not in `all` | each gone key exactly once as a delete event, no other key |
 
 `--server-rps N` makes the server answer 429 above N requests a second. The configuration it writes uses
@@ -44,8 +45,10 @@ machine (and in `faults`, the waits for `Retry-After` and backoff).
 | 2026-11-25 | 00cfe45 (before #87) | i9-9900K, WSL2 | deletes | 10000000 | 3 | 78.7 | 380991 | 3360 | 30003 | 0 | 0 | 0 | ok |
 | 2026-11-25 | 00cfe45 + #87 | i9-9900K, WSL2 | deletes | 1000000 | 3 | 4.6 | 652295 | 24 | 3003 | 0 | 0 | 0 | ok |
 | 2026-11-25 | 00cfe45 + #87 | i9-9900K, WSL2 | deletes | 10000000 | 3 | 48.7 | 616283 | 24 | 30003 | 0 | 0 | 0 | ok |
+| 2026-11-26 | 2364279 (#88) | i9-9900K, WSL2 | backfill | 1000000 | 2 | 20.1 | 49676 | 25 | 1004 | 0 | 0 | 0 | ok |
 
-For `deletes` the records column is keys and records/s is keys per second over the three runs. The fake server set
+For `backfill` wall time is the backfill's two runs, and requests are Property requests (the Member syncs are counted
+apart in the JSON). For `deletes` the records column is keys and records/s is keys per second over the three runs. The fake server set
 `TCP_NODELAY` from the `deletes` rows on; earlier rows ran without it (large pages hardly wait, small ones waited
 about 40 ms each).
 
@@ -71,6 +74,20 @@ Defaults: page size 1000, NDJSON on a local disk, no `--deletes`, no Parquet, no
 - **After:** 24 MiB peak at 1M and at 10M keys (chunks of 100 000 keys spill to sorted run files, merged; the saved
   set is streamed). A pass takes 1.5 s per million keys here, down from 1.9 to 2.9 s; the key set is 12.9 MB per
   million keys. Each gone key came out exactly once.
+
+## Findings from the backfill run (#88)
+
+- **The share holds:** 1004 Property requests in 20.1 s, 49.9 a second against a share of 50 (limit 100, `rate_percent`
+  50). Unlimited, the same pull takes about 12 s (`clean`), so at 1M records here the share, not the client, sets the
+  pace: about 20 s per million records per 50 requests a second at 1000 records a page.
+- **Incremental syncs kept running:** 20 Member syncs ran during the backfill, each in 0.03 s on average (0.04 s at
+  most), all successful; 19 reported running on the other 50% (the first started before the backfill held its lease).
+- **Progress and resume:** 1000 progress lines, each with `sub=` and `eta=`. The backfill was killed at 500 000 records;
+  the resumed run counted 500 000 left and ended at `sub=500000/500000`. No record was missing or repeated (the kill
+  came right after a page was saved).
+- **Memory** stayed at 25 MiB peak, as for a plain sync.
+- A short backfill is not slowed: each process's limiter starts with a full window, so a 50 000-record run (two
+  processes, 54 requests) finished in 0.6 s.
 
 ## Not covered yet
 

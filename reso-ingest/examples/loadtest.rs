@@ -22,6 +22,11 @@
 //!   the sync pulls no records and the run is the key pull and diff alone: a baseline run, a run
 //!   after every `--gone-every`-th record left the server (exactly those keys must come out as
 //!   delete events, once each), and a run with nothing new. Not in `all`.
+//! - `backfill`: `sync --backfill --resource Property` (#88) with `per_second = --limit-rps` and
+//!   `rate_percent = --rate-percent`, killed once halfway and resumed, while `sync --resource
+//!   Member` runs every second against a small feed that grows. Checks every record, the
+//!   `##progress` lines and the resumed count, that the backfill keeps to its share of the
+//!   requests, and that the Member syncs used the rest and kept finishing. Not in `all`.
 //!
 //! Linux only for the memory figure (`VmHWM` from `/proc/<pid>/status`). Results print as markdown
 //! table rows for `reso-ingest/LOADTEST.md`. Output is deleted after each scenario unless `--keep`.
@@ -85,6 +90,15 @@ struct Args {
     /// In the `deletes` scenario, every Nth record leaves the server after the baseline
     #[arg(long, default_value_t = 100)]
     gone_every: u64,
+    /// `backfill`: `[server.limits] per_second` in the configuration
+    #[arg(long, default_value_t = 100)]
+    limit_rps: u32,
+    /// `backfill`: `[server.backfill] rate_percent`
+    #[arg(long, default_value_t = 50)]
+    rate_percent: u8,
+    /// `backfill`: Member records the server adds each second
+    #[arg(long, default_value_t = 50)]
+    members_per_second: u64,
     /// Seed of the fault sequence
     #[arg(long, default_value_t = 7)]
     seed: u64,
@@ -106,7 +120,7 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let scenarios: Vec<&str> = match args.scenario.as_str() {
         "all" => vec!["clean", "faults", "kill"],
-        s @ ("clean" | "faults" | "kill" | "deletes") => vec![s],
+        s @ ("clean" | "faults" | "kill" | "deletes" | "backfill") => vec![s],
         other => {
             eprintln!("unknown scenario {other}");
             std::process::exit(2);
@@ -164,6 +178,9 @@ struct Counters {
     throttle: AtomicU64,
     slow: AtomicU64,
     rate_limited: AtomicU64,
+    /// `/Member` requests and records (`backfill`), not in `requests` or `served_records`
+    member_requests: AtomicU64,
+    member_records: AtomicU64,
 }
 
 impl Counters {
@@ -192,6 +209,8 @@ impl Counters {
             "status_429_injected": l(&self.throttle),
             "slow_page": l(&self.slow),
             "status_429_rate_limit": l(&self.rate_limited),
+            "member_requests": l(&self.member_requests),
+            "member_records": l(&self.member_records),
         })
     }
 }
@@ -208,6 +227,9 @@ struct Fake {
     counters: Counters,
     /// Records with an index divisible by this are gone (0: none)
     gone_every: AtomicU64,
+    /// Member records added per second since `started` (0: no Member resource)
+    members_per_second: u64,
+    started: Instant,
 }
 
 impl Fake {
@@ -241,9 +263,14 @@ impl Fake {
 
     /// The first index after a resume filter (`(TS gt X or (TS eq X and Key gt 'K'))` or `TS gt X`)
     fn start(&self, filter: &str) -> u64 {
-        if let Some(key) = after(filter, "ListingKey gt '") {
+        self.start_in(filter, "ListingKey", 'L', self.ties, self.n)
+    }
+
+    /// [`Fake::start`] for a resource keyed `key` (`prefix` + number), `ties` records per second
+    fn start_in(&self, filter: &str, key: &str, prefix: char, ties: u64, n: u64) -> u64 {
+        if let Some(key) = after(filter, &format!("{key} gt '")) {
             let k: u64 = key
-                .trim_start_matches('L')
+                .trim_start_matches(prefix)
                 .split('\'')
                 .next()
                 .unwrap_or("0")
@@ -255,7 +282,7 @@ impl Fake {
             let ts = ts.split([' ', ')']).next().unwrap_or("");
             if let Some(secs) = parse_ts(ts) {
                 let offset = (secs - BASE_EPOCH + 1).max(0) as u64;
-                return (offset * self.ties).min(self.n);
+                return (offset * ties).min(n);
             }
         }
         0
@@ -299,7 +326,7 @@ enum Reply {
     Truncate(Vec<u8>),
 }
 
-fn metadata_xml() -> Vec<u8> {
+fn metadata_xml(members: bool) -> Vec<u8> {
     let props = [
         ("ListingKey", "Edm.String"),
         ("ListingId", "Edm.String"),
@@ -321,8 +348,18 @@ fn metadata_xml() -> Vec<u8> {
 <edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
 <Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="org.reso.metadata">
 <EntityType Name="Property"><Key><PropertyRef Name="ListingKey"/></Key>{fields}</EntityType>
-<EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/></EntityContainer>
-</Schema></edmx:DataServices></edmx:Edmx>"#
+{member_type}<EntityContainer Name="C"><EntitySet Name="Property" EntityType="org.reso.metadata.Property"/>{member_set}</EntityContainer>
+</Schema></edmx:DataServices></edmx:Edmx>"#,
+        member_type = if members {
+            r#"<EntityType Name="Member"><Key><PropertyRef Name="MemberKey"/></Key><Property Name="MemberKey" Type="Edm.String"/><Property Name="ModificationTimestamp" Type="Edm.DateTimeOffset"/></EntityType>"#
+        } else {
+            ""
+        },
+        member_set = if members {
+            r#"<EntitySet Name="Member" EntityType="org.reso.metadata.Member"/>"#
+        } else {
+            ""
+        },
     )
     .into_bytes()
 }
@@ -341,7 +378,15 @@ fn respond(fake: &Fake, target: &str, host: &str) -> Reply {
         Err(_) => return json_reply(400, json!({"error": {"message": "bad url"}})),
     };
     if url.path().ends_with("/$metadata") {
-        return Reply::Send(200, "application/xml", metadata_xml(), vec![]);
+        return Reply::Send(
+            200,
+            "application/xml",
+            metadata_xml(fake.members_per_second > 0),
+            vec![],
+        );
+    }
+    if fake.members_per_second > 0 && url.path().ends_with("/Member") {
+        return members(fake, &url, target, host);
     }
     if !url.path().ends_with("/Property") {
         return json_reply(404, json!({"error": {"message": "not found"}}));
@@ -392,7 +437,11 @@ fn respond(fake: &Fake, target: &str, host: &str) -> Reply {
     }
     let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
     if q.get("$count").map(String::as_str) == Some("true") {
-        return json_reply(200, json!({"@odata.count": fake.n, "value": []}));
+        let start = q.get("$filter").map_or(0, |f| fake.start(f));
+        return json_reply(
+            200,
+            json!({"@odata.count": fake.n.saturating_sub(start), "value": []}),
+        );
     }
     let start = q.get("$filter").map_or(0, |f| fake.start(f));
     let skip: u64 = q.get("$skip").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -435,6 +484,47 @@ fn respond(fake: &Fake, target: &str, host: &str) -> Reply {
             Reply::Send(200, "application/json", bytes, vec![])
         }
     }
+}
+
+/// `/Member`: one record per `1 / members_per_second` seconds since the server started, one per
+/// timestamp, so each incremental sync finds the records added since the last
+fn members(fake: &Fake, url: &reqwest::Url, target: &str, host: &str) -> Reply {
+    fake.counters
+        .member_requests
+        .fetch_add(1, Ordering::Relaxed);
+    let n = (fake.started.elapsed().as_secs_f64() * fake.members_per_second as f64) as u64;
+    let q: BTreeMap<String, String> = url.query_pairs().into_owned().collect();
+    let start = q
+        .get("$filter")
+        .map_or(0, |f| fake.start_in(f, "MemberKey", 'M', 1, n))
+        .min(n);
+    let body = if q.get("$count").map(String::as_str) == Some("true") {
+        json!({"@odata.count": n - start, "value": []})
+    } else {
+        let skip: u64 = q.get("$skip").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let top: u64 = q.get("$top").and_then(|s| s.parse().ok()).unwrap_or(1000);
+        let from = (start + skip).min(n);
+        let to = (from + top).min(n);
+        fake.counters
+            .member_records
+            .fetch_add(to - from, Ordering::Relaxed);
+        let value: Vec<Value> = (from..to)
+            .map(|i| json!({"MemberKey": format!("M{i:09}"), "ModificationTimestamp": format_ts(BASE_EPOCH + i as i64)}))
+            .collect();
+        let mut body = json!({ "value": value });
+        if to < n {
+            let raw = target.split("&$skip=").next().unwrap_or(target);
+            body["@odata.nextLink"] =
+                json!(format!("http://{host}{raw}&$skip={}", skip + (to - from)));
+        }
+        body
+    };
+    Reply::Send(
+        200,
+        "application/json",
+        body.to_string().into_bytes(),
+        vec![],
+    )
 }
 
 async fn serve_conn(fake: Arc<Fake>, stream: TcpStream) {
@@ -607,10 +697,21 @@ fn spawn_sync(config: &Path, out: &Path, log: &Path, extra: &[&str]) -> Child {
 
 /// Run one sync; kill it once the server has sent `kill_at` records (cumulative), if given
 async fn run_sync(dir: &Path, fake: &Fake, kill_at: Option<u64>, extra: &[&str]) -> RunResult {
+    run_sync_logged(dir, fake, kill_at, extra, "sync.log").await
+}
+
+/// [`run_sync`] with its output appended to `dir/log`
+async fn run_sync_logged(
+    dir: &Path,
+    fake: &Fake,
+    kill_at: Option<u64>,
+    extra: &[&str],
+    log: &str,
+) -> RunResult {
     let mut child = spawn_sync(
         &dir.join("servers.toml"),
         &dir.join("out"),
-        &dir.join("sync.log"),
+        &dir.join(log),
         extra,
     );
     let pid = child.id();
@@ -645,7 +746,8 @@ fn clear_stale_leases(state: &Path) -> u64 {
     let mut n = 0;
     if let Ok(entries) = std::fs::read_dir(state) {
         for e in entries.flatten() {
-            if e.path().extension().is_some_and(|x| x == "lock") {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.ends_with(".lock") && name.contains(".Property") {
                 let _ = std::fs::remove_file(e.path());
                 n += 1;
             }
@@ -684,8 +786,15 @@ fn check_output(out: &Path, n: u64) -> Check {
         let reader = BufReader::new(std::fs::File::open(&path).unwrap());
         for line in reader.split(b'\n') {
             let line = line.unwrap();
+            let parsed = serde_json::from_slice::<Value>(&line).ok();
+            if parsed
+                .as_ref()
+                .is_some_and(|v| v["record"].get("MemberKey").is_some())
+            {
+                continue; // `backfill`: the Member feed synced alongside
+            }
             c.lines += 1;
-            let key = serde_json::from_slice::<Value>(&line).ok().and_then(|v| {
+            let key = parsed.and_then(|v| {
                 v["record"]["ListingKey"]
                     .as_str()
                     .and_then(|k| k.trim_start_matches('L').parse::<u64>().ok())
@@ -753,6 +862,12 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
         window: Mutex::new((0, 0)),
         counters: Counters::default(),
         gone_every: AtomicU64::new(0),
+        members_per_second: if scenario == "backfill" {
+            args.members_per_second.max(1)
+        } else {
+            0
+        },
+        started: Instant::now(),
     });
     let url = start_server(fake.clone()).await;
     let dir = args.workdir.join(scenario);
@@ -761,6 +876,9 @@ async fn run_scenario(args: &Args, scenario: &str) -> Report {
     write_config(&dir, &url, args);
     if scenario == "deletes" {
         return run_deletes(args, &fake, &dir).await;
+    }
+    if scenario == "backfill" {
+        return run_backfill(args, &fake, &dir).await;
     }
     eprintln!(
         "== {scenario}: {} records from {url}, output in {}",
@@ -906,6 +1024,203 @@ fn check_deletes(out: &Path, fake: &Fake) -> (u64, u64, u64) {
         }
     }
     (lines, wrong, repeats)
+}
+
+/// The `backfill` scenario: a killed and resumed `sync --backfill` of Property while `sync
+/// --resource Member` runs every second beside it
+async fn run_backfill(args: &Args, fake: &Fake, dir: &Path) -> Report {
+    let config = format!(
+        "[[server]]\nname = \"load\"\nbase_url = \"{}\"\npage_size = {}\ntimeout_secs = 30\n\
+         [server.limits]\nmax_retries = 6\ninitial_backoff_ms = 100\nmax_backoff_ms = 2000\nper_second = {}\n\
+         [server.backfill]\nrate_percent = {}\n\
+         [server.auth]\ntype = \"bearer\"\ntoken_env = \"{TOKEN_ENV}\"\n",
+        std::fs::read_to_string(dir.join("servers.toml"))
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("base_url = \""))
+            .and_then(|l| l.strip_suffix('"'))
+            .unwrap(),
+        args.page_size,
+        args.limit_rps,
+        args.rate_percent
+    );
+    std::fs::write(dir.join("servers.toml"), config).unwrap();
+    let share = f64::from(args.limit_rps) * f64::from(args.rate_percent) / 100.0;
+    eprintln!(
+        "== backfill: {} records, {} requests/s limit, backfill {}%, Member +{}/s, output in {}",
+        args.records,
+        args.limit_rps,
+        args.rate_percent,
+        args.members_per_second,
+        dir.display()
+    );
+
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let started = Instant::now();
+    let backfill = async {
+        let mut runs = 0u32;
+        let mut peak = 0;
+        let mut killed_at = None;
+        let mut finished = false;
+        while runs < args.max_runs {
+            runs += 1;
+            let kill_at = killed_at.is_none().then_some(args.records / 2);
+            let r = run_sync(
+                dir,
+                fake,
+                kill_at,
+                &["--backfill", "--resource", "Property"],
+            )
+            .await;
+            peak = peak.max(r.peak_kib);
+            if r.killed {
+                let served = fake.counters.served_records.load(Ordering::Relaxed);
+                killed_at = Some(served);
+                clear_stale_leases(&dir.join("out").join("state"));
+                eprintln!("   backfill run {runs}: killed at {served} served records");
+                continue;
+            }
+            if r.code == Some(0) {
+                finished = true;
+                eprintln!("   backfill run {runs}: finished");
+                break;
+            }
+            eprintln!("   backfill run {runs}: exit {:?}, running again", r.code);
+        }
+        done.store(true, Ordering::Relaxed);
+        (
+            runs,
+            peak,
+            killed_at,
+            finished,
+            started.elapsed().as_secs_f64(),
+        )
+    };
+    let alongside = async {
+        // (seconds, exit code) of each Member sync started while the backfill ran
+        let mut syncs = Vec::new();
+        while !done.load(Ordering::Relaxed) {
+            let t = Instant::now();
+            let r = run_sync_logged(dir, fake, None, &["--resource", "Member"], "member.log").await;
+            syncs.push((t.elapsed().as_secs_f64(), r.code));
+            while t.elapsed() < Duration::from_secs(1) && !done.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        syncs
+    };
+    let ((runs, peak, killed_at, finished, backfill_secs), member_syncs) =
+        tokio::join!(backfill, alongside);
+    let wall = started.elapsed().as_secs_f64();
+
+    // What the backfill said about itself
+    let log = std::fs::read_to_string(dir.join("sync.log")).unwrap_or_default();
+    let progress: Vec<&str> = log
+        .lines()
+        .filter(|l| l.starts_with("##progress") && l.contains("label=load/Property sub="))
+        .collect();
+    let with_eta = progress.iter().filter(|l| l.contains(" eta=")).count();
+    let last_progress = progress.last().copied().unwrap_or("");
+    let ended_complete = last_progress
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("sub="))
+        .and_then(|s| s.split_once('/'))
+        .is_some_and(|(a, b)| a == b);
+    let left: Vec<u64> = log
+        .lines()
+        .filter_map(|l| after(l, "backfill: "))
+        .filter_map(|l| l.split(' ').next()?.parse().ok())
+        .collect();
+    let resumed_count_ok = match (left.as_slice(), killed_at) {
+        // The resumed count starts after the checkpoint: at most the records not yet served,
+        // plus the page in flight when the run was killed
+        ([first, second], Some(served)) => {
+            *first == args.records
+                && *second <= args.records - served + args.page_size
+                && *second + served >= args.records
+        }
+        _ => false,
+    };
+    let property_requests = fake.counters.requests.load(Ordering::Relaxed);
+    let backfill_rps = property_requests as f64 / backfill_secs;
+    // A whole second of slack over the run for the limiter's first window
+    let within_share = backfill_rps <= share * (1.0 + 1.0 / backfill_secs) + 0.5;
+
+    let members = std::fs::read_to_string(dir.join("member.log")).unwrap_or_default();
+    let rest_message = format!(
+        "using {}% of the rate limits (a backfill is running)",
+        100 - args.rate_percent
+    );
+    let saw_rest = members.matches(&rest_message).count();
+    let member_ok = member_syncs.iter().all(|(_, c)| *c == Some(0));
+    let member_max = member_syncs.iter().map(|(t, _)| *t).fold(0.0, f64::max);
+    let member_mean =
+        member_syncs.iter().map(|(t, _)| *t).sum::<f64>() / member_syncs.len().max(1) as f64;
+
+    let check = check_output(&dir.join("out"), args.records);
+    let repeat_bound = args.page_size.min(args.server_cap);
+    let ok = finished
+        && killed_at.is_some()
+        && check.missing == 0
+        && check.torn == 0
+        && check.repeats <= repeat_bound
+        && progress.len() as u64 >= args.records / args.page_size
+        && with_eta == progress.len()
+        && ended_complete
+        && resumed_count_ok
+        && within_share
+        && member_ok
+        && !member_syncs.is_empty()
+        && saw_rest > 0;
+    let rate = args.records as f64 / backfill_secs;
+    let json = json!({
+        "scenario": "backfill",
+        "records": args.records,
+        "page_size": args.page_size,
+        "limit_rps": args.limit_rps,
+        "rate_percent": args.rate_percent,
+        "finished": finished,
+        "runs": runs,
+        "killed_at_served_records": killed_at,
+        "backfill_seconds": (backfill_secs * 10.0).round() / 10.0,
+        "records_per_second": rate.round(),
+        "property_requests_per_second": (backfill_rps * 10.0).round() / 10.0,
+        "share_requests_per_second": share,
+        "within_share": within_share,
+        "peak_rss_mib": peak / 1024,
+        "progress_lines": progress.len(),
+        "progress_lines_with_eta": with_eta,
+        "last_progress": last_progress,
+        "records_left_per_run": left,
+        "resumed_count_ok": resumed_count_ok,
+        "member_syncs": member_syncs.len(),
+        "member_syncs_ok": member_ok,
+        "member_syncs_on_the_rest": saw_rest,
+        "member_sync_seconds_mean": (member_mean * 100.0).round() / 100.0,
+        "member_sync_seconds_max": (member_max * 100.0).round() / 100.0,
+        "output": {"files": check.files, "bytes": check.bytes, "lines": check.lines},
+        "missing": check.missing,
+        "repeats": check.repeats,
+        "repeat_bound": repeat_bound,
+        "torn_lines": check.torn,
+        "wall_seconds": (wall * 10.0).round() / 10.0,
+        "server": fake.counters.json(),
+        "ok": ok,
+    });
+    let row = format!(
+        "| {} | {} | backfill | {} | {runs} | {backfill_secs:.1} | {rate:.0} | {} | {property_requests} | 0 | {} | {} | {} |",
+        today(),
+        commit(),
+        args.records,
+        peak / 1024,
+        check.repeats,
+        check.torn,
+        if ok { "ok" } else { "FAILED" }
+    );
+    if !args.keep {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    Report { ok, row, json }
 }
 
 /// The `deletes` scenario: baseline, a pass that finds the gone records, a pass with nothing new
