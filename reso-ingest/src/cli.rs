@@ -153,8 +153,8 @@ enum Command {
     ///
     /// Schedules the resources that have an `interval` in the configuration (or are in `include`
     /// under a server `interval`). Each sync is the same as `sync --server S --resource R`. Serves
-    /// /healthz, /readyz, /metrics and /status over plain HTTP on --listen (no authentication: use
-    /// a private address). Stops after the current pages on SIGTERM or Ctrl-C and exits 0.
+    /// /healthz, /readyz, /metrics and /status (and status pages with --ui) over plain HTTP on
+    /// --listen (no authentication: use a private address). Stops after the current pages on SIGTERM or Ctrl-C and exits 0.
     Serve {
         /// Server configuration: a TOML file, or a directory of them (see reso-ingest/servers.example.toml)
         #[arg(long)]
@@ -201,6 +201,12 @@ enum Command {
         /// The date is the UTC day the rows were fetched. Needs --format parquet.
         #[arg(long)]
         partition: bool,
+        /// Also serve read-only status pages: / (every feed), /feed/<server>/<resource>, /runs
+        ///
+        /// Plain HTML that reloads every 15 seconds; no authentication, like the other endpoints.
+        /// Needs the `ui` feature (on by default).
+        #[arg(long)]
+        ui: bool,
         #[command(flatten)]
         storage: StorageArgs,
     },
@@ -733,6 +739,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             max_file_mb,
             format,
             partition,
+            ui,
             storage,
         } => {
             let args = Args {
@@ -750,7 +757,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 storage,
                 ..Args::default()
             };
-            serve(args, listen, reload_every, err, shutdown).await
+            serve(args, listen, reload_every, ui, err, shutdown).await
         }
         Command::Media {
             config,
@@ -963,6 +970,7 @@ async fn serve(
     args: Args,
     listen: std::net::SocketAddr,
     reload_every: Option<std::time::Duration>,
+    ui: bool,
     err: &mut dyn Write,
     shutdown: Shutdown,
 ) -> i32 {
@@ -990,6 +998,7 @@ async fn serve(
     options.max_file_bytes = args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024;
     options.format = args.format;
     options.partition = args.partition;
+    options.ui = ui;
     match Daemon::start(config.clone(), options, shutdown.clone()).await {
         Ok(daemon) => {
             let _ = writeln!(err, "listening on http://{}", daemon.local_addr());

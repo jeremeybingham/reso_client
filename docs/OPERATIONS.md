@@ -61,7 +61,8 @@ reso-ingest status --out /data              # checkpoints and the last run
 reso-ingest history --out /data --server S  # recent runs of one server
 ```
 
-and, for `serve`, `curl http://HOST:9090/status`. Logs are on stderr; `--log-format json` adds `run_id`, `server` and
+and, for `serve`, `curl http://HOST:9090/status` (or, with `serve --ui`, open `http://HOST:9090/` in a browser: failing
+feeds are highlighted and each feed's page shows its last error and recent runs). Logs are on stderr; `--log-format json` adds `run_id`, `server` and
 `resource` to every line.
 
 ### ResoFeedStale

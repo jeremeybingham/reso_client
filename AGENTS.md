@@ -69,7 +69,7 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
   before 1.0 but are recorded in `CHANGELOG.md` with a version bump.
 - **No new dependencies without discussion.** Keep `reso-client` lean (its XML parser is `roxmltree`; OAuth2 and rate
   limiting are hand-written; its only test-only TLS crate is `rustls`, already in the tree via reqwest); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, `reqwest` for the webhook, `axum` for `serve`, `sha2` for purge records, `object_store` (`aws` and `gcp`) behind the `s3` feature, and
-  `arrow`/`parquet` behind the `parquet` feature, `mimalloc` behind the default `mimalloc` feature).
+  `arrow`/`parquet` behind the `parquet` feature, `mimalloc` behind the default `mimalloc` feature; the default `ui` feature adds no crate).
 - Every bug fixed gets a regression test. Docs change in the same commit as the behaviour they describe.
 
 ## Where things are
@@ -106,6 +106,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/serve.rs      Daemon, ServeOptions: `reso-ingest serve`, one task per feed (interval, jitter, backoff), axum endpoints
                     (/healthz, /readyz, /metrics, /status); each sync is `cli::sync_server_with` for one resource;
                     Daemon::reload applies a new Config (ReloadSummary: feeds added, removed, restarted, paused, resumed)
+  src/serve/ui.rs   `serve --ui` status pages (/, /feed/{server}/{resource}, /runs; feature `ui`, #161): hand-written escaped HTML, last 20 runs per feed in memory
   src/shutdown.rs   Shutdown: a flag `sync` checks between pages; the binary sets it on SIGTERM/Ctrl-C (cli::watch_signals), exit code 3
   src/backfill.rs   BackfillWindow, BackfillEntry, ProgressWriter: `sync --backfill` (#88): progress lines, rate share, windows
   src/lease.rs      Lease: lock key per (server, resource) in the StateStore, expiry and renewal by conditional write;

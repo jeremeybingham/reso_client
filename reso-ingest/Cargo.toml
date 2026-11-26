@@ -36,14 +36,16 @@ futures = { version = "0.3", default-features = false, optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [features]
-# `--no-default-features` builds with the system allocator
-default = ["mimalloc"]
+# `--no-default-features` builds with the system allocator and without the status pages
+default = ["mimalloc", "ui"]
 # Write Parquet files (`ParquetWriter`, `reso-ingest sync --format parquet`)
 parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-json", "dep:arrow-schema"]
 # Object storage for state and output: S3-compatible (AWS S3, R2, MinIO, RustFS) and native GCS; `object_store` with rustls, no OpenSSL
 s3 = ["dep:object_store", "dep:futures"]
 # mimalloc as the global allocator of the `reso-ingest` binary instead of the system malloc (#162)
 mimalloc = ["dep:mimalloc"]
+# Read-only HTML status pages in `serve --ui` (#161): hand-written HTML, no extra dependency
+ui = []
 
 [dev-dependencies]
 wiremock = "0.6"

@@ -99,7 +99,7 @@ fn labels(r: &ResourceEntry) -> String {
 }
 
 /// The checkpoint's `ModificationTimestamp`, in epoch seconds
-fn checkpoint_secs(r: &ResourceEntry) -> Option<f64> {
+pub(crate) fn checkpoint_secs(r: &ResourceEntry) -> Option<f64> {
     r.checkpoint
         .as_ref()?
         .get("timestamp")?
@@ -338,11 +338,11 @@ fn write_families(out: &mut String, families: Vec<Family>) {
 /// Media file counts, by outcome; `serve` adds them up over its runs
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MediaCounts {
-    downloaded: u64,
-    unchanged: u64,
+    pub(crate) downloaded: u64,
+    pub(crate) unchanged: u64,
     shared: u64,
     not_modified: u64,
-    failed: u64,
+    pub(crate) failed: u64,
     expired: u64,
     deleted: u64,
     bytes: u64,
