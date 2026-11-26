@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sync`/`serve` remove ones older than 7 days (a run killed before delivering its manifest left its key for good), at
   most once an hour per process; each delete is conditional on the version read (#132).
 
+- `reso-ingest`: a `--deletes` key comparison first removes `keys-<pid>-<n>` directories in `<out>/.scratch` that
+  nothing has changed for a day, which runs killed mid-pass (`kill -9`, OOM, eviction) left behind at about 40 MB per
+  million keys (#134). Age decides rather than a pid check, so an output volume shared by several hosts is safe; a
+  library caller's `DeleteTarget::scratch_dir` is swept the same way, the system temporary directory never.
+
 ### Changed
 - `reso-ingest`: an S3 endpoint at `storage.googleapis.com` is refused, since GCS's interoperability API ignores the
   S3 precondition headers (#115); use `--gcs-bucket`. Breaking for code that builds `S3Options` with a struct
