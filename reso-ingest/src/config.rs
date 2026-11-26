@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use reso_client::{
-    Auth, ClientConfig, ClientCredentials, CredentialTransport, DownloadConfig, RateLimit,
-    RetryPolicy, SendToken,
+    Auth, ClientConfig, ClientCredentials, CredentialTransport, DownloadConfig, NetworkOptions,
+    RateLimit, RetryPolicy, SendToken,
 };
 use serde::Deserialize;
 
@@ -58,6 +58,11 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// [server.media]                      # optional; file downloads (`reso-ingest media`)
 /// per_second = 4
 /// send_token = "same_host"            # never, same_host (default) or always
+///
+/// [server.network]                    # optional; proxy, CA, User-Agent, pool
+/// proxy = "http://proxy.corp.example:3128"   # or proxy_env / proxy_file when it holds a password
+/// ca_files = ["/etc/ssl/corp-ca.pem"]
+/// user_agent = "acme-ingest/1.0 (data@acme.example)"
 /// ```
 ///
 /// See `reso-ingest/servers.example.toml` for a complete file.
@@ -123,6 +128,136 @@ pub struct ServerConfig {
     /// `sync --backfill`: the backfill's share of the rate limits
     #[serde(default)]
     pub backfill: BackfillConfig,
+    /// Proxy, extra CA certificates, User-Agent and connection pool, for API and media requests
+    #[serde(default)]
+    pub network: NetworkConfig,
+}
+
+/// The User-Agent `reso-ingest` sends when `network.user_agent` is not set
+pub const DEFAULT_USER_AGENT: &str = concat!("reso-ingest/", env!("CARGO_PKG_VERSION"));
+
+/// Network settings of one server (all optional); see [`NetworkOptions`]
+///
+/// Without a proxy setting the `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` variables
+/// are honoured. A proxy URL with a user name or password is a secret: name it with `proxy_env`
+/// or `proxy_file`, never `proxy`; it is read again with the auth secrets, so a rotated file is
+/// picked up without a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfig {
+    /// Proxy URL for every request of this server (no credentials in it)
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// Variable holding the proxy URL (may hold `user:password@`)
+    #[serde(default)]
+    pub proxy_env: Option<String>,
+    /// File holding the proxy URL (may hold `user:password@`)
+    #[serde(default)]
+    pub proxy_file: Option<String>,
+    /// Hosts that bypass the proxy, in the `NO_PROXY` format (`localhost,.example.com`)
+    #[serde(default)]
+    pub no_proxy: Option<String>,
+    /// Honour the proxy environment variables when no proxy is set (default true)
+    #[serde(default)]
+    pub system_proxy: Option<bool>,
+    /// PEM files of extra trusted CA certificates
+    #[serde(default)]
+    pub ca_files: Vec<String>,
+    /// The `User-Agent` header (default `reso-ingest/<version>`)
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    /// Most idle connections kept per host
+    #[serde(default)]
+    pub pool_max_idle_per_host: Option<usize>,
+    /// Seconds an idle connection is kept (default 90)
+    #[serde(default)]
+    pub pool_idle_timeout_secs: Option<u64>,
+}
+
+impl NetworkConfig {
+    /// Where the proxy URL is read from, when `proxy_env` or `proxy_file` is set
+    fn proxy_source(&self) -> Result<Option<SecretSource>, String> {
+        if self.proxy_env.is_none() && self.proxy_file.is_none() {
+            return Ok(None);
+        }
+        SecretSource::pick("network", "proxy", &self.proxy_env, &self.proxy_file).map(Some)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let sources = [&self.proxy, &self.proxy_env, &self.proxy_file]
+            .iter()
+            .filter(|s| s.is_some())
+            .count();
+        if sources > 1 {
+            return Err("network: set only one of proxy, proxy_env and proxy_file".into());
+        }
+        if let Some(proxy) = &self.proxy {
+            check_proxy_url(proxy).map_err(|e| format!("network.proxy {e}"))?;
+            let url = reqwest::Url::parse(proxy)
+                .map_err(|_| "network.proxy is not a valid URL".to_owned())?;
+            if !url.username().is_empty() || url.password().is_some() {
+                return Err("network.proxy must not hold a user name or password; put the URL in a variable or file and name it with proxy_env or proxy_file".into());
+            }
+        }
+        self.proxy_source()?;
+        if self
+            .no_proxy
+            .as_deref()
+            .is_some_and(|h| h.trim().is_empty())
+        {
+            return Err("network.no_proxy must not be empty".into());
+        }
+        if self.ca_files.iter().any(|f| f.trim().is_empty()) {
+            return Err("network.ca_files has an empty path".into());
+        }
+        if let Some(agent) = &self.user_agent {
+            if agent.trim().is_empty() || agent.chars().any(|c| c.is_control()) {
+                return Err("network.user_agent must be non-empty text on one line".into());
+            }
+        }
+        if self.pool_idle_timeout_secs == Some(0) {
+            return Err("network.pool_idle_timeout_secs must be at least 1".into());
+        }
+        Ok(())
+    }
+
+    /// The [`NetworkOptions`] these settings describe, with `proxy` read from its source if any
+    ///
+    /// CA files are read now.
+    fn options(&self, proxy: Option<String>) -> Result<NetworkOptions, String> {
+        let mut options = NetworkOptions::default()
+            .with_user_agent(self.user_agent.as_deref().unwrap_or(DEFAULT_USER_AGENT));
+        if let Some(url) = proxy.or_else(|| self.proxy.clone()) {
+            options = options.with_proxy(url);
+        }
+        if let Some(hosts) = &self.no_proxy {
+            options = options.with_no_proxy(hosts);
+        }
+        if self.system_proxy == Some(false) {
+            options = options.without_system_proxy();
+        }
+        for path in &self.ca_files {
+            options = options
+                .with_ca_file(path)
+                .map_err(|e| format!("network.ca_files: {e}"))?;
+        }
+        if let Some(max) = self.pool_max_idle_per_host {
+            options = options.with_pool_max_idle_per_host(max);
+        }
+        if let Some(secs) = self.pool_idle_timeout_secs {
+            options = options.with_pool_idle_timeout(Duration::from_secs(secs));
+        }
+        Ok(options)
+    }
+}
+
+/// A proxy URL must be `http://` or `https://`
+fn check_proxy_url(url: &str) -> Result<(), String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err("must start with http:// or https://".into())
+    }
 }
 
 /// The share of a server's `[server.limits]` rate limits a backfill runs within (`sync --backfill`)
@@ -288,7 +423,9 @@ impl AuthConfig {
             AuthConfig::Bearer {
                 token_env,
                 token_file,
-            } => Ok(vec![SecretSource::pick("token", token_env, token_file)?]),
+            } => Ok(vec![SecretSource::pick(
+                "auth", "token", token_env, token_file,
+            )?]),
             AuthConfig::ClientCredentials {
                 client_id_env,
                 client_id_file,
@@ -296,8 +433,13 @@ impl AuthConfig {
                 client_secret_file,
                 ..
             } => Ok(vec![
-                SecretSource::pick("client_id", client_id_env, client_id_file)?,
-                SecretSource::pick("client_secret", client_secret_env, client_secret_file)?,
+                SecretSource::pick("auth", "client_id", client_id_env, client_id_file)?,
+                SecretSource::pick(
+                    "auth",
+                    "client_secret",
+                    client_secret_env,
+                    client_secret_file,
+                )?,
             ]),
         }
     }
@@ -313,7 +455,12 @@ pub enum SecretSource {
 }
 
 impl SecretSource {
-    fn pick(field: &str, env: &Option<String>, file: &Option<String>) -> Result<Self, String> {
+    fn pick(
+        section: &str,
+        field: &str,
+        env: &Option<String>,
+        file: &Option<String>,
+    ) -> Result<Self, String> {
         match (env, file) {
             (Some(e), None) => {
                 // A pasted secret in an `_env` field would not look like a variable name
@@ -321,18 +468,20 @@ impl SecretSource {
                     Ok(Self::Env(e.clone()))
                 } else {
                     Err(format!(
-                        "auth.{field}_env must be an environment variable name (letters, digits, underscore); the value is not echoed because it may be a secret"
+                        "{section}.{field}_env must be an environment variable name (letters, digits, underscore); the value is not echoed because it may be a secret"
                     ))
                 }
             }
             (None, Some(f)) if f.trim().is_empty() => {
-                Err(format!("auth.{field}_file must not be empty"))
+                Err(format!("{section}.{field}_file must not be empty"))
             }
             (None, Some(f)) => Ok(Self::File(PathBuf::from(f))),
             (Some(_), Some(_)) => Err(format!(
-                "auth: set only one of {field}_env and {field}_file"
+                "{section}: set only one of {field}_env and {field}_file"
             )),
-            (None, None) => Err(format!("auth: {field}_env or {field}_file is required")),
+            (None, None) => Err(format!(
+                "{section}: {field}_env or {field}_file is required"
+            )),
         }
     }
 
@@ -374,7 +523,8 @@ impl SecretSource {
     }
 }
 
-/// The values of a server's secrets, in the order of [`AuthConfig::sources`]; `Debug` redacts them
+/// The values of a server's secrets, in the order of [`AuthConfig::sources`], then the proxy URL
+/// when it is read from `network.proxy_env` or `network.proxy_file`; `Debug` redacts them
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Secrets(Vec<String>);
 
@@ -746,6 +896,7 @@ impl ServerConfig {
             }
         }
         self.auth.sources()?;
+        self.network.validate()?;
         Ok(())
     }
 
@@ -828,10 +979,12 @@ impl ServerConfig {
         &self,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Secrets, IngestError> {
-        let sources = self.auth.sources().map_err(|message| IngestError::Server {
+        let fail = |message| IngestError::Server {
             server: self.name.clone(),
             message,
-        })?;
+        };
+        let mut sources = self.auth.sources().map_err(fail)?;
+        sources.extend(self.network.proxy_source().map_err(fail)?);
         sources
             .iter()
             .map(|s| s.read(&self.name, lookup))
@@ -853,6 +1006,11 @@ impl ServerConfig {
                     server: self.name.clone(),
                     message: "a secret is missing".into(),
                 })
+        };
+        let auth_count = self.auth.sources().map(|s| s.len()).unwrap_or(0);
+        let proxy = match self.network.proxy_source() {
+            Ok(Some(_)) => Some(secret(auth_count)?),
+            _ => None,
         };
         let auth = match &self.auth {
             AuthConfig::Bearer { .. } => Auth::Bearer(secret(0)?),
@@ -879,6 +1037,12 @@ impl ServerConfig {
         if let Some(id) = &self.dataset_id {
             config = config.with_dataset_id(id);
         }
+        config = config.with_network(self.network.options(proxy).map_err(|message| {
+            IngestError::Server {
+                server: self.name.clone(),
+                message,
+            }
+        })?);
 
         let l = &self.limits;
         let mut retry = RetryPolicy::new(l.max_retries.unwrap_or(DEFAULT_MAX_RETRIES));

@@ -142,9 +142,26 @@ per_second = 4                      # also per_hour, per_day, bytes_per_hour, by
 timeout_secs = 300                  # per file; default 120
 send_token = "same_host"            # never, same_host (default) or always
 workers = 4                         # download workers per server (default 4)
+
+[server.network]                    # optional; API and media requests of this server
+proxy = "http://proxy.corp.example:3128"   # or proxy_env / proxy_file when it holds user:password@
+no_proxy = "localhost,.corp.example"
+system_proxy = true                 # honour HTTPS_PROXY/HTTP_PROXY/NO_PROXY when no proxy is set (default true)
+ca_files = ["/etc/ssl/corp-ca.pem"] # extra trusted CA certificates (PEM)
+user_agent = "acme-ingest/1.0 (data@acme.example)"   # default reso-ingest/<version>
+pool_max_idle_per_host = 8          # default no cap
+pool_idle_timeout_secs = 90         # default 90
 ```
 
 Each server runs as its own task: one server failing does not stop the others.
+
+**Network.** `[server.network]` sets the proxy, extra CA certificates, User-Agent and connection pool of one server's
+API, token and media requests (see `NetworkOptions` in `reso-client`). A proxy URL with a user name or password is a
+secret: `proxy` rejects one, and `proxy_env` or `proxy_file` names where it is read from, like the auth secrets (read
+again before each resource, so a rotated file is picked up). CA files are read when the client is built. Vendors
+that only accept registered IP addresses need a fixed egress IP: a NAT gateway or a forward proxy; see "Fixed egress
+IP" in the [top-level README](../README.md#network-proxy-ca-certificates-user-agent-connection-pool). The run-summary
+webhook does not use these settings; it honours the proxy variables.
 
 Some servers need a filter on every request or serve related records only inline. `filter` on a server is added (by
 `and`) to every query sent to it: sync pulls, and the key pulls and lookups of `--deletes` (not the `EntityEvent`
@@ -497,7 +514,8 @@ the webhook) and `aws-lc` (rustls inside `object_store`, used by the `--s3-*` op
 TLS roots: requests to RESO servers and the webhook use roots built into the binary (webpki-roots). The S3 client checks
 certificates against the system CA bundle, so the image carries one at `/etc/ssl/certs/ca-certificates.crt` (Alpine's).
 For a store with a private CA, mount a bundle that includes it over that file. Without any bundle, every S3 request
-fails with `Generic HTTP client error: builder error`.
+fails with `Generic HTTP client error: builder error`. For a RESO server behind a private CA or a TLS-inspecting proxy,
+mount its PEM and list it in `[server.network] ca_files`.
 
 ```sh
 docker build -t reso-ingest .

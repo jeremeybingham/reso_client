@@ -69,3 +69,13 @@ timeout_secs = 300
 send_token = "same_host"                     # never, same_host (default) or always
 # nested_field = "Media"                     # `sync --media`: array of media records inside a record
 # workers = 4                                # download workers per server (default 4)
+
+# Network settings of this server's API and media requests (all optional)
+# [server.network]
+# proxy = "http://proxy.corp.example:3128"   # no credentials here: use proxy_env or proxy_file for user:password@
+# no_proxy = "localhost,.corp.example"
+# system_proxy = true                        # honour HTTPS_PROXY/HTTP_PROXY/NO_PROXY when no proxy is set
+# ca_files = ["/etc/ssl/corp-ca.pem"]
+# user_agent = "acme-ingest/1.0 (data@acme.example)"   # default reso-ingest/<version>
+# pool_max_idle_per_host = 8
+# pool_idle_timeout_secs = 90

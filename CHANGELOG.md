@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `reso-client`: requests now send a `User-Agent` header, `reso-client/<version>` by default (none was sent before);
+  `reso-ingest` sends `reso-ingest/<version>` (#91).
+- `reso-client`: breaking: `ClientConfig` has a new public field `network`; code that builds `ClientConfig` with a
+  struct literal must set it (`NetworkOptions::default()`) (#91).
 - `reso-ingest`: the Parquet `fetched_at` column is now a UTC timestamp in milliseconds
   (`Timestamp(Millisecond, "+00:00")`); it was seconds with no time zone, which DuckDB read as an integer (#86).
 - `reso-ingest`: `FileSink::list` (`LocalDirSink`, `S3FileSink`) also returns the files in the `source=…` partition
@@ -24,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   held whole in memory during a run.
 
 ### Added
+- Network options (#91): `NetworkOptions` (`ClientConfig::with_network`) sets an HTTP(S) proxy (with basic proxy
+  credentials and a `NO_PROXY` list; the proxy variables are honoured by default, `without_system_proxy` turns them
+  off), extra trusted CA certificates (PEM bytes or a file), the `User-Agent`, and the connection pool's idle cap and
+  timeout. They apply to API, token and `Downloader` requests. `ClientConfig::from_env` reads `RESO_PROXY`,
+  `RESO_NO_PROXY`, `RESO_CA_FILE` and `RESO_USER_AGENT`. `reso-ingest` reads them from `[server.network]`; a proxy URL
+  with credentials comes from `proxy_env` or `proxy_file`, never the file. Proxy passwords are left out of `Debug`
+  output and errors. The README covers fixed egress IPs (NAT gateway or proxy) for vendors that allow-list addresses.
 - `reso-ingest`: delivery guarantee documented (#86): at least once, ordered by `ModificationTimestamp` then key within
   a resource's run, idempotency key `(source, resource, key, ModificationTimestamp)`; a repeat after an interrupted run
   is the same record with new `fetched_at` and `run_id` (tested). `sync --partition` and `serve --partition` (Parquet

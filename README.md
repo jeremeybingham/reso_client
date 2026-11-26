@@ -159,6 +159,10 @@ The full API, with examples, is the rustdoc: [docs.rs/reso-client](https://docs.
 | `RESO_TIMEOUT` | No | HTTP timeout in seconds (default 30) |
 | `RESO_MAX_RETRIES` | No | Retries for network errors and 429/502/503/504 (default 0) |
 | `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_RATE_PER_DAY`, `RESO_BYTES_PER_HOUR`, `RESO_BYTES_PER_DAY` | No | Client-side ceilings (default none) |
+| `RESO_PROXY` | No | Proxy URL for every request, optionally with `user:password@`; without it `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` are honoured |
+| `RESO_NO_PROXY` | No | Hosts that bypass `RESO_PROXY`, in the `NO_PROXY` format (`localhost,.example.com`) |
+| `RESO_CA_FILE` | No | PEM file of extra trusted CA certificates (a TLS-inspecting proxy's, or a vendor's private CA) |
+| `RESO_USER_AGENT` | No | The `User-Agent` header (default `reso-client/<version>`) |
 
 Or in code:
 
@@ -175,6 +179,43 @@ let config = ClientConfig::with_auth("https://api.mls.example/odata", credential
     .with_rate_limit(RateLimit::default().per_second(2));
 let client = ResoClient::with_config(config)?;
 ```
+
+### Network: proxy, CA certificates, User-Agent, connection pool
+
+`NetworkOptions` holds the settings corporate networks and vendors ask for. They apply to API, token and file
+(`Downloader`) requests alike:
+
+```rust
+use std::time::Duration;
+use reso_client::{ClientConfig, NetworkOptions, ResoClient};
+
+let network = NetworkOptions::default()
+    .with_proxy("http://proxy.corp.example:3128")       // replaces HTTPS_PROXY/HTTP_PROXY/NO_PROXY
+    .with_no_proxy("localhost,.corp.example")
+    .with_ca_file("/etc/ssl/corp-ca.pem")?               // trusted as well as the public roots
+    .with_user_agent("acme-ingest/1.0 (data@acme.example)")
+    .with_pool_max_idle_per_host(8)
+    .with_pool_idle_timeout(Duration::from_secs(60));
+let config = ClientConfig::new("https://api.mls.example/odata", "token").with_network(network);
+let client = ResoClient::with_config(config)?;
+```
+
+By default the proxy variables are honoured (`without_system_proxy()` turns them off), only the bundled public roots
+are trusted, the User-Agent is `reso-client/<version>` and reqwest's pool defaults apply (no cap on idle connections,
+90 s idle timeout). A proxy password never appears in `Debug` output or errors. Only `http://` and `https://` proxies
+are supported (no SOCKS).
+
+**Fixed egress IP.** Many MLS vendors only answer requests from IP addresses registered during onboarding, and ask for
+them before they issue credentials. The client cannot choose its source address; give the host or cluster a fixed
+public IP for outbound traffic and register that:
+
+- on a cloud network, a NAT gateway with a static IP (AWS NAT Gateway with an Elastic IP, GCP Cloud NAT with reserved
+  addresses, Azure NAT Gateway with a public IP prefix) for the subnet the client runs in; or
+- a forward proxy with a fixed IP (Squid, a corporate proxy), set as `with_proxy`, `RESO_PROXY` or, for
+  `reso-ingest`, `[server.network] proxy`.
+
+Check the address the vendor sees with `curl https://checkip.amazonaws.com` from the same host, pod or proxy. Pods
+whose nodes have their own public IPs do not go through the NAT gateway; check that the route goes where you expect.
 
 ## Ingest command
 
@@ -246,8 +287,8 @@ what is left needs a real server or someone else:
   graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
   harness, delete detection at millions of keys, backfill, media at scale, media index saves
   ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
-  ([#86](https://github.com/jeremeybingham/reso_client/issues/86)). Open: network options
-  ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), observability follow-ups
+  ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
+  ([#91](https://github.com/jeremeybingham/reso_client/issues/91)). Open: observability follow-ups
   ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds
   ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness
   ([#95](https://github.com/jeremeybingham/reso_client/issues/95)); Postgres and stream backends wait on an owner

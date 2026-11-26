@@ -174,6 +174,7 @@ pub mod client;
 pub mod download;
 pub mod error;
 pub mod metadata;
+pub mod network;
 pub mod paging;
 pub mod queries;
 pub mod replication;
@@ -190,6 +191,7 @@ pub use error::{ResoError, Result};
 pub use metadata::{
     EntitySet, EntityType, EnumMember, EnumType, Metadata, NavigationProperty, Property,
 };
+pub use network::NetworkOptions;
 pub use paging::Page;
 pub use queries::{Query, QueryBuilder, ReplicationQuery, ReplicationQueryBuilder};
 pub use replication::ReplicationResponse;

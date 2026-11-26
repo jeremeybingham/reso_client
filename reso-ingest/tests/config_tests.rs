@@ -502,3 +502,107 @@ fn each_secret_needs_exactly_one_source() {
     let (_, message) = server_error(&bearer_with("token = \"abc\""));
     assert!(message.contains("token_file"), "{message}");
 }
+
+const NETWORK_BASE: &str = "[[server]]\nname = \"a\"\nbase_url = \"https://a.example\"\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"T\"\n[server.network]\n";
+
+fn network_env(name: &str) -> Option<String> {
+    match name {
+        "T" => Some("the-token".into()),
+        "CORP_PROXY" => Some("http://alice:s3cret@proxy.corp.example:3128".into()),
+        _ => None,
+    }
+}
+
+#[test]
+fn network_settings_reach_the_client_config() {
+    let ca = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/tls/ca.pem");
+    let text = format!(
+        "{NETWORK_BASE}proxy = \"http://proxy.corp.example:3128\"\nno_proxy = \"localhost\"\nca_files = [\"{ca}\"]\nuser_agent = \"acme/1.0\"\npool_max_idle_per_host = 4\npool_idle_timeout_secs = 30\n"
+    );
+    let config = Config::parse(&text).unwrap();
+    let c = config.servers[0].client_config_with(network_env).unwrap();
+    assert_eq!(
+        c.network.proxy.as_deref(),
+        Some("http://proxy.corp.example:3128")
+    );
+    assert_eq!(c.network.no_proxy.as_deref(), Some("localhost"));
+    assert_eq!(c.network.ca_certificates.len(), 1);
+    assert_eq!(c.network.user_agent, "acme/1.0");
+    assert_eq!(c.network.pool_max_idle_per_host, Some(4));
+    assert_eq!(
+        c.network.pool_idle_timeout,
+        Some(std::time::Duration::from_secs(30))
+    );
+    assert!(c.network.system_proxy);
+}
+
+#[test]
+fn network_defaults_send_the_reso_ingest_user_agent() {
+    let config = Config::parse(EXAMPLE).unwrap();
+    let c = config.servers[0].client_config_with(env).unwrap();
+    assert_eq!(c.network.user_agent, reso_ingest::DEFAULT_USER_AGENT);
+    assert!(c.network.user_agent.starts_with("reso-ingest/"));
+    assert!(c.network.proxy.is_none());
+    assert!(c.network.system_proxy);
+}
+
+#[test]
+fn proxy_with_credentials_is_read_from_its_variable() {
+    let text = format!("{NETWORK_BASE}proxy_env = \"CORP_PROXY\"\nsystem_proxy = false\n");
+    let config = Config::parse(&text).unwrap();
+    let c = config.servers[0].client_config_with(network_env).unwrap();
+    assert_eq!(
+        c.network.proxy.as_deref(),
+        Some("http://alice:s3cret@proxy.corp.example:3128")
+    );
+    assert!(!c.network.system_proxy);
+    // Debug output of the config hides the proxy password
+    assert!(!format!("{c:?}").contains("s3cret"));
+
+    let err = config.servers[0]
+        .client_config_with(|n| (n == "T").then(|| "t".into()))
+        .unwrap_err();
+    assert!(err.to_string().contains("CORP_PROXY"), "{err}");
+}
+
+#[test]
+fn proxy_with_credentials_in_the_file_is_rejected_without_echoing_them() {
+    let (server, message) = server_error(&format!(
+        "{NETWORK_BASE}proxy = \"http://alice:s3cret@proxy:3128\"\n"
+    ));
+    assert_eq!(server, "a");
+    assert!(message.contains("proxy_env"), "{message}");
+    assert!(!message.contains("s3cret"), "{message}");
+}
+
+#[test]
+fn bad_network_values_are_rejected() {
+    for (extra, expected) in [
+        ("proxy = \"socks5://p:1080\"", "network.proxy"),
+        ("proxy = \"http://p:1\"\nproxy_env = \"P\"", "only one of"),
+        ("proxy_env = \"http://p:1\"", "network.proxy_env"),
+        ("proxy_file = \"\"", "network.proxy_file"),
+        ("ca_files = [\"\"]", "ca_files"),
+        ("user_agent = \"\"", "user_agent"),
+        ("pool_idle_timeout_secs = 0", "pool_idle_timeout_secs"),
+        ("no_proxy = \" \"", "no_proxy"),
+        ("tls = true", "unknown field"),
+    ] {
+        let (_, message) = server_error(&format!("{NETWORK_BASE}{extra}\n"));
+        assert!(message.contains(expected), "{extra}: {message}");
+    }
+}
+
+#[test]
+fn missing_ca_file_names_the_server() {
+    let config = Config::parse(&format!(
+        "{NETWORK_BASE}ca_files = [\"/nonexistent/ca.pem\"]\n"
+    ))
+    .unwrap();
+    let err = config.servers[0]
+        .client_config_with(network_env)
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("`a`"), "{text}");
+    assert!(text.contains("ca_files"), "{text}");
+}
