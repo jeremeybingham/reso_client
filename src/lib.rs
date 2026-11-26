@@ -183,7 +183,9 @@ pub mod standard_replication;
 // Re-export main types for convenience
 pub use auth::{Auth, ClientCredentials, CredentialTransport};
 pub use client::{ClientConfig, ResoClient};
-pub use download::{DownloadConfig, DownloadOutcome, Downloader, SavedFile, SendToken, Validators};
+pub use download::{
+    DownloadConfig, DownloadOutcome, DownloadTarget, Downloader, SavedFile, SendToken, Validators,
+};
 pub use error::{ResoError, Result};
 pub use metadata::{
     EntitySet, EntityType, EnumMember, EnumType, Metadata, NavigationProperty, Property,

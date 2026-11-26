@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use reso_client::{
-    ClientConfig, ClientCredentials, DownloadConfig, DownloadOutcome, ResoClient, ResoError,
-    RetryPolicy, SendToken, Validators,
+    ClientConfig, ClientCredentials, DownloadConfig, DownloadOutcome, DownloadTarget, ResoClient,
+    ResoError, Result, RetryPolicy, SavedFile, SendToken, Validators,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -337,4 +337,132 @@ async fn token_scope_decisions() {
         .downloader(DownloadConfig::default().with_send_token(SendToken::Never))
         .unwrap();
     assert!(!never.sends_token_to("https://api.example.com/media/1.jpg"));
+}
+
+/// Keeps the body in memory and counts the calls; fails its first `fail_writes` writes
+#[derive(Default)]
+struct Memory {
+    body: Vec<u8>,
+    starts: u32,
+    finished: u32,
+    aborts: u32,
+    fail_writes: u32,
+    content_type: Option<String>,
+}
+
+impl DownloadTarget for Memory {
+    async fn start(&mut self, file: &SavedFile) -> Result<()> {
+        self.starts += 1;
+        self.body.clear();
+        self.content_type = file.content_type.clone();
+        Ok(())
+    }
+    async fn write(&mut self, chunk: &[u8]) -> Result<()> {
+        if self.fail_writes > 0 {
+            self.fail_writes -= 1;
+            return Err(ResoError::Io("disk full".into()));
+        }
+        self.body.extend_from_slice(chunk);
+        Ok(())
+    }
+    async fn finish(&mut self) -> Result<()> {
+        self.finished += 1;
+        Ok(())
+    }
+    async fn abort(&mut self) {
+        self.aborts += 1;
+        self.body.clear();
+    }
+}
+
+#[tokio::test]
+async fn download_into_streams_to_a_target_after_a_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .respond_with(photo())
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let client = client(&server.uri());
+    let d = client
+        .downloader(DownloadConfig::default().with_retry(fast(2)))
+        .unwrap();
+    let mut target = Memory::default();
+    let outcome = d
+        .download_into(
+            &format!("{}/f", server.uri()),
+            &Validators::default(),
+            &mut target,
+        )
+        .await
+        .unwrap();
+    let DownloadOutcome::Saved(saved) = outcome else {
+        panic!("expected a body");
+    };
+    assert_eq!(saved.bytes, 8);
+    assert_eq!(target.body, b"JPEGDATA");
+    assert_eq!(target.content_type.as_deref(), Some("image/jpeg"));
+    // The 503 had no body for the target: one start, one finish, no abort
+    assert_eq!((target.starts, target.finished, target.aborts), (1, 1, 0));
+}
+
+#[tokio::test]
+async fn download_into_aborts_on_a_target_error_and_does_not_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .respond_with(photo())
+        .mount(&server)
+        .await;
+    let client = client(&server.uri());
+    let d = client
+        .downloader(DownloadConfig::default().with_retry(fast(3)))
+        .unwrap();
+    let mut target = Memory {
+        fail_writes: 1,
+        ..Memory::default()
+    };
+    let err = d
+        .download_into(
+            &format!("{}/f", server.uri()),
+            &Validators::default(),
+            &mut target,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ResoError::Io(_)), "{err}");
+    assert_eq!((target.starts, target.finished, target.aborts), (1, 0, 1));
+    assert_eq!(d.stats().requests, 1);
+}
+
+#[tokio::test]
+async fn download_into_304_touches_no_target() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/f"))
+        .and(header("If-None-Match", "\"v1\""))
+        .respond_with(ResponseTemplate::new(304))
+        .mount(&server)
+        .await;
+    let client = client(&server.uri());
+    let d = client.downloader(DownloadConfig::default()).unwrap();
+    let mut target = Memory::default();
+    let validators = Validators {
+        etag: Some("\"v1\"".into()),
+        last_modified: None,
+    };
+    let outcome = d
+        .download_into(&format!("{}/f", server.uri()), &validators, &mut target)
+        .await
+        .unwrap();
+    assert_eq!(outcome, DownloadOutcome::NotModified);
+    assert_eq!(target.starts, 0);
 }

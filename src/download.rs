@@ -7,12 +7,14 @@
 //! downloads do not use up the API's budget and the API does not slow downloads. Each download is
 //! a conditional GET (`If-None-Match`, `If-Modified-Since`) streamed to `<dest>.part` and renamed
 //! to `dest` once complete, so a failed or interrupted download never leaves a partial file under
-//! the final name.
+//! the final name. [`Downloader::download_into`] streams the body into any [`DownloadTarget`]
+//! instead (object storage, a hasher, memory), with the same retries and limits.
 //!
 //! Media files usually live on a CDN, not on the API host, so the API token is sent only where
 //! [`SendToken`] allows (by default: the API's own scheme, host and port).
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -158,6 +160,91 @@ pub enum DownloadOutcome {
     Saved(SavedFile),
 }
 
+/// Where [`Downloader::download_into`] streams a response body
+///
+/// One download may take several attempts (retries after a network error or a 429/5xx): each
+/// attempt that gets a body calls [`start`](Self::start), then [`write`](Self::write) per chunk,
+/// then either [`finish`](Self::finish) once the body is complete or [`abort`](Self::abort) when
+/// it broke off, so a target throws away a partial body and the next attempt starts clean. A 304
+/// calls none of them.
+///
+/// # Examples
+///
+/// ```
+/// # use reso_client::{DownloadTarget, Result, SavedFile};
+/// /// Keeps the body in memory
+/// #[derive(Default)]
+/// struct Memory(Vec<u8>);
+///
+/// impl DownloadTarget for Memory {
+///     async fn start(&mut self, _file: &SavedFile) -> Result<()> {
+///         self.0.clear();
+///         Ok(())
+///     }
+///     async fn write(&mut self, chunk: &[u8]) -> Result<()> {
+///         self.0.extend_from_slice(chunk);
+///         Ok(())
+///     }
+///     async fn finish(&mut self) -> Result<()> {
+///         Ok(())
+///     }
+///     async fn abort(&mut self) {
+///         self.0.clear();
+///     }
+/// }
+/// ```
+pub trait DownloadTarget: Send {
+    /// A body begins; `file` holds the response headers (its `bytes` is 0)
+    fn start(&mut self, file: &SavedFile) -> impl Future<Output = Result<()>> + Send;
+    /// The next chunk of the body
+    fn write(&mut self, chunk: &[u8]) -> impl Future<Output = Result<()>> + Send;
+    /// The body is complete: make it durable
+    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send;
+    /// The attempt failed after `start`: drop what was written
+    fn abort(&mut self) -> impl Future<Output = ()> + Send;
+}
+
+/// The target of [`Downloader::download_to`]: `<dest>.part`, renamed to `dest` when complete
+struct FileTarget<'p> {
+    dest: &'p Path,
+    part: PathBuf,
+    file: Option<tokio::fs::File>,
+}
+
+impl DownloadTarget for FileTarget<'_> {
+    async fn start(&mut self, _file: &SavedFile) -> Result<()> {
+        let file = tokio::fs::File::create(&self.part)
+            .await
+            .map_err(|e| io_error(&self.part, &e))?;
+        self.file = Some(file);
+        Ok(())
+    }
+
+    async fn write(&mut self, chunk: &[u8]) -> Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file
+                .write_all(chunk)
+                .await
+                .map_err(|e| io_error(&self.part, &e)),
+            None => Err(ResoError::Io(format!("{}: not open", self.part.display()))),
+        }
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        if let Some(mut file) = self.file.take() {
+            file.flush().await.map_err(|e| io_error(&self.part, &e))?;
+        }
+        tokio::fs::rename(&self.part, self.dest)
+            .await
+            .map_err(|e| io_error(self.dest, &e))
+    }
+
+    async fn abort(&mut self) {
+        self.file = None;
+        let _ = tokio::fs::remove_file(&self.part).await;
+    }
+}
+
 /// Downloads files with its own retry, pacing and counters; see the [module docs](self)
 ///
 /// # Examples
@@ -254,27 +341,45 @@ impl Downloader<'_> {
         dest: &Path,
         validators: &Validators,
     ) -> Result<DownloadOutcome> {
-        let parsed = Url::parse(url)
-            .ok()
-            .filter(|u| u.scheme() == "http" || u.scheme() == "https")
-            .ok_or_else(|| ResoError::InvalidQuery("not an absolute http(s) URL".into()))?;
+        check_url(url)?;
         if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| io_error(parent, &e))?;
         }
-        let part = part_path(dest);
+        let mut target = FileTarget {
+            dest,
+            part: part_path(dest),
+            file: None,
+        };
+        self.download_into(url, validators, &mut target).await
+    }
+
+    /// Download `url` into `target`, unless `validators` show the stored copy is current
+    ///
+    /// The same retries, pacing, token rule and counters as [`download_to`](Self::download_to);
+    /// the body goes to `target` chunk by chunk and is never held whole in memory here. On
+    /// success the returned [`SavedFile`] holds the headers and the byte count.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`download_to`](Self::download_to); errors `target` returns end the download
+    /// (they are not retried).
+    pub async fn download_into<T: DownloadTarget>(
+        &self,
+        url: &str,
+        validators: &Validators,
+        target: &mut T,
+    ) -> Result<DownloadOutcome> {
+        let parsed = check_url(url)?;
         let with_token = self.sends_token_to(url);
 
         let policy = &self.config.retry;
         let mut retries = 0u32;
         loop {
             let outcome = self
-                .attempt(parsed.as_str(), dest, &part, validators, with_token)
+                .attempt(parsed.as_str(), target, validators, with_token)
                 .await;
-            if outcome.is_err() || matches!(outcome, Ok(Attempt::Retry { .. })) {
-                let _ = tokio::fs::remove_file(&part).await;
-            }
             let (error, retry_after) = match outcome {
                 Ok(Attempt::Done(done)) => return Ok(done),
                 Ok(Attempt::Retry { error, retry_after }) => (error, retry_after),
@@ -301,11 +406,10 @@ impl Downloader<'_> {
     }
 
     /// One request, with the one-time token renewal after a 401, streamed to `part`
-    async fn attempt(
+    async fn attempt<T: DownloadTarget>(
         &self,
         url: &str,
-        dest: &Path,
-        part: &Path,
+        target: &mut T,
         validators: &Validators,
         with_token: bool,
     ) -> Result<Attempt> {
@@ -357,15 +461,13 @@ impl Downloader<'_> {
             last_modified: header(LAST_MODIFIED),
             content_type: header(CONTENT_TYPE),
         };
-        let mut file = tokio::fs::File::create(part)
-            .await
-            .map_err(|e| io_error(part, &e))?;
+        target.start(&saved).await?;
         let streamed = loop {
             match response.chunk().await {
                 Ok(Some(chunk)) => {
                     saved.bytes += chunk.len() as u64;
-                    if let Err(e) = file.write_all(&chunk).await {
-                        break Err(io_error(part, &e));
+                    if let Err(e) = target.write(&chunk).await {
+                        break Err(e);
                     }
                 }
                 Ok(None) => break Ok(()),
@@ -376,12 +478,14 @@ impl Downloader<'_> {
             }
         };
         self.count_bytes(saved.bytes).await;
-        streamed?;
-        file.flush().await.map_err(|e| io_error(part, &e))?;
-        drop(file);
-        tokio::fs::rename(part, dest)
-            .await
-            .map_err(|e| io_error(dest, &e))?;
+        if let Err(e) = streamed {
+            target.abort().await;
+            return Err(e);
+        }
+        if let Err(e) = target.finish().await {
+            target.abort().await;
+            return Err(e);
+        }
         Ok(Attempt::Done(DownloadOutcome::Saved(saved)))
     }
 
@@ -416,6 +520,14 @@ impl Downloader<'_> {
         self.counters.bytes(n);
         self.limiter.record_bytes(n).await;
     }
+}
+
+/// `url` parsed, when it is an absolute http(s) URL
+fn check_url(url: &str) -> Result<Url> {
+    Url::parse(url)
+        .ok()
+        .filter(|u| u.scheme() == "http" || u.scheme() == "https")
+        .ok_or_else(|| ResoError::InvalidQuery("not an absolute http(s) URL".into()))
 }
 
 fn part_path(dest: &Path) -> PathBuf {
