@@ -70,7 +70,7 @@ enum Command {
     /// Each run continues from the saved checkpoint (the first run is the full load). Writes
     /// tagged NDJSON files and a manifest into --out, and checkpoints into --state.
     Sync {
-        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        /// Server configuration: a TOML file, or a directory of them (see reso-ingest/servers.example.toml)
         #[arg(long)]
         config: PathBuf,
         /// Only this server; repeat for several (default: all)
@@ -156,7 +156,7 @@ enum Command {
     /// /healthz, /readyz, /metrics and /status over plain HTTP on --listen (no authentication: use
     /// a private address). Stops after the current pages on SIGTERM or Ctrl-C and exits 0.
     Serve {
-        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        /// Server configuration: a TOML file, or a directory of them (see reso-ingest/servers.example.toml)
         #[arg(long)]
         config: PathBuf,
         /// Only this server; repeat for several (default: all)
@@ -165,6 +165,13 @@ enum Command {
         /// Address for the endpoints
         #[arg(long, default_value = "127.0.0.1:8080")]
         listen: std::net::SocketAddr,
+        /// Re-read --config this often and apply changes without a restart ("30s", "5m")
+        ///
+        /// Feeds are added, removed, paused (`paused = true`) and resumed; a feed whose settings
+        /// changed restarts after its current page. SIGHUP reloads at once, with or without this.
+        /// A configuration that does not parse is logged and the running one kept.
+        #[arg(long, value_parser = parse_reload_every)]
+        reload_every: Option<std::time::Duration>,
         /// Output directory for data files and manifests
         #[arg(long, default_value = DEFAULT_OUT)]
         out: PathBuf,
@@ -203,7 +210,7 @@ enum Command {
     /// changed files into --media-dir/<server>/, named by MediaKey. Files that failed are retried
     /// on the next run. Downloads use the [server.media] limits, not the API's.
     Media {
-        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        /// Server configuration: a TOML file, or a directory of them (see reso-ingest/servers.example.toml)
         #[arg(long)]
         config: PathBuf,
         /// Only this server; repeat for several (default: all)
@@ -226,7 +233,7 @@ enum Command {
     },
     /// Print each server's $metadata model as JSON (resources, keys, properties, enums)
     Discover {
-        /// Server configuration (TOML; see reso-ingest/servers.example.toml)
+        /// Server configuration: a TOML file, or a directory of them (see reso-ingest/servers.example.toml)
         #[arg(long)]
         config: PathBuf,
         /// Only this server; repeat for several (default: all)
@@ -642,6 +649,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             config,
             servers,
             listen,
+            reload_every,
             out: out_dir,
             state,
             deletes,
@@ -668,7 +676,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 storage,
                 ..Args::default()
             };
-            serve(args, listen, err, shutdown).await
+            serve(args, listen, reload_every, err, shutdown).await
         }
         Command::Media {
             config,
@@ -743,10 +751,10 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
 /// Load the config and apply `--server`; `Err` is the exit code (message already printed)
 fn load_servers(args: &Args, err: &mut dyn Write) -> Result<(Config, Vec<ServerConfig>), i32> {
     let Some(path) = &args.config else {
-        let _ = writeln!(err, "error: --config FILE is required");
+        let _ = writeln!(err, "error: --config PATH is required");
         return Err(2);
     };
-    let config = match Config::from_file(path) {
+    let config = match Config::from_path(path) {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(err, "error: {e}");
@@ -822,6 +830,7 @@ fn usage_error(err: &mut dyn Write, e: &IngestError) -> i32 {
 async fn serve(
     args: Args,
     listen: std::net::SocketAddr,
+    reload_every: Option<std::time::Duration>,
     err: &mut dyn Write,
     shutdown: Shutdown,
 ) -> i32 {
@@ -849,16 +858,116 @@ async fn serve(
     options.max_file_bytes = args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024;
     options.format = args.format;
     options.partition = args.partition;
-    match Daemon::start(config, options, shutdown).await {
+    match Daemon::start(config.clone(), options, shutdown.clone()).await {
         Ok(daemon) => {
             let _ = writeln!(err, "listening on http://{}", daemon.local_addr());
+            let daemon = Arc::new(daemon);
+            let reloads = tokio::spawn(reload_loop(
+                Arc::clone(&daemon),
+                ReloadSource {
+                    path: args.config.clone().unwrap_or_default(),
+                    servers: args.servers.clone(),
+                },
+                config,
+                reload_every,
+                shutdown,
+            ));
             daemon.wait().await;
+            reloads.abort();
             0
         }
         Err(e) => {
             let _ = writeln!(err, "error: {e}");
             2
         }
+    }
+}
+
+fn parse_reload_every(text: &str) -> Result<std::time::Duration, String> {
+    crate::config::parse_interval(text)
+}
+
+/// Where `serve` re-reads its configuration from
+struct ReloadSource {
+    path: PathBuf,
+    /// `--server`: only these (all when empty); a name no longer in the file is not an error
+    servers: Vec<String>,
+}
+
+impl ReloadSource {
+    fn load(&self) -> Result<Config, IngestError> {
+        let mut config = Config::from_path(&self.path)?;
+        if !self.servers.is_empty() {
+            config.servers.retain(|s| self.servers.contains(&s.name));
+        }
+        Ok(config)
+    }
+}
+
+/// Reload on SIGHUP and every `every`; a configuration equal to the running one changes nothing
+async fn reload_loop(
+    daemon: Arc<Daemon>,
+    source: ReloadSource,
+    mut running: Config,
+    every: Option<std::time::Duration>,
+    shutdown: Shutdown,
+) {
+    let mut hangup = Hangup::new();
+    loop {
+        let poll = async {
+            match every {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending().await,
+            }
+        };
+        let signalled = tokio::select! {
+            () = poll => false,
+            () = hangup.recv() => true,
+            () = shutdown.triggered() => return,
+        };
+        let config = match source.load() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "reload: configuration not applied, the running one is kept");
+                daemon.reload_failed(&e.to_string());
+                continue;
+            }
+        };
+        if config == running {
+            if signalled {
+                tracing::info!("reload: configuration unchanged");
+            }
+            continue;
+        }
+        if let Err(e) = daemon.reload(&config) {
+            tracing::error!(error = %e, "reload: applied in part");
+        }
+        running = config;
+    }
+}
+
+/// SIGHUP, where there is one
+struct Hangup {
+    #[cfg(unix)]
+    signal: Option<tokio::signal::unix::Signal>,
+}
+
+impl Hangup {
+    fn new() -> Self {
+        Self {
+            #[cfg(unix)]
+            signal: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok(),
+        }
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        if let Some(s) = &mut self.signal {
+            if s.recv().await.is_some() {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
     }
 }
 
@@ -894,10 +1003,16 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
     if let Err(code) = check_partition(&args, err) {
         return code;
     }
-    let (config, servers) = match load_servers(&args, err) {
+    let (config, mut servers) = match load_servers(&args, err) {
         Ok(v) => v,
         Err(code) => return code,
     };
+    servers.retain(|s| {
+        if s.paused {
+            let _ = writeln!(err, "{}: paused in the configuration, skipped", s.name);
+        }
+        !s.paused
+    });
     let (state, sink) = match (args.writable_state_store().await, args.file_sink()) {
         (Ok(state), Ok(sink)) => (state, sink),
         (Err(e), _) | (_, Err(e)) => return usage_error(err, &e),
@@ -1095,7 +1210,19 @@ pub(crate) async fn sync_server_with(
     .map_err(|e| format!("cannot read $metadata: {e}"))?;
     // Media downloads borrow the client the server's sync started with
     let media_client = Arc::clone(&client);
-    let (resources, missing) = select_resources(&server, &metadata, &options.resources);
+    let (mut resources, missing) = select_resources(&server, &metadata, &options.resources);
+    let paused: Vec<String> = resources
+        .iter()
+        .filter(|r| server.is_paused(r))
+        .cloned()
+        .collect();
+    resources.retain(|r| !server.is_paused(r));
+    for r in &paused {
+        send(
+            &tx,
+            format!("{name}/{r}: paused in the configuration, skipped"),
+        );
+    }
     let store = CheckpointStore::with_store(Arc::clone(&options.state));
     let schema_changes = schema_changes(&server, &metadata, &store).await?;
     let mut entries: Vec<ResourceEntry> = missing
@@ -1109,6 +1236,14 @@ pub(crate) async fn sync_server_with(
         })
         .collect();
     entries.iter_mut().for_each(|e| audit(e, None));
+    if resources.is_empty() && entries.is_empty() && !paused.is_empty() {
+        return Ok(ServerOutcome {
+            entries,
+            media: None,
+            schema_changes,
+            rate_usage: handle.rate_usage(),
+        });
+    }
     if resources.is_empty() && entries.is_empty() {
         return Err("no resources to pull (check include/exclude in the configuration)".into());
     }

@@ -606,3 +606,120 @@ fn missing_ca_file_names_the_server() {
     assert!(text.contains("`a`"), "{text}");
     assert!(text.contains("ca_files"), "{text}");
 }
+
+fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("reso-ingest-confdir-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+fn server_text(name: &str) -> String {
+    format!(
+        "[[server]]\nname = \"{name}\"\nbase_url = \"https://{name}.example\"\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"T\"\n"
+    )
+}
+
+#[test]
+fn a_directory_of_files_is_one_configuration() {
+    let dir = temp_dir("merge");
+    std::fs::write(dir.join("b.toml"), server_text("bravo")).unwrap();
+    std::fs::write(
+        dir.join("a.toml"),
+        format!("max_concurrent_servers = 7\n{}", server_text("alpha")),
+    )
+    .unwrap();
+    std::fs::write(dir.join("_settings.toml"), "webhook_url_env = \"HOOK\"\n").unwrap();
+    std::fs::write(dir.join("notes.txt"), "not toml at all [[").unwrap();
+    std::fs::write(dir.join("c.toml.bak"), "broken [[").unwrap();
+    std::fs::create_dir(dir.join("old")).unwrap();
+    std::fs::write(dir.join("old/x.toml"), server_text("old")).unwrap();
+
+    let config = Config::from_path(&dir).unwrap();
+    let names: Vec<&str> = config.servers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["alpha", "bravo"],
+        "files in name order, others ignored"
+    );
+    assert_eq!(config.max_concurrent_servers, 7);
+    assert_eq!(config.webhook_url_env.as_deref(), Some("HOOK"));
+
+    // A single file still works through from_path
+    let one = Config::from_path(dir.join("b.toml")).unwrap();
+    assert_eq!(one.servers.len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn directory_errors_name_the_file() {
+    let dir = temp_dir("errors");
+    std::fs::write(dir.join("a.toml"), server_text("alpha")).unwrap();
+    std::fs::write(dir.join("b.toml"), server_text("alpha")).unwrap();
+    let e = Config::from_path(&dir).unwrap_err().to_string();
+    assert!(e.contains("b.toml") && e.contains("alpha"), "{e}");
+
+    std::fs::write(
+        dir.join("b.toml"),
+        format!("max_concurrent_servers = 2\n{}", server_text("bravo")),
+    )
+    .unwrap();
+    std::fs::write(dir.join("c.toml"), "max_concurrent_servers = 3\n").unwrap();
+    let e = Config::from_path(&dir).unwrap_err().to_string();
+    assert!(
+        e.contains("c.toml") && e.contains("b.toml") && e.contains("max_concurrent_servers"),
+        "{e}"
+    );
+
+    std::fs::write(dir.join("c.toml"), "[[server]]\nname = \"x\"\n").unwrap();
+    let e = Config::from_path(&dir).unwrap_err().to_string();
+    assert!(e.contains("c.toml") && e.contains("`x`"), "{e}");
+
+    for f in ["a.toml", "b.toml", "c.toml"] {
+        std::fs::remove_file(dir.join(f)).unwrap();
+    }
+    let e = Config::from_path(&dir).unwrap_err().to_string();
+    assert!(e.contains("no [[server]]"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn paused_servers_and_resources_are_left_out_of_the_feeds() {
+    let config = Config::parse(
+        r#"
+[[server]]
+name = "a"
+base_url = "https://a.example"
+interval = "5m"
+include = ["Property", "Member", "Office"]
+[server.auth]
+type = "bearer"
+token_env = "T"
+[server.resources.Member]
+paused = true
+[server.resources.Office]
+interval = "1h"
+
+[[server]]
+name = "b"
+base_url = "https://b.example"
+paused = true
+[server.auth]
+type = "bearer"
+token_env = "T"
+[server.resources.Property]
+interval = "1m"
+"#,
+    )
+    .unwrap();
+    let a = &config.servers[0];
+    let names =
+        |f: Vec<(String, std::time::Duration)>| f.into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+    assert_eq!(names(a.feeds()), ["Office", "Property"]);
+    assert_eq!(names(a.paused_feeds()), ["Member"]);
+    assert!(a.is_paused("Member") && !a.is_paused("Property"));
+    let b = &config.servers[1];
+    assert!(b.feeds().is_empty());
+    assert_eq!(names(b.paused_feeds()), ["Property"]);
+    assert!(b.is_paused("Anything"));
+}

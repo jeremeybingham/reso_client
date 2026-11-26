@@ -15,7 +15,10 @@
 //! | `/healthz` | 200 while the process is up |
 //! | `/readyz` | 200 when the state directory can be written, else 503 |
 //! | `/metrics` | Prometheus text: the last result of every feed, plus the daemon's own numbers |
-//! | `/status` | JSON: every feed's state, last run, failures and time to the next run |
+//! | `/status` | JSON: every feed's state (`paused` included), last run, failures, time to the next run, and the configuration reloads |
+//!
+//! [`Daemon::reload`] applies a changed configuration while the daemon runs (the command does so
+//! on SIGHUP and with `--reload-every`).
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
@@ -31,12 +34,12 @@ use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc::unbounded_channel, Semaphore};
-use tokio::task::JoinSet;
+use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 use crate::audit::AccessLog;
 use crate::cli::{sync_server_with, Format, SyncOptions};
-use crate::config::{Config, ServerConfig, MAX_BACKOFF};
+use crate::config::{Config, ResourceConfig, ServerConfig, MAX_BACKOFF};
 use crate::error::IngestError;
 use crate::manifest::{ResourceEntry, RunManifest};
 use crate::media::MediaReport;
@@ -97,7 +100,9 @@ struct FeedStatus {
     server: String,
     resource: String,
     interval: Duration,
-    /// `queued`, `running` or `waiting`
+    /// Bumped each time the feed's task is replaced, so a stopped task's late updates are dropped
+    generation: u64,
+    /// `queued`, `running`, `waiting` or `paused`
     state: &'static str,
     runs: u64,
     failed_runs: u64,
@@ -115,18 +120,54 @@ struct FeedStatus {
     media: Option<MediaCounts>,
 }
 
+impl FeedStatus {
+    fn new(server: &str, resource: &str, interval: Duration) -> Self {
+        Self {
+            server: server.to_owned(),
+            resource: resource.to_owned(),
+            interval,
+            generation: 0,
+            state: "waiting",
+            runs: 0,
+            failed_runs: 0,
+            consecutive_failures: 0,
+            last_started: None,
+            last_finished: None,
+            last_success: None,
+            last_error: None,
+            last_records: 0,
+            last_deletes: 0,
+            next_at: None,
+            last_entry: None,
+            media: None,
+        }
+    }
+}
+
+/// The configuration reloads since start, for `/status`
+#[derive(Debug, Clone, Default)]
+struct ReloadInfo {
+    reloads: u64,
+    last_reload: Option<String>,
+    last_error: Option<String>,
+}
+
+type FeedKey = (String, String);
+
 struct Shared {
-    feeds: Mutex<BTreeMap<(String, String), FeedStatus>>,
+    feeds: Mutex<BTreeMap<FeedKey, FeedStatus>>,
     /// Each scheduled server's client, for its rate-limit use in `/metrics`
-    clients: Vec<(String, Arc<ClientHandle>)>,
+    clients: Mutex<BTreeMap<String, Arc<ClientHandle>>>,
+    reload: Mutex<ReloadInfo>,
     state: Arc<dyn StateStore>,
     started_at: String,
 }
 
 impl Shared {
-    fn update(&self, key: &(String, String), f: impl FnOnce(&mut FeedStatus)) {
+    /// Change the feed's status, unless its task has been replaced since `generation`
+    fn update(&self, key: &FeedKey, generation: u64, f: impl FnOnce(&mut FeedStatus)) {
         if let Ok(mut feeds) = self.feeds.lock() {
-            if let Some(feed) = feeds.get_mut(key) {
+            if let Some(feed) = feeds.get_mut(key).filter(|s| s.generation == generation) {
                 f(feed);
             }
         }
@@ -140,8 +181,287 @@ impl Shared {
     }
 }
 
-/// One server to schedule: its settings, the shared client and its feeds with intervals
-type Plan = (ServerConfig, Arc<ClientHandle>, Vec<(String, Duration)>);
+/// What a [`Daemon::reload`] changed, feed by feed (`server/resource` names)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadSummary {
+    /// Feeds that were not scheduled before and now are
+    pub added: Vec<String>,
+    /// Feeds that are no longer in the configuration (or no longer have an interval)
+    pub removed: Vec<String>,
+    /// Feeds stopped and started again because their server's settings or their interval changed
+    pub restarted: Vec<String>,
+    /// Feeds set to `paused`
+    pub paused: Vec<String>,
+    /// Paused feeds scheduled again
+    pub resumed: Vec<String>,
+}
+
+impl ReloadSummary {
+    /// True when the reload changed no feed
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.restarted.is_empty()
+            && self.paused.is_empty()
+            && self.resumed.is_empty()
+    }
+}
+
+/// A running feed task and the stop request only it listens to
+struct FeedRun {
+    interval: Duration,
+    stop: Shutdown,
+    handle: JoinHandle<()>,
+}
+
+/// One scheduled server: the settings its feeds run with, its shared client and its feeds
+struct ServerRun {
+    config: ServerConfig,
+    client: Arc<ClientHandle>,
+    permits: Arc<Semaphore>,
+    feeds: BTreeMap<String, FeedRun>,
+}
+
+/// The feed tasks, changed by [`Daemon::reload`]
+struct Controller {
+    options: Arc<ServeOptions>,
+    shared: Arc<Shared>,
+    shutdown: Shutdown,
+    servers: BTreeMap<String, ServerRun>,
+    /// Stopped tasks that may still be finishing a page
+    retired: Vec<JoinHandle<()>>,
+}
+
+/// The server's settings without what only schedules feeds (intervals and `paused`): when only
+/// these differ the server's client and its other feeds keep running
+fn sync_settings(server: &ServerConfig) -> ServerConfig {
+    let mut s = server.clone();
+    s.interval = None;
+    s.paused = false;
+    for r in s.resources.values_mut() {
+        r.interval = None;
+        r.paused = false;
+    }
+    s.resources.retain(|_, r| *r != ResourceConfig::default());
+    s
+}
+
+fn permits_for(server: &ServerConfig) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(server.concurrency.unwrap_or(2).max(1)))
+}
+
+fn label(server: &str, resource: &str) -> String {
+    format!("{server}/{resource}")
+}
+
+impl Controller {
+    /// Make the running feeds match `config`; a server whose client cannot be built keeps its
+    /// running feeds as they were and is named in the error list
+    fn apply(&mut self, config: &Config) -> (ReloadSummary, Vec<String>) {
+        let mut summary = ReloadSummary::default();
+        let mut errors = Vec::new();
+        let wanted: BTreeMap<String, &ServerConfig> =
+            config.servers.iter().map(|s| (s.name.clone(), s)).collect();
+
+        let gone: Vec<String> = self
+            .servers
+            .keys()
+            .filter(|n| !wanted.contains_key(*n))
+            .cloned()
+            .collect();
+        for name in gone {
+            if let Some(run) = self.servers.remove(&name) {
+                for (resource, feed) in run.feeds {
+                    self.retire(feed);
+                    summary.removed.push(label(&name, &resource));
+                }
+            }
+            if let Ok(mut c) = self.shared.clients.lock() {
+                c.remove(&name);
+            }
+        }
+
+        for (name, server) in &wanted {
+            let active = server.feeds();
+            let paused = server.paused_feeds();
+            let rebuild = self
+                .servers
+                .get(name)
+                .is_none_or(|run| sync_settings(&run.config) != sync_settings(server));
+            let old = self.servers.remove(name);
+            let client = match &old {
+                _ if active.is_empty() => None,
+                Some(run) if !rebuild => Some(Arc::clone(&run.client)),
+                _ => match ClientHandle::new(server) {
+                    Ok(c) => Some(Arc::new(c)),
+                    Err(e) => {
+                        errors.push(format!("server `{name}`: {e}"));
+                        if let Some(run) = old {
+                            self.servers.insert(name.clone(), run);
+                        }
+                        continue;
+                    }
+                },
+            };
+            let (mut old_feeds, permits) = match old {
+                Some(run) if !rebuild => (run.feeds, run.permits),
+                Some(run) => (run.feeds, permits_for(server)),
+                None => (BTreeMap::new(), permits_for(server)),
+            };
+            let mut run = client.map(|client| ServerRun {
+                config: (*server).clone(),
+                client,
+                permits,
+                feeds: BTreeMap::new(),
+            });
+            if let Some(run) = &mut run {
+                for (resource, interval) in &active {
+                    let feed = match old_feeds.remove(resource) {
+                        Some(f) if !rebuild && f.interval == *interval => f,
+                        Some(f) => {
+                            f.stop.trigger();
+                            summary.restarted.push(label(name, resource));
+                            self.spawn_feed(run, resource, *interval, Some(f.handle))
+                        }
+                        None => {
+                            if self.status_state(name, resource) == Some("paused") {
+                                summary.resumed.push(label(name, resource));
+                            } else {
+                                summary.added.push(label(name, resource));
+                            }
+                            self.spawn_feed(run, resource, *interval, None)
+                        }
+                    };
+                    run.feeds.insert(resource.clone(), feed);
+                }
+            }
+            for (resource, feed) in old_feeds {
+                self.retire(feed);
+                if !paused.iter().any(|(r, _)| *r == resource) {
+                    summary.removed.push(label(name, &resource));
+                }
+            }
+            // Paused feeds have no task; /status lists them
+            for (resource, interval) in &paused {
+                let before = self.status_state(name, resource);
+                if before.is_some() && before != Some("paused") {
+                    summary.paused.push(label(name, resource));
+                }
+                if let Ok(mut map) = self.shared.feeds.lock() {
+                    let entry = map
+                        .entry((name.clone(), resource.clone()))
+                        .or_insert_with(|| FeedStatus::new(name, resource, *interval));
+                    if entry.state != "paused" {
+                        entry.generation += 1;
+                        entry.state = "paused";
+                        entry.next_at = None;
+                    }
+                    entry.interval = *interval;
+                }
+            }
+            if let Ok(mut c) = self.shared.clients.lock() {
+                match &run {
+                    Some(run) => c.insert(name.clone(), Arc::clone(&run.client)),
+                    None => c.remove(name),
+                };
+            }
+            if let Some(run) = run {
+                self.servers.insert(name.clone(), run);
+            }
+        }
+
+        // Forget the status of feeds that are neither scheduled nor paused
+        let servers = &self.servers;
+        if let Ok(mut map) = self.shared.feeds.lock() {
+            map.retain(|(server, resource), _| {
+                servers
+                    .get(server)
+                    .is_some_and(|run| run.feeds.contains_key(resource))
+                    || wanted
+                        .get(server)
+                        .is_some_and(|s| s.paused_feeds().iter().any(|(r, _)| r == resource))
+            });
+        }
+        self.retired.retain(|h| !h.is_finished());
+        (summary, errors)
+    }
+
+    fn status_state(&self, server: &str, resource: &str) -> Option<&'static str> {
+        self.shared
+            .feeds
+            .lock()
+            .ok()?
+            .get(&(server.to_owned(), resource.to_owned()))
+            .map(|f| f.state)
+    }
+
+    /// Ask a feed to stop after its current page; it is awaited by [`Daemon::wait`]
+    fn retire(&mut self, feed: FeedRun) {
+        feed.stop.trigger();
+        self.retired.push(feed.handle);
+    }
+
+    /// Start a feed's task, after `after` (the task it replaces) has finished
+    fn spawn_feed(
+        &self,
+        run: &ServerRun,
+        resource: &str,
+        interval: Duration,
+        after: Option<JoinHandle<()>>,
+    ) -> FeedRun {
+        let server = &run.config;
+        let key = (server.name.clone(), resource.to_owned());
+        let mut generation = 0;
+        if let Ok(mut map) = self.shared.feeds.lock() {
+            let entry = map
+                .entry(key)
+                .or_insert_with(|| FeedStatus::new(&server.name, resource, interval));
+            entry.generation += 1;
+            entry.interval = interval;
+            entry.state = "waiting";
+            entry.next_at = None;
+            generation = entry.generation;
+        }
+        // The feed stops on its own request or the daemon's
+        let stop = Shutdown::new();
+        let global = self.shutdown.clone();
+        let task = {
+            let stop = stop.clone();
+            let feed = run_feed(
+                server.clone(),
+                resource.to_owned(),
+                interval,
+                generation,
+                Arc::clone(&run.client),
+                Arc::clone(&run.permits),
+                Arc::clone(&self.options),
+                Arc::clone(&self.shared),
+                stop.clone(),
+            );
+            async move {
+                if let Some(previous) = after {
+                    // The old task holds the feed's lease until its page is done
+                    let _ = previous.await;
+                }
+                let forward = async {
+                    global.triggered().await;
+                    stop.trigger();
+                    std::future::pending::<()>().await;
+                };
+                tokio::select! {
+                    () = feed => {}
+                    () = forward => {}
+                }
+            }
+        };
+        let span = tracing::info_span!("feed", server = %server.name, resource = %resource);
+        FeedRun {
+            interval,
+            stop,
+            handle: tokio::spawn(task.instrument(span)),
+        }
+    }
+}
 
 /// A running daemon
 ///
@@ -149,46 +469,51 @@ type Plan = (ServerConfig, Arc<ClientHandle>, Vec<(String, Duration)>);
 /// [`wait`](Self::wait).
 pub struct Daemon {
     addr: SocketAddr,
-    tasks: JoinSet<()>,
+    controller: Mutex<Controller>,
+    endpoints: Mutex<Option<JoinHandle<()>>>,
+    shutdown: Shutdown,
 }
 
 impl Daemon {
     /// Build one client per server, bind the endpoints and start every feed's schedule
     ///
+    /// Paused feeds are listed in `/status` but not scheduled.
+    ///
     /// # Errors
     ///
-    /// [`IngestError`] when no server has a scheduled resource, a client cannot be built (for
-    /// example a variable that holds a secret is not set) or the address cannot be bound.
+    /// [`IngestError`] when no server has a scheduled or paused resource, a client cannot be
+    /// built (for example a variable that holds a secret is not set) or the address cannot be
+    /// bound.
     pub async fn start(
         config: Config,
         options: ServeOptions,
         shutdown: Shutdown,
     ) -> Result<Self, IngestError> {
-        let mut plans: Vec<Plan> = Vec::new();
-        for server in &config.servers {
-            let feeds = server.feeds();
-            if feeds.is_empty() {
-                tracing::info!(server = %server.name, "no resource has an interval: server not scheduled");
-                continue;
-            }
-            let client = ClientHandle::new(server)?;
-            plans.push((server.clone(), Arc::new(client), feeds));
-        }
-        if plans.is_empty() {
+        if config
+            .servers
+            .iter()
+            .all(|s| s.feeds().is_empty() && s.paused_feeds().is_empty())
+        {
             return Err(IngestError::Parse(
                 "serve needs at least one resource with an interval (`interval` on a resource, or on a server with `include`)"
                     .into(),
             ));
+        }
+        for server in &config.servers {
+            if server.feeds().is_empty() && server.paused_feeds().is_empty() {
+                tracing::info!(server = %server.name, "no resource has an interval: server not scheduled");
+            } else if !server.feeds().is_empty() {
+                // Fail at start rather than at the first sync
+                ClientHandle::new(server)?;
+            }
         }
         // Fail now rather than at the first sync when state cannot be saved
         probe(options.state.as_ref()).await?;
 
         let shared = Arc::new(Shared {
             feeds: Mutex::new(BTreeMap::new()),
-            clients: plans
-                .iter()
-                .map(|(server, client, _)| (server.name.clone(), Arc::clone(client)))
-                .collect(),
+            clients: Mutex::new(BTreeMap::new()),
+            reload: Mutex::new(ReloadInfo::default()),
             state: Arc::clone(&options.state),
             started_at: now_rfc3339(),
         });
@@ -203,50 +528,17 @@ impl Daemon {
             message: e.to_string(),
         })?;
 
-        let mut tasks = JoinSet::new();
-        let options = Arc::new(options);
-        for (server, client, feeds) in plans {
-            let permits = Arc::new(Semaphore::new(server.concurrency.unwrap_or(2).max(1)));
-            for (resource, interval) in feeds {
-                let key = (server.name.clone(), resource.clone());
-                if let Ok(mut map) = shared.feeds.lock() {
-                    map.insert(
-                        key.clone(),
-                        FeedStatus {
-                            server: server.name.clone(),
-                            resource: resource.clone(),
-                            interval,
-                            state: "waiting",
-                            runs: 0,
-                            failed_runs: 0,
-                            consecutive_failures: 0,
-                            last_started: None,
-                            last_finished: None,
-                            last_success: None,
-                            last_error: None,
-                            last_records: 0,
-                            last_deletes: 0,
-                            next_at: None,
-                            last_entry: None,
-                            media: None,
-                        },
-                    );
-                }
-                let span = tracing::info_span!("feed", server = %server.name, resource = %resource);
-                tasks.spawn(
-                    run_feed(
-                        server.clone(),
-                        resource,
-                        interval,
-                        Arc::clone(&client),
-                        Arc::clone(&permits),
-                        Arc::clone(&options),
-                        Arc::clone(&shared),
-                        shutdown.clone(),
-                    )
-                    .instrument(span),
-                );
-            }
+        let mut controller = Controller {
+            options: Arc::new(options),
+            shared: Arc::clone(&shared),
+            shutdown: shutdown.clone(),
+            servers: BTreeMap::new(),
+            retired: Vec::new(),
+        };
+        // Clients were built once above, so this only fails if a secret vanished since
+        let (_, errors) = controller.apply(&config);
+        for e in errors {
+            tracing::error!(error = %e, "server not scheduled");
         }
 
         let app = Router::new()
@@ -256,7 +548,7 @@ impl Daemon {
             .route("/status", get(status))
             .with_state(shared);
         let stop = shutdown.clone();
-        tasks.spawn(async move {
+        let endpoints = tokio::spawn(async move {
             let served = axum::serve(listener, app)
                 .with_graceful_shutdown(async move { stop.triggered().await })
                 .await;
@@ -265,7 +557,12 @@ impl Daemon {
             }
         });
         tracing::info!(%addr, "serve started");
-        Ok(Self { addr, tasks })
+        Ok(Self {
+            addr,
+            controller: Mutex::new(controller),
+            endpoints: Mutex::new(Some(endpoints)),
+            shutdown,
+        })
     }
 
     /// The address the endpoints listen on
@@ -273,12 +570,76 @@ impl Daemon {
         self.addr
     }
 
+    /// Make the scheduled feeds match a new configuration, without a restart
+    ///
+    /// New feeds start; feeds no longer configured stop after their current page; paused feeds
+    /// stop and stay listed in `/status` as `paused`; resumed feeds start again from their
+    /// checkpoint. A feed whose interval changed is restarted alone. When a server's other
+    /// settings change (URL, auth, filters, limits, `concurrency`), its client is rebuilt and all
+    /// its feeds restart. A restarted feed starts once its old task has finished. Unchanged feeds
+    /// are not touched. A server whose client cannot be built keeps running as before.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError`] when the daemon is shutting down or a server's client cannot be built (the
+    /// other servers are still applied).
+    pub fn reload(&self, config: &Config) -> Result<ReloadSummary, IngestError> {
+        if self.shutdown.is_triggered() {
+            return Err(IngestError::Parse("serve is shutting down".into()));
+        }
+        let Ok(mut controller) = self.controller.lock() else {
+            return Err(IngestError::Parse("serve: controller unavailable".into()));
+        };
+        let (summary, errors) = controller.apply(config);
+        let error = (!errors.is_empty()).then(|| errors.join("; "));
+        if let Ok(mut info) = controller.shared.reload.lock() {
+            info.reloads += 1;
+            info.last_reload = Some(now_rfc3339());
+            info.last_error.clone_from(&error);
+        }
+        tracing::info!(
+            added = ?summary.added,
+            removed = ?summary.removed,
+            restarted = ?summary.restarted,
+            paused = ?summary.paused,
+            resumed = ?summary.resumed,
+            "configuration reloaded"
+        );
+        match error {
+            Some(e) => Err(IngestError::Parse(e)),
+            None => Ok(summary),
+        }
+    }
+
+    /// Note a reload that failed before it reached [`reload`](Self::reload) (an unreadable
+    /// file), for `/status`
+    pub fn reload_failed(&self, message: &str) {
+        if let Ok(controller) = self.controller.lock() {
+            if let Ok(mut info) = controller.shared.reload.lock() {
+                info.last_error = Some(message.to_owned());
+            }
+        }
+    }
+
     /// Wait until the [`Shutdown`] is triggered and every feed has stopped
     ///
     /// A feed in the middle of a sync stops after its current page, with checkpoint and output
     /// consistent, as `sync` does.
-    pub async fn wait(mut self) {
-        while self.tasks.join_next().await.is_some() {}
+    pub async fn wait(&self) {
+        self.shutdown.triggered().await;
+        let mut handles = Vec::new();
+        if let Ok(mut c) = self.controller.lock() {
+            handles.append(&mut c.retired);
+            for run in std::mem::take(&mut c.servers).into_values() {
+                handles.extend(run.feeds.into_values().map(|f| f.handle));
+            }
+        }
+        if let Some(e) = self.endpoints.lock().ok().and_then(|mut e| e.take()) {
+            handles.push(e);
+        }
+        for h in handles {
+            let _ = h.await;
+        }
     }
 }
 
@@ -314,6 +675,7 @@ async fn run_feed(
     server: ServerConfig,
     resource: String,
     interval: Duration,
+    generation: u64,
     client: Arc<ClientHandle>,
     permits: Arc<Semaphore>,
     options: Arc<ServeOptions>,
@@ -325,7 +687,7 @@ async fn run_feed(
     // Feeds do not all start at the same moment
     let mut wait = jitter(interval.min(Duration::from_secs(10)), &seed, 0);
     loop {
-        shared.update(&key, |f| {
+        shared.update(&key, generation, |f| {
             f.state = "waiting";
             f.next_at = Some(Instant::now() + wait);
         });
@@ -333,7 +695,7 @@ async fn run_feed(
             () = tokio::time::sleep(wait) => {}
             () = shutdown.triggered() => return,
         }
-        shared.update(&key, |f| {
+        shared.update(&key, generation, |f| {
             f.state = "queued";
             f.next_at = None;
         });
@@ -341,7 +703,7 @@ async fn run_feed(
             p = permits.clone().acquire_owned() => p.ok(),
             () = shutdown.triggered() => return,
         };
-        shared.update(&key, |f| {
+        shared.update(&key, generation, |f| {
             f.state = "running";
             f.last_started = Some(now_rfc3339());
         });
@@ -350,7 +712,7 @@ async fn run_feed(
 
         let mut runs = 0;
         let mut failures = 0;
-        shared.update(&key, |f| {
+        shared.update(&key, generation, |f| {
             for report in &media {
                 f.media.get_or_insert_with(MediaCounts::default).add(report);
             }
@@ -540,7 +902,12 @@ async fn metrics(
     let mut manifest = RunManifest::new("serve");
     manifest.started_at = shared.started_at.clone();
     manifest.resources = feeds.iter().filter_map(|f| f.last_entry.clone()).collect();
-    for (server, client) in &shared.clients {
+    let clients: Vec<(String, Arc<ClientHandle>)> = shared
+        .clients
+        .lock()
+        .map(|c| c.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect())
+        .unwrap_or_default();
+    for (server, client) in &clients {
         manifest.add_rate_usage(server, &client.rate_usage());
     }
     let mut text = render_prometheus(&manifest);
@@ -586,6 +953,12 @@ async fn metrics(
         &|f| u64::from(f.consecutive_failures),
     );
     family(
+        "reso_ingest_feed_paused",
+        "gauge",
+        "1 while the feed is paused in the configuration",
+        &|f| u64::from(f.state == "paused"),
+    );
+    family(
         "reso_ingest_feed_interval_seconds",
         "gauge",
         "Configured time between syncs of the feed",
@@ -626,7 +999,14 @@ async fn status(
             })
         })
         .collect();
-    let body = json!({"started_at": shared.started_at, "feeds": feeds});
+    let reload = shared.reload.lock().map(|r| r.clone()).unwrap_or_default();
+    let body = json!({
+        "started_at": shared.started_at,
+        "reloads": reload.reloads,
+        "last_reload": reload.last_reload,
+        "last_reload_error": reload.last_error,
+        "feeds": feeds,
+    });
     (
         [(header::CONTENT_TYPE, "application/json")],
         serde_json::to_string_pretty(&body).unwrap_or_default() + "\n",

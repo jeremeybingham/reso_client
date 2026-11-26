@@ -492,3 +492,297 @@ interval = "100ms"
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn reload_adds_pauses_resumes_restarts_and_removes_feeds() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let (srv, property, member) = server(false).await;
+    let dir = TempDir::new("reload");
+    let url = srv.uri();
+    let shutdown = Shutdown::new();
+    let daemon = Daemon::start(
+        config(&url, "", "interval = \"100ms\"", ""),
+        options(&dir),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap();
+    until("Property polled", async || {
+        property.load(Ordering::SeqCst) >= 2
+    })
+    .await;
+    assert_eq!(member.load(Ordering::SeqCst), 0);
+
+    // A new feed
+    let s = daemon
+        .reload(&config(
+            &url,
+            "",
+            "interval = \"100ms\"",
+            "interval = \"100ms\"",
+        ))
+        .unwrap();
+    assert_eq!(s.added, ["mls/Member"]);
+    assert!(s.removed.is_empty() && s.restarted.is_empty(), "{s:?}");
+    until("Member polled", async || member.load(Ordering::SeqCst) >= 2).await;
+    let st = status(&daemon).await;
+    assert_eq!(st["reloads"], 1);
+    assert!(st["last_reload_error"].is_null());
+
+    // Pause Property: it stops, stays listed, and the other feed goes on
+    let s = daemon
+        .reload(&config(
+            &url,
+            "",
+            "interval = \"100ms\"\npaused = true",
+            "interval = \"100ms\"",
+        ))
+        .unwrap();
+    assert_eq!(s.paused, ["mls/Property"]);
+    assert!(s.removed.is_empty() && s.added.is_empty(), "{s:?}");
+    until("Property paused", async || {
+        feed(&status(&daemon).await, "Property")["state"] == "paused"
+    })
+    .await;
+    let runs_before = feed(&status(&daemon).await, "Property")["runs"].clone();
+    // A sync in progress may finish
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let calls = property.load(Ordering::SeqCst);
+    let members = member.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        property.load(Ordering::SeqCst),
+        calls,
+        "a paused feed is not polled"
+    );
+    assert!(
+        member.load(Ordering::SeqCst) > members,
+        "the other feed keeps running"
+    );
+    let st = status(&daemon).await;
+    assert_eq!(
+        feed(&st, "Property")["runs"],
+        runs_before,
+        "counts are kept"
+    );
+    let metrics = get(&daemon, "/metrics").await.1;
+    assert!(
+        metrics.contains(r#"reso_ingest_feed_paused{server="mls",resource="Property"} 1"#),
+        "{metrics}"
+    );
+
+    // Resume it
+    let s = daemon
+        .reload(&config(
+            &url,
+            "",
+            "interval = \"100ms\"",
+            "interval = \"100ms\"",
+        ))
+        .unwrap();
+    assert_eq!(s.resumed, ["mls/Property"]);
+    until("Property polled again", async || {
+        property.load(Ordering::SeqCst) > calls
+    })
+    .await;
+
+    // A new interval restarts that feed alone; the same file again changes nothing
+    let s = daemon
+        .reload(&config(
+            &url,
+            "",
+            "interval = \"200ms\"",
+            "interval = \"100ms\"",
+        ))
+        .unwrap();
+    assert_eq!(s.restarted, ["mls/Property"]);
+    let s = daemon
+        .reload(&config(
+            &url,
+            "",
+            "interval = \"200ms\"",
+            "interval = \"100ms\"",
+        ))
+        .unwrap();
+    assert!(s.is_empty(), "{s:?}");
+    assert_eq!(
+        feed(&status(&daemon).await, "Property")["interval_secs"],
+        0.2
+    );
+
+    // A server setting restarts every feed of the server
+    let s = daemon
+        .reload(&config(
+            &url,
+            "page_size = 50",
+            "interval = \"200ms\"",
+            "interval = \"100ms\"",
+        ))
+        .unwrap();
+    assert_eq!(s.restarted, ["mls/Member", "mls/Property"]);
+
+    // Remove Member's interval: no longer scheduled, no longer listed
+    let s = daemon
+        .reload(&config(&url, "page_size = 50", "interval = \"200ms\"", ""))
+        .unwrap();
+    assert_eq!(s.removed, ["mls/Member"]);
+    let st = status(&daemon).await;
+    assert_eq!(st["feeds"].as_array().unwrap().len(), 1, "{st}");
+    let members = member.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        member.load(Ordering::SeqCst) <= members + 1,
+        "a removed feed stops"
+    );
+
+    shutdown.trigger();
+    tokio::time::timeout(Duration::from_secs(10), daemon.wait())
+        .await
+        .expect("the daemon stops after the shutdown request");
+    assert!(
+        daemon.reload(&config(&url, "", "", "")).is_err(),
+        "no reload after shutdown"
+    );
+}
+
+#[tokio::test]
+async fn a_daemon_can_start_with_every_feed_paused_and_a_bad_server_keeps_running() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    std::env::remove_var("SERVE_TEST_UNSET");
+    let (srv, property, _) = server(false).await;
+    let dir = TempDir::new("allpaused");
+    let url = srv.uri();
+    let shutdown = Shutdown::new();
+    let daemon = Daemon::start(
+        config(&url, "paused = true", "interval = \"100ms\"", ""),
+        options(&dir),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(feed(&status(&daemon).await, "Property")["state"], "paused");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(property.load(Ordering::SeqCst), 0);
+
+    let s = daemon
+        .reload(&config(&url, "", "interval = \"100ms\"", ""))
+        .unwrap();
+    assert_eq!(s.resumed, ["mls/Property"]);
+    until("Property polled", async || {
+        property.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+
+    // A changed server whose secret is missing: an error, and the running feed is kept
+    let broken = config(&url, "page_size = 5", "interval = \"100ms\"", "")
+        .servers
+        .into_iter()
+        .map(|mut s| {
+            s.auth = reso_ingest::AuthConfig::Bearer {
+                token_env: Some("SERVE_TEST_UNSET".into()),
+                token_file: None,
+            };
+            s
+        })
+        .collect();
+    let mut bad = config(&url, "", "", "");
+    bad.servers = broken;
+    let e = daemon.reload(&bad).unwrap_err().to_string();
+    assert!(e.contains("SERVE_TEST_UNSET"), "{e}");
+    let st = status(&daemon).await;
+    assert!(st["last_reload_error"]
+        .as_str()
+        .unwrap()
+        .contains("SERVE_TEST_UNSET"));
+    let calls = property.load(Ordering::SeqCst);
+    until("Property still polled", async || {
+        property.load(Ordering::SeqCst) > calls
+    })
+    .await;
+
+    shutdown.trigger();
+    tokio::time::timeout(Duration::from_secs(10), daemon.wait())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn serve_command_reloads_its_config_directory() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let (srv, property, member) = server(false).await;
+    let dir = TempDir::new("cmdreload");
+    let conf = dir.0.join("servers.d");
+    std::fs::create_dir(&conf).unwrap();
+    let write = |property: &str, member: &str| {
+        let text = format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n[server.auth]\ntype = \"bearer\"\ntoken_env = \"SERVE_TEST_TOKEN\"\n[server.resources.Property]\n{property}\n[server.resources.Member]\n{member}\n",
+            srv.uri()
+        );
+        std::fs::write(conf.join("mls.toml"), text).unwrap();
+    };
+    write("interval = \"100ms\"", "");
+    // A free port
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let shutdown = Shutdown::new();
+    let args: Vec<String> = [
+        "serve",
+        "--config",
+        conf.to_str().unwrap(),
+        "--out",
+        dir.0.join("out").to_str().unwrap(),
+        "--listen",
+        &format!("127.0.0.1:{port}"),
+        "--reload-every",
+        "100ms",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let command = reso_ingest::cli::run_with_shutdown(&args, &mut out, &mut err, shutdown.clone());
+    let driver = async {
+        until("Property polled", async || {
+            property.load(Ordering::SeqCst) >= 1
+        })
+        .await;
+
+        write(
+            "interval = \"100ms\"\npaused = true",
+            "interval = \"100ms\"",
+        );
+        until("Member added by the reload", async || {
+            member.load(Ordering::SeqCst) >= 1
+        })
+        .await;
+        let st: Value = serde_json::from_str(
+            &reqwest::get(format!("http://127.0.0.1:{port}/status"))
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(feed(&st, "Property")["state"], "paused", "{st}");
+
+        // A broken file is logged and the running configuration kept
+        std::fs::write(conf.join("mls.toml"), "[[server]\nbroken").unwrap();
+        let members = member.load(Ordering::SeqCst);
+        until("Member still polled", async || {
+            member.load(Ordering::SeqCst) > members + 1
+        })
+        .await;
+        shutdown.trigger();
+    };
+    let (code, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(command, driver)
+    })
+    .await
+    .unwrap();
+    let err = String::from_utf8(err).unwrap();
+    assert_eq!(code, 0, "{err}");
+}
