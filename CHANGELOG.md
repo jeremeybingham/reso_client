@@ -31,8 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another scan. `next_batch` is unchanged. Turns on `serde_json`'s `raw_value` feature (no new crate).
 - `reso-ingest`: `RecordWriter::write_raw_batch(raw, fetched_at)` (default: parse, then `write_batch`), and `sync`
   uses it. `NdjsonWriter` copies each record's text; the repeated-key check and flag deletes read only their members
-  from it, so an NDJSON sync builds no `Value` per record. Parquet and `sync --media` parse the records as before. In
-  the 100k-record load test: see `docs/PERFORMANCE.md`.
+  from it, so an NDJSON sync builds no `Value` per record. `sync --media` parses the records as before (Parquet:
+  lead 5, below). In the 100k-record load test: see `docs/PERFORMANCE.md`.
 - `reso-ingest`: feature `mimalloc`, on by default, makes mimalloc the global allocator of the binary and the
   container image (#162, lead 3). In the 100k-record load test the sync uses about 25% less CPU and about twice the
   peak RSS (about 55 MiB instead of 24); see `docs/PERFORMANCE.md`. It adds C code (built by `cc`, linked statically).
@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Page::records` instead of copied, so each page's records are held once (#165, about 11% of a sync's CPU
   instructions in the 100k profile). Every other member of the response (`@odata.context`, `@odata.count`,
   `@odata.nextLink`, vendor annotations) stays in `body`. Read records from `records`.
+- `reso-ingest`: a Parquet `sync` hands each record's JSON text to the Arrow decoder as sent
+  (`ParquetWriter::write_raw_batch`) instead of parsing it into a `Value` and serializing it again (#162, lead 5).
+  A batch with a record that does not fit the column types as sent (an object or array in a text column, a value of
+  the wrong type) takes the old path, so the rows and errors are the same, with one difference: a number in a text
+  column keeps the server's text (`1.50`, not `1.5`). In the 100k-record load test: see `docs/PERFORMANCE.md`.
 - `reso-ingest`: the repeated-key check (`CheckingWriter`) hashes string keys without copying them into a `String`
   per record (#166).
 - `reso-client`: breaking: API review for 1.0 (#157). These types are now `#[non_exhaustive]`, so new fields or

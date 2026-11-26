@@ -44,6 +44,7 @@ Instructions are the sync child's, from callgrind. Top 5 by self cost name the f
 | 2026-11-26 | 5fbac1e + raw NDJSON (lead 4) | clean | 100000 | local (/dev/shm) | NDJSON | 0.50 | 200000 | 0.23 | 72.9 | 2.19 G | serde_json `skip_to_escape` 11.0%, `memcpy` 8.5%, `memcmp` 6.5%, `skip_to_escape` (slice) 3.8%, `memchr` 3.2% |
 | 2026-11-26 | a56e62e, no `Value` (lead 4) | clean | 100000 | local (/dev/shm) | NDJSON | 0.43 | 233000 | 0.15 | 45.1 | 1.47 G | serde_json `skip_to_escape` 17.2%, `memcpy` 10.7%, `skip_to_escape` (slice) 6.0%, `ignore_str` 5.8%, `memchr` 4.8% |
 | 2026-11-26 | 8b07928 | clean | 100000 | local (/dev/shm) | Parquet | 0.71 | 141000 | 0.43 | 121.5 | 4.56 G | `memcpy` 9.4%, serde_json `skip_to_escape` 8.2%, `memcmp` 7.5%, `skip_to_escape` (slice) 2.9%, serde_json `parse_str` 2.5% |
+| 2026-11-26 | e878258, Parquet from text (lead 5) | clean | 100000 | local (/dev/shm) | Parquet | 0.55 | 182000 | 0.30 | 139.5 | 3.00 G | `memcpy` 12.2%, serde_json `skip_to_escape` 8.4%, arrow-json `TapeDecoder::decode` 4.7% + 4.7% (`Vec` push), `memcmp` 4.0%, `skip_to_escape` (slice) 3.0% |
 
 ## Baseline findings (2026-11-26, clean, 100k records, NDJSON, local)
 
@@ -164,6 +165,40 @@ interleaved, sync child only:
   splits records and reads their timestamp and key in one pass; small gain for a hand-rolled JSON reader, not planned.
 - Output is unchanged from the serialize half. Unconfirmed against a real server (#32).
 
+## Lead 5: Parquet from record text (2026-11-26)
+
+`ParquetWriter::write_raw_batch` hands the arrow-json decoder each row as text: the four tags (serialized once per
+batch), then the record's text as the server sent it, fed in pieces with `Decoder::decode` (no line is built). Before,
+each record was parsed into a `Value`, copied and conformed (`record_value`), serialized into the decoder's tape and
+dropped. After each record the decoder must hold exactly one more whole row, so text that is not one JSON object
+fails the check.
+
+The decoder takes a value only as its column type allows. An object or array in a text column (complex and expanded
+types, which the old path stored as JSON text) or a value of the wrong type makes the text path give up on the batch;
+that batch is written the old way, so rows and errors are unchanged, and the writer stays on the old path for the
+rest of the resource. A resource with expanded columns (`$expand`) starts on the old path. The one output change: a
+number in a text column keeps the server's text (`1.50`), as NDJSON already does.
+
+Same scenario as the Parquet table below, main (bcab287) and the change (e878258), `profiling` profile, mimalloc,
+runs interleaved, sync child only; every run's rows were read back and checked:
+
+| records | build | runs | wall s | child CPU s (user + sys) | peak RSS MiB |
+|---|---|---|---|---|---|
+| 100000 | main | 5 | 0.64 to 0.69 | 0.39 to 0.43 | 126 to 152 |
+| 100000 | text | 5 | 0.51 to 0.53 | 0.26 to 0.28 | 138 to 172 |
+| 1000000 | main | 3 | 6.40 to 6.44 | 3.86 to 3.88 | 142 to 162 |
+| 1000000 | text | 3 | 5.01 to 5.04 | 2.49 to 2.54 | 152 to 162 |
+
+- Instructions fell from 4.56 G to 3.00 G (34%); child CPU about 34% at both sizes, wall time about 22%. A Parquet sync
+  now uses about 1.7 times the CPU of an NDJSON one (was 2.7).
+- Where they go now, inclusive: 26% the decoder reading the text into its tape (`TapeDecoder::decode`), 16% the tape
+  to columns (`Decoder::flush`), 15% Parquet encoding, 17% the timestamp and key read shared with NDJSON
+  (`record_fields`). The decode replaced about 34% (1.55 G) of parsing, copying, dropping and tape serialization with
+  0.79 G.
+- Peak RSS: no clear change, within mimalloc's spread at 1M; the 100k runs sit about 10 MiB higher.
+- Unconfirmed against a real server (#32). A vendor whose records carry objects in declared text columns (complex
+  types) gets no saving: those resources take the old path after the first batch.
+
 ## Parquet, buckets and quiet runs (2026-11-26)
 
 The load test can now pass `sync` options (`--sync-args`): `--format parquet`, and an S3 or GCS bucket, with the
@@ -255,12 +290,10 @@ Ranked by expected saving for the cost of the change. Sub-issues of #162 are lis
 3. **Allocator. Measured (above).** mimalloc, default feature `mimalloc` (also in the image): about 25 to 30% less CPU,
    about twice the peak RSS.
 4. **Done: parse and serialize round trip for NDJSON (above).** The NDJSON writer copies each record's text (2.66 G
-   to 2.19 G instructions), and no `Value` is built per record (2.19 G to 1.47 G). Parquet still parses.
-5. **Measured (above): Parquet.** 2.7 times NDJSON's CPU. The arrow-json decoder can read JSON text itself
-   (`Decoder::decode`), so each row could be handed over as the NDJSON line already built from the record's text,
-   skipping the `Value` parse, the copy, the drop and the tape serialization (about 45% of a Parquet sync's
-   instructions). Records whose values do not fit the declared column type (an object or array in a `Utf8` column,
-   which `conform` turns into JSON text today) would fall back to the current path, so the output stays the same.
+   to 2.19 G instructions), and no `Value` is built per record (2.19 G to 1.47 G). Parquet: lead 5.
+5. **Done: Parquet from record text (above).** The arrow-json decoder reads each record's text as sent, with a
+   fall-back to the parsed path for records that do not fit the column types: 4.56 G to 3.00 G instructions, about
+   34% less CPU. The estimate was 45%; the decoder's own read of the text costs about 0.8 G of the 1.55 G it replaced.
 6. **Measured (above): bucket round trips per run.** 24 requests for a quiet sync. Could go without changing what is
    checked: the second read of the checkpoint, the schema snapshot write when it has not changed, and the lease read
    before its release (the version from the create is enough); the two listings of all of `state/` could list

@@ -10,7 +10,7 @@ use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use reso_client::EntityType;
+use reso_client::{EntityType, RawRecords};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -108,6 +108,15 @@ struct Row<'a> {
     record: Option<Value>,
 }
 
+/// The tags of a record row, without the record (for rows built from record text)
+#[derive(Serialize)]
+struct Tags<'a> {
+    source: &'a str,
+    resource: &'a str,
+    fetched_at: &'a str,
+    run_id: &'a str,
+}
+
 /// Make `value` fit `ty`: a `Utf8` column takes objects and arrays as JSON text
 fn conform(value: &mut Value, ty: &DataType) {
     match (ty, &mut *value) {
@@ -172,6 +181,9 @@ pub struct ParquetWriter {
     files: Vec<FileEntry>,
     sink: Option<Arc<dyn FileSink>>,
     partitioned: bool,
+    /// Whether record text goes to the Arrow decoder as sent (see `write_raw_batch`); off after
+    /// the first batch that needed the parsed path, and for resources with expanded columns
+    raw_text: bool,
 }
 
 impl ParquetWriter {
@@ -202,6 +214,7 @@ impl ParquetWriter {
             files: Vec::new(),
             sink: None,
             partitioned: false,
+            raw_text: true,
         })
     }
 
@@ -235,6 +248,8 @@ impl ParquetWriter {
         for name in names {
             if !self.record_types.iter().any(|(n, _)| n == name) {
                 self.record_types.push((name.clone(), DataType::Utf8));
+                // Expanded records are objects or arrays, which only the parsed path turns into text
+                self.raw_text = false;
             }
         }
         self.schema = schema_from(&self.record_types);
@@ -318,6 +333,43 @@ impl ParquetWriter {
         let mut decoder = self.decoder()?;
         decoder.serialize(rows).map_err(|e| self.fail(e))?;
         decoder.flush().map_err(|e| self.fail(e))
+    }
+
+    /// Turn record text into Arrow batches without parsing it into `Value`s
+    ///
+    /// Each row is the tags, then the record's text as sent, fed to the decoder piece by piece (no
+    /// line is built). `None` when a record does not fit: not one JSON object, or a value the
+    /// column does not take as is (an object or array in a text column, which the parsed path
+    /// turns into JSON text, or a value of the wrong type, which the parsed path reports).
+    fn encode_raw(&self, raw: &RawRecords, fetched_at: &str) -> Option<Vec<RecordBatch>> {
+        let mut prefix = serde_json::to_vec(&Tags {
+            source: &self.source,
+            resource: &self.resource,
+            fetched_at,
+            run_id: &self.run_id,
+        })
+        .ok()?;
+        prefix.pop(); // the closing brace
+        prefix.extend_from_slice(b",\"record\":");
+        let mut decoder = self.decoder().ok()?;
+        let mut batches = Vec::new();
+        for text in raw.iter() {
+            if decoder.len() >= DECODE_BATCH_ROWS {
+                batches.extend(decoder.flush().ok()?);
+            }
+            let before = decoder.len();
+            for piece in [prefix.as_slice(), text.as_bytes(), b"}"] {
+                if decoder.decode(piece).ok()? != piece.len() {
+                    return None;
+                }
+            }
+            // Exactly one whole row: a record of two objects, or a cut one, is not
+            if decoder.has_partial_record() || decoder.len() != before + 1 {
+                return None;
+            }
+        }
+        batches.extend(decoder.flush().ok()?);
+        Some(batches)
     }
 
     /// Append batches to the current file, opening one if needed (or, partitioned, when the date
@@ -422,6 +474,27 @@ impl RecordWriter for ParquetWriter {
         self.append(batch.as_slice(), fetched_at)
     }
 
+    /// Record text goes to the Arrow decoder as sent, without a `Value` per record (#162)
+    ///
+    /// A batch with a record the text path cannot take as is (an object or array in a text
+    /// column, a value of the wrong type, text that is not one JSON object) is written through
+    /// [`write_batch`](RecordWriter::write_batch) instead, so the rows and errors are the same
+    /// as before; later batches of this writer then take that path directly. One difference:
+    /// a number in a text column keeps the server's text (`1.50`, not `1.5`).
+    fn write_raw_batch(&mut self, raw: &RawRecords, fetched_at: &str) -> Result<(), IngestError> {
+        if raw.is_empty() {
+            return Ok(());
+        }
+        if self.raw_text {
+            if let Some(batches) = self.encode_raw(raw, fetched_at) {
+                return self.append(&batches, fetched_at);
+            }
+            self.raw_text = false;
+        }
+        let records = raw.values().map_err(|e| self.fail(e))?;
+        self.write_batch(&records, fetched_at)
+    }
+
     fn write_deletes(&mut self, keys: &[Value], fetched_at: &str) -> Result<(), IngestError> {
         let rows: Vec<Row<'_>> = keys
             .iter()
@@ -450,5 +523,49 @@ impl RecordWriter for ParquetWriter {
     fn finish(&mut self) -> Result<Vec<FileEntry>, IngestError> {
         self.close_current()?;
         Ok(self.files.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reso_client::Metadata;
+
+    use super::*;
+
+    const METADATA: &str = r#"<?xml version="1.0"?>
+<edmx:Edmx xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx" Version="4.0"><edmx:DataServices>
+<Schema xmlns="http://docs.oasis-open.org/odata/ns/edm" Namespace="ns">
+<EntityType Name="Property"><Key><PropertyRef Name="ListingKey"/></Key>
+<Property Name="ListingKey" Type="Edm.String"/><Property Name="Bedrooms" Type="Edm.Int32"/>
+<Property Name="Appliances" Type="Collection(Edm.String)"/><Property Name="Extra" Type="ns.Odd"/></EntityType>
+</Schema></edmx:DataServices></edmx:Edmx>"#;
+
+    fn writer(dir: &Path) -> ParquetWriter {
+        let metadata = Metadata::parse(METADATA).unwrap();
+        let entity = metadata.resource("Property").unwrap();
+        ParquetWriter::new(dir, "s", "Property", "r", 1 << 30, entity).unwrap()
+    }
+
+    #[test]
+    fn record_text_takes_the_text_path_until_a_record_does_not_fit() {
+        let dir = std::env::temp_dir().join(format!("reso-pq-rawpath-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut w = writer(&dir);
+        let at = "2026-11-24T10:00:05Z";
+        // Unknown members (objects too) and annotations are skipped on the text path
+        let fits = RawRecords::from_texts([
+            r#"{"ListingKey":"A","Bedrooms":2,"Appliances":["Oven"],"@odata.etag":"x","U":{"a":[1]}}"#,
+        ]);
+        w.write_raw_batch(&fits, at).unwrap();
+        assert!(w.raw_text);
+        let object = RawRecords::from_texts([r#"{"ListingKey":"B","Extra":{"a":1}}"#]);
+        w.write_raw_batch(&object, at).unwrap();
+        assert!(!w.raw_text);
+        w.finish().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        let expanded = writer(&dir).with_expanded(&["Media".to_string()]);
+        assert!(!expanded.raw_text);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

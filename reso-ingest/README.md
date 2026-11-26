@@ -725,7 +725,8 @@ cargo run -p reso-ingest --features parquet -- sync --config servers.toml --form
 
 Columns are the four tags, `fetched_at` (UTC timestamp in milliseconds), `event`, `key` (delete events) and a `record` struct with one
 field per `$metadata` property: strings, booleans, integers, doubles, `Date32`, UTC millisecond timestamps, lists for
-collections. Decimals become doubles; enum, complex and unknown types become text. Properties missing from `$metadata`
+collections. Decimals become doubles; enum, complex and unknown types become text (a number in a text column keeps the
+server's text, `1.50`). Properties missing from `$metadata`
 are dropped, except navigation properties named in `expand`, which are kept as JSON text. A Parquet file is readable only once finished, so `sync` keeps one file open across pages and saves a checkpoint only
 when the file holding its rows is finished (at `--max-file-mb` or the end of the resource). A run that dies mid-file leaves
 a `.part` file and resumes from the last finished file, so those pages are fetched again (at-least-once).
