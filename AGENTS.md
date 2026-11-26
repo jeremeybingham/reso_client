@@ -32,6 +32,7 @@ listed under "What's next" in `README.md`.
 | Version history | `CHANGELOG.md` |
 | Which vendor servers are checked | `docs/COMPATIBILITY.md` |
 | 1.0 plan, MSRV and deprecation policy, release checklist | `docs/STABILITY.md` |
+| Profiling: how to run it, baseline results and leads (#162) | `docs/PERFORMANCE.md`, `scripts/profile.sh` |
 | Deployment guide, alert runbooks, support statement | `docs/OPERATIONS.md` (each alert's `runbook_url` points at its section; a test checks they match) |
 | Vulnerability reports, supply-chain checks | `SECURITY.md`, `deny.toml` (cargo-deny), `.cargo/audit.toml` |
 | How the project was built with Claude (background only) | `dev_summary.md` |
@@ -45,6 +46,7 @@ cargo test                                 # unit, integration (wiremock) and do
 cargo doc --no-deps                        # public items must have doc comments
 cargo deny --workspace --all-features check   # licences, sources, advisories (CI job "Supply chain")
 cargo semver-checks -p reso-client         # API changes against the last release (CI job "Semver checks")
+scripts/profile.sh clean 100000            # timed + callgrind profile of one load-test scenario (#162)
 cargo run --example test_connectivity      # examples need a .env (see example.env); none exists on this machine
 ```
 
@@ -119,7 +121,7 @@ reso-ingest/        second workspace crate (unpublished); README.md documents th
   src/checks.rs     SchemaSnapshot ($metadata diff), CheckingWriter (repeated keys), count_warning; findings are warnings
   src/webhook.rs    run_summary, post_summary: the run-summary webhook (URL from `webhook_url_env`)
   src/error.rs      IngestError
-  examples/loadtest.rs  load-test harness (#90): fake server with 1M records, faults, kill and resume; results in LOADTEST.md
+  examples/loadtest.rs  load-test harness (#90): fake server with 1M records, faults, kill and resume; results in LOADTEST.md; LOADTEST_WRAP runs the sync child under a profiler
   monitoring/       example Grafana dashboard and Prometheus alert rules (a test checks they use only exported metrics)
   servers.example.toml, tests/ (s3_tests.rs for the S3 state store, a `sync`/`status` run, a `purge` in the bucket, a killed sync resumed by a fresh worker and two `serve` workers sharing a bucket and `sync --media` into a bucket with its purge, against an in-process fake; s3_live.rs against a real server when RESO_S3_TEST_* or RESO_GCS_TEST_BUCKET is set; wiremock servers, CLI run in-process; sync_media_tests.rs for sync --media; media_scale_tests.rs for many media records, dedupe and a slow file host (#89);
                     log_json.rs for JSON log lines, own binary; run_main.rs for the log format and global subscriber of run_main, own binary; metrics_tests.rs for metrics files; checks_tests.rs for run checks and the webhook; audit_tests.rs for the access log; purge_tests.rs for purge; lease_tests.rs for held feeds; backfill_tests.rs for sync --backfill; state_tests.rs for state on a non-file backend; shutdown_tests.rs for a stop in the middle of a run; serve_tests.rs for the daemon and its reload; ops_tests.rs for config directories, paused feeds, reset/replay/history and onboarding (#94);
@@ -133,6 +135,7 @@ tests/              queries_tests.rs (URL building), client_http_tests.rs (wirem
                     auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 Dockerfile          reso-ingest image: static musl binary on scratch, `parquet` and `s3` features, CA bundle for S3 (CI: .github/workflows/container.yml)
+scripts/profile.sh  timed + callgrind run of one load-test scenario (#162), `profiling` Cargo profile; results in docs/PERFORMANCE.md
 deploy/             kubernetes/ (ConfigMap+Secret+PVC, CronJob for sync, Deployment+Service for serve), systemd/ unit
 examples/           test_*.rs feature demos, analyze_*.rs real-data analysis
 ```

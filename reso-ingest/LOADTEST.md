@@ -31,6 +31,10 @@ stderr and as table rows on stdout; add the rows below.
 After a kill the harness deletes the feed's lease file. Without that the next sync skips the feed until the lease runs
 out (up to 5 minutes, see "What it writes" in the README), which is the documented behaviour, not what is measured here.
 
+Profiling (#162): `scripts/profile.sh SCENARIO RECORDS` runs a scenario under `/usr/bin/time` and callgrind through
+`LOADTEST_WRAP`; results and how to read them are in [docs/PERFORMANCE.md](../docs/PERFORMANCE.md). With a wrapper
+set, the peak RSS column here is the wrapper's, not the sync's.
+
 ## Results
 
 Rows are added, never replaced, so later changes can be compared. Wall time includes the fake server, which shares the

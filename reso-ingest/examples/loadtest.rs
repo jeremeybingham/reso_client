@@ -33,6 +33,9 @@
 //!   page at each tenth of the run, next to a whole rewrite of the index (the cost of every save
 //!   before #149), and checks that a fresh load equals the index in memory. Not in `all`.
 //!
+//! `LOADTEST_WRAP="valgrind --tool=callgrind ..."` runs each sync child under that command (the
+//! fake server stays native); `scripts/profile.sh` uses it for callgrind and timed runs (#162).
+//!
 //! Linux only for the memory figure (`VmHWM` from `/proc/<pid>/status`). Results print as markdown
 //! table rows for `reso-ingest/LOADTEST.md`. Output is deleted after each scenario unless `--keep`.
 
@@ -52,6 +55,8 @@ use tokio::net::{TcpListener, TcpStream};
 /// 2026-01-01T00:00:00Z
 const BASE_EPOCH: i64 = 1_767_225_600;
 const TOKEN_ENV: &str = "LOADTEST_TOKEN";
+/// Command line the sync child runs under (profilers, `time`), see `spawn_sync`
+const WRAP_ENV: &str = "LOADTEST_WRAP";
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Load-test harness for reso-ingest sync (#90)")]
@@ -689,8 +694,19 @@ fn spawn_sync(config: &Path, out: &Path, log: &Path, extra: &[&str]) -> Child {
         .append(true)
         .open(log)
         .unwrap();
-    Command::new(std::env::current_exe().unwrap())
-        .arg("child")
+    // `LOADTEST_WRAP` (#162): a command line the child runs under, split on spaces, e.g.
+    // `valgrind --tool=callgrind` or `/usr/bin/time -o FILE -f FMT`; the server is not wrapped
+    let wrap = std::env::var(WRAP_ENV).unwrap_or_default();
+    let mut wrap = wrap.split_whitespace();
+    let mut cmd = match wrap.next() {
+        Some(program) => {
+            let mut c = Command::new(program);
+            c.args(wrap).arg(std::env::current_exe().unwrap());
+            c
+        }
+        None => Command::new(std::env::current_exe().unwrap()),
+    };
+    cmd.arg("child")
         .args(["sync", "--config"])
         .arg(config)
         .arg("--out")
