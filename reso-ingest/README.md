@@ -572,6 +572,8 @@ The [`Dockerfile`](../Dockerfile) at the repository root builds one image with t
 static musl binary on `scratch`, about 30 MB, running as user 65532. It holds no libc, shell or package manager. The only
 C code is two crypto libraries, compiled in the build stage and linked statically: `ring` (rustls for RESO servers and
 the webhook) and `aws-lc` (rustls inside `object_store`, used by the `--s3-*` options).
+The optional `mimalloc` feature (not in the image) swaps the system allocator for mimalloc, more C code linked the same
+way; it trades about twice the memory for about a quarter less CPU (`docs/PERFORMANCE.md`).
 
 TLS roots: requests to RESO servers and the webhook use roots built into the binary (webpki-roots). The S3 client checks
 certificates against the system CA bundle, so the image carries one at `/etc/ssl/certs/ca-certificates.crt` (Alpine's).

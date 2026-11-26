@@ -11,6 +11,7 @@
 #   loadtest-callgrind.txt        the callgrind run's loadtest output
 #   callgrind.out.<pid>           raw profile (open in kcachegrind/qcachegrind if wanted)
 #   annotate-self.txt, annotate-inclusive.txt   top functions by self and inclusive cost
+# PROFILE_FEATURES="a,b" builds with those reso-ingest features (e.g. mimalloc); they are added to the folder name.
 # Load-test output goes to $PROFILE_WORKDIR (default /dev/shm/reso-profile, keeps writes off disk) and is deleted.
 set -euo pipefail
 
@@ -24,11 +25,12 @@ cd "$root"
 workdir=${PROFILE_WORKDIR:-/dev/shm/reso-profile}
 commit=$(git rev-parse --short HEAD)
 dirty=$(git diff --quiet HEAD -- . ':!*.md' || echo "-dirty")
-out="target/profile/$(date +%F)-${commit}${dirty}-${scenario}-${records}"
+features=${PROFILE_FEATURES:-}
+out="target/profile/$(date +%F)-${commit}${dirty}-${scenario}-${records}${features:+-${features//,/-}}"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-cargo build --profile profiling -p reso-ingest --example loadtest
+cargo build --profile profiling -p reso-ingest --example loadtest ${features:+--features "$features"}
 bin="target/profiling/examples/loadtest"
 
 echo "== timed run: $scenario, $records records -> $out" >&2

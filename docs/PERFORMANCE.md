@@ -38,6 +38,8 @@ Instructions are the sync child's, from callgrind. Top 5 by self cost name the f
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-11-26 | ac78902 + tooling | clean | 100000 | local (/dev/shm) | NDJSON | 0.78 | 128000 | 0.42 | 24.5 | 4.61 G | serde_json `format_escaped_str` 11.6%, `_int_free` 7.6%, `memcpy` 5.6%, `malloc` 5.1%, `malloc_consolidate` 4.0% |
 | 2026-11-26 | ed70e57 (#165, #166) | clean | 100000 | local (/dev/shm) | NDJSON | 0.72 | 139000 | 0.34 | 22.8 | 3.52 G | serde_json `format_escaped_str` 15.2%, `_int_malloc` 9.6%, `memcpy` 6.6%, `_int_free` 5.6%, `from_utf8` 4.3% |
+| 2026-11-26 | 6a04ded (rerun) | clean | 100000 | local (/dev/shm) | NDJSON | 0.73 | 137000 | 0.36 | 22.9 | 3.50 G | (same shape as ed70e57) |
+| 2026-11-26 | 6a04ded + mimalloc (lead 3) | clean | 100000 | local (/dev/shm) | NDJSON | 0.53 | 189000 | 0.27 | 55.2 | 2.66 G | serde_json `format_escaped_str` 20.2%, `memcpy` 8.8%, `from_utf8` 5.7%, `memcmp` 5.4%, serde_json `skip_to_escape` 4.5% |
 
 ## Baseline findings (2026-11-26, clean, 100k records, NDJSON, local)
 
@@ -61,6 +63,34 @@ the set itself). Parsing the page body (1.50 G instructions, now 43%) and writin
 serializing) are unchanged in absolute terms and are now the two big items: leads 3 and 4. Wall time moved only from
 0.78 s to 0.72 s, since about half of it is waiting on the fake server; a single run's wall time is noisy.
 
+## Lead 3: mimalloc (2026-11-26)
+
+`--features mimalloc` makes mimalloc the global allocator of the `reso-ingest` binary (and of the load test, so the
+sync child runs it). Run it with `PROFILE_FEATURES=mimalloc scripts/profile.sh clean 100000`. Timed runs, five of each,
+interleaved (100k) and one of each (1M), sync child only:
+
+| records | allocator | wall s | child CPU s (user + sys) | peak RSS MiB |
+|---|---|---|---|---|
+| 100000 | glibc malloc | 0.69 to 0.71 | 0.33 to 0.34 | 22.9 to 24.0 |
+| 100000 | mimalloc | 0.50 to 0.52 | 0.24 to 0.26 | 47.3 to 65.4 |
+| 1000000 | glibc malloc | 7.01 | 3.48 | 24.3 |
+| 1000000 | mimalloc | 5.06 | 2.44 | 53.3 |
+
+- CPU falls by about 25% at 100k and 30% at 1M; instructions by 24% (3.50 G to 2.66 G). Allocator code fell from 1.06 G
+  instructions (30% of the glibc run: `malloc`, `free`, `malloc_consolidate` and friends) to 0.24 G (9% of the
+  mimalloc run), which is nearly all of the 0.84 G saved.
+- Peak RSS roughly doubles, to about 50 to 65 MiB, and stays flat from 100k to 1M (mimalloc keeps freed pages per
+  thread for reuse). Small next to a container's usual limit, but it is a cost.
+- Wall time falls more than CPU here because the fake server runs in the load-test process, which also got mimalloc.
+  Read the CPU column, not wall time, for the sync's own saving.
+- Not measured: the container image. It links musl, whose malloc is known to be much slower than glibc's under many
+  small allocations, so the saving there is likely larger. Building the musl binary needs the musl target and
+  `musl-gcc` (not installed here); the image build is the place to measure it.
+- Cost: a new dependency (`mimalloc` and `libmimalloc-sys`, MIT), and C code compiled by `cc` and linked statically,
+  like `ring` and `aws-lc` already are. cargo-deny passes; MSRV 1.89 check passes.
+
+The feature is off by default. Turning it on by default (or in the `Dockerfile` build) is the owner's decision.
+
 ## Leads
 
 Ranked by expected saving for the cost of the change. Sub-issues of #162 are listed in the issue as they open.
@@ -69,8 +99,8 @@ Ranked by expected saving for the cost of the change. Sub-issues of #162 are lis
    the body. Saved more than the 11% expected (see above).
 2. **Done (#166).** The repeated-key check allocated a `String` per record (`reso-ingest/src/checks.rs`); it now
    hashes the borrowed string key. From about 6% to about 2%.
-3. **Allocator.** About a third of all instructions are in glibc `malloc`/`free`. A faster global allocator in the
-   `reso-ingest` binary (mimalloc or jemalloc) is a new dependency, the owner's call; measure it first.
+3. **Allocator. Measured (above).** mimalloc behind the `mimalloc` feature: about 25 to 30% less CPU, about twice the
+   peak RSS. On by default or in the image: the owner's call.
 4. **Parse and serialize round trip for NDJSON.** Parsing into `Value` (32%) and serializing again (17%) could become a
    pass-through of each record's raw bytes (`serde_json` `raw_value`). A larger change: the writers, checks and
    checkpoint code read fields from `Value`. Parquet needs the parsed values anyway.
