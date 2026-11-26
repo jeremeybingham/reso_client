@@ -64,12 +64,12 @@ pub type Result<T> = std::result::Result<T, ResoError>;
 /// }
 /// ```
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct ODataErrorResponse {
+pub(crate) struct ODataErrorResponse {
     pub error: ODataErrorDetail,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct ODataErrorDetail {
+pub(crate) struct ODataErrorDetail {
     #[serde(default)]
     pub code: String,
     pub message: String,

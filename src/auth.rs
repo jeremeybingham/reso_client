@@ -42,6 +42,7 @@ const RENEW_AT_FRACTION: f64 = 0.9;
 /// RFC 6749 recommends HTTP Basic; many RESO servers also accept form fields. The default is
 /// [`Body`](Self::Body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum CredentialTransport {
     /// `client_id` and `client_secret` as form fields in the POST body (default)
     #[default]
@@ -89,6 +90,7 @@ impl CredentialTransport {
 /// assert!(!format!("{:?}", credentials).contains("my-client-secret"));
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ClientCredentials {
     /// Token endpoint URL
     pub token_url: String,
@@ -157,6 +159,7 @@ impl ClientCredentials {
 /// assert!(matches!(oauth, Auth::ClientCredentials(_)));
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum Auth {
     /// A fixed bearer token, sent as is; a 401 is returned to the caller
     Bearer(String),

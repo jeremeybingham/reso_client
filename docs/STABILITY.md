@@ -36,6 +36,30 @@ happen first. Releasing and publishing stay the owner's call.
   breaking).
 - Not covered: log text, progress lines, the library API of `reso-ingest` (it is for the binary; it may stay 0.x).
 
+## The 1.0 surface of `reso-client`
+
+Reviewed in [#157](https://github.com/jeremeybingham/reso_client/issues/157). Every type below is reachable from the
+crate root and from its module (`reso_client::Page` and `reso_client::paging::Page` are the same item).
+
+| Module | Public items | Can grow without a break |
+|---|---|---|
+| `client` | `ResoClient`, `ClientConfig` | `ClientConfig` is `#[non_exhaustive]` (build with `new`, `with_auth`, `from_env`, `with_*`) |
+| `auth` | `Auth`, `ClientCredentials`, `CredentialTransport` | all three `#[non_exhaustive]` |
+| `queries` | `QueryBuilder`, `Query`, `ReplicationQueryBuilder`, `ReplicationQuery` | private fields; built by the builders |
+| `paging` | `Page`, `parse_link_header` | `Page` `#[non_exhaustive]` |
+| `replication` | `ReplicationResponse` (Bridge vendor mode) | `#[non_exhaustive]`; `ReplicationResponse::new` |
+| `standard_replication` | `StandardReplication`, `ReplicationRun`, `Checkpoint` | `StandardReplication` and `ReplicationRun` have private fields; `Checkpoint` `#[non_exhaustive]` (`new`, `at`) |
+| `metadata` | `Metadata`, `EntitySet`, `EntityType`, `Property`, `NavigationProperty`, `EnumType`, `EnumMember` | all `#[non_exhaustive]`; built by `Metadata::parse` |
+| `download` | `Downloader`, `DownloadConfig`, `DownloadTarget` (trait), `SendToken`, `Validators`, `SavedFile`, `DownloadOutcome` | all but `DownloadOutcome` `#[non_exhaustive]`; `DownloadOutcome` stays exhaustive so callers can match both cases |
+| `network` | `NetworkOptions`, `DEFAULT_USER_AGENT`, `redact_proxy` | `NetworkOptions` `#[non_exhaustive]` (`default`, `with_*`) |
+| `retry` | `RetryPolicy`, `RateLimit`, `RateUsage`, `WindowUsage`, `ClientStats`, `count_requests` | all structs `#[non_exhaustive]` |
+| `error` | `ResoError`, `Result` | `ResoError` `#[non_exhaustive]` (new variants); the fields of its struct variants (`message`, `status_code`) are fixed for 1.x |
+| root | `JsonValue` (= `serde_json::Value`) | kept: records are `serde_json::Value`, so serde_json 1.x is part of the API either way |
+
+Rules for adding to it: a new public struct with public fields that may grow is `#[non_exhaustive]` and comes with a
+constructor or builder; a new public enum is `#[non_exhaustive]` unless callers must match every case; anything else
+stays `pub(crate)`. `DownloadTarget` gets no new required methods in 1.x (a new method needs a default body).
+
 ## MSRV policy
 
 - `reso-client`: Rust **1.87**, the `rust-version` in `Cargo.toml`. CI checks it with that toolchain, resolving
@@ -59,10 +83,8 @@ happen first. Releasing and publishing stay the owner's call.
 1. The #76 pass against at least one vendor server (#32), and the compatibility table
    ([`COMPATIBILITY.md`](COMPATIBILITY.md)) filled in for it. The largest likely API change is a replication mode
    without the two-field `$orderby` (#76, section 3).
-2. API review ([#157](https://github.com/jeremeybingham/reso_client/issues/157)): `cargo semver-checks` shows that
-   `ClientConfig`, `RateLimit`, `ClientStats` and `EnumMember` can be built with struct literals, so every new field
-   breaks callers (0.4.0 already breaks them that way). Make such structs `#[non_exhaustive]` with constructors or
-   builders, check every public type the same way, and decide which re-exports stay.
+2. ~~API review ([#157](https://github.com/jeremeybingham/reso_client/issues/157))~~: done; the result is
+   [the 1.0 surface](#the-10-surface-of-reso-client) below. It ships in 0.4.0.
 3. Release 0.4.0, then at least one more minor release used in production with no breaking change needed, before
    tagging 1.0.
 4. Release artifacts: SBOM and signed tags ([#158](https://github.com/jeremeybingham/reso_client/issues/158)).

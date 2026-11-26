@@ -88,10 +88,9 @@ async fn sends_validators_and_keeps_file_on_304() {
 
     let client = client(&server.uri());
     let d = client.downloader(DownloadConfig::default()).unwrap();
-    let validators = Validators {
-        etag: Some("\"v1\"".into()),
-        last_modified: Some("Tue, 24 Nov 2026 10:00:00 GMT".into()),
-    };
+    let validators = Validators::default()
+        .with_etag("\"v1\"")
+        .with_last_modified("Tue, 24 Nov 2026 10:00:00 GMT");
     let outcome = d
         .download_to(&format!("{}/files/1.jpg", server.uri()), &dest, &validators)
         .await
@@ -455,10 +454,7 @@ async fn download_into_304_touches_no_target() {
     let client = client(&server.uri());
     let d = client.downloader(DownloadConfig::default()).unwrap();
     let mut target = Memory::default();
-    let validators = Validators {
-        etag: Some("\"v1\"".into()),
-        last_modified: None,
-    };
+    let validators = Validators::default().with_etag("\"v1\"");
     let outcome = d
         .download_into(&format!("{}/f", server.uri()), &validators, &mut target)
         .await

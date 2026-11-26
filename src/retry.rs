@@ -47,6 +47,7 @@ use tokio::time::Instant;
 /// assert_eq!(policy.max_retries, 4);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Retries after the first attempt (0 = never retry, the default)
     pub max_retries: u32,
@@ -186,6 +187,7 @@ fn parse_http_date(value: &str) -> Option<SystemTime> {
 /// assert_eq!(limit.per_second, Some(2));
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RateLimit {
     /// Requests per second (`None` = unlimited)
     pub per_second: Option<u32>,
@@ -317,6 +319,7 @@ impl LimiterState {
 /// How much of one [`RateLimit`] window is used: requests started, or response bytes received,
 /// in the window that ends now
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WindowUsage {
     /// Requests or bytes counted in the window
     pub used: u64,
@@ -357,6 +360,7 @@ impl WindowUsage {
 /// # Ok::<(), reso_client::ResoError>(())
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RateUsage {
     /// Requests started in the last second
     pub per_second: Option<WindowUsage>,
@@ -472,6 +476,7 @@ impl Limiter {
 /// (429), `client_errors` (other 4xx) and `server_errors` (5xx); requests that got no response
 /// (network errors) are in `requests` only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ClientStats {
     /// HTTP requests sent
     pub requests: u64,

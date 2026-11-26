@@ -60,6 +60,7 @@ struct Fetched {
 /// );
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ClientConfig {
     /// Base URL of the RESO Web API server
     pub base_url: String,

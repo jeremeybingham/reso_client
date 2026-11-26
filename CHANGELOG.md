@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `reso-client`: breaking: API review for 1.0 (#157). These types are now `#[non_exhaustive]`, so new fields or
+  variants are no longer breaking changes; outside the crate, structs are built with their constructors and builders
+  (or `Default` plus field assignment) instead of struct literals, and a `match` on the enums needs a `_` arm:
+  - configuration: `ClientConfig`, `ClientCredentials`, `NetworkOptions`, `RetryPolicy`, `RateLimit`,
+    `DownloadConfig`, `Validators`, `Checkpoint` (build with `Checkpoint::new` or `Checkpoint::at`);
+  - results: `Page`, `ReplicationResponse`, `SavedFile`, `ClientStats`, `RateUsage`, `WindowUsage`, and the metadata
+    model (`Metadata`, `EntitySet`, `EntityType`, `Property`, `NavigationProperty`, `EnumType`, `EnumMember`);
+  - enums: `Auth`, `CredentialTransport`, `SendToken`.
+
+  `DownloadOutcome` stays exhaustive (304 or saved are the only outcomes of a conditional GET). `ODataErrorResponse` and
+  `ODataErrorDetail` in `reso_client::error` are no longer public (they were undocumented helpers for parsing error
+  bodies). New `Validators::with_etag` and `Validators::with_last_modified`. The public surface for 1.0 is listed in
+  `docs/STABILITY.md`.
 - `reso-ingest`: `rust-version` is now 1.89, what its dependencies need (`crc-fast` under `object_store`; arrow and
   parquet need 1.88); it said 1.87, which no longer built. `reso-client` stays at 1.87 (#95).
 - `reso-client`: requests now send a `User-Agent` header, `reso-client/<version>` by default (none was sent before);

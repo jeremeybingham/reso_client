@@ -42,6 +42,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// assert_eq!(SendToken::default(), SendToken::SameHost);
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SendToken {
     /// Never send it
     Never,
@@ -82,6 +83,7 @@ impl SendToken {
 /// assert_eq!(config.send_token, SendToken::Never);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DownloadConfig {
     /// Timeout for one whole file request, body included
     pub timeout: Duration,
@@ -132,6 +134,7 @@ impl DownloadConfig {
 
 /// What a previous download of the same file returned, for a conditional request
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Validators {
     /// The `ETag` header, sent back as `If-None-Match`
     pub etag: Option<String>,
@@ -139,8 +142,33 @@ pub struct Validators {
     pub last_modified: Option<String>,
 }
 
+impl Validators {
+    /// Set the `ETag` to send back as `If-None-Match`
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::Validators;
+    /// let validators = Validators::default()
+    ///     .with_etag("\"v1\"")
+    ///     .with_last_modified("Tue, 24 Nov 2026 10:00:00 GMT");
+    /// assert_eq!(validators.etag.as_deref(), Some("\"v1\""));
+    /// ```
+    pub fn with_etag(mut self, etag: impl Into<String>) -> Self {
+        self.etag = Some(etag.into());
+        self
+    }
+
+    /// Set the `Last-Modified` value to send back as `If-Modified-Since`
+    pub fn with_last_modified(mut self, last_modified: impl Into<String>) -> Self {
+        self.last_modified = Some(last_modified.into());
+        self
+    }
+}
+
 /// A file written by [`Downloader::download_to`]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SavedFile {
     /// Bytes written
     pub bytes: u64,
