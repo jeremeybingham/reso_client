@@ -4,9 +4,15 @@ Pulls every resource from one or more [RESO Web API](https://www.reso.org/reso-w
 them current with incremental runs, records deletes, and downloads the photos and documents that `Media` records
 point at. Built on [`reso-client`](../README.md).
 
-Status: in this repository only (`publish = false`, version 0.0.1). Checked end to end against RESO's reference server
-run locally; not yet run against a vendor server
-([#32](https://github.com/jeremeybingham/reso_client/issues/32)).
+> **Status (0.4.0, first published release):** built and tested against mock servers and RESO's reference server run
+> locally; **not yet run against a vendor server**
+> ([#32](https://github.com/jeremeybingham/reso_client/issues/32),
+> [#76](https://github.com/jeremeybingham/reso_client/issues/76)). Expect changes to options, configuration and output in
+> 0.5.0, after that check; renamed options and settings follow the
+> [deprecation policy](https://github.com/jeremeybingham/reso_client/blob/main/docs/STABILITY.md#deprecation-policy).
+
+Install the command with `cargo install --locked reso-ingest` (add `--features parquet,s3` for Parquet output and
+buckets), or build the container image from the repository's `Dockerfile`.
 
 ## Commands
 

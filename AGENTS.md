@@ -4,10 +4,10 @@ Guidance for AI coding agents and people working in this repository (tool-neutra
 
 This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in two Rust crates:
 
-- `reso-client` (crates.io, pre-1.0, v0.3.0): a client for one server: queries, standard paging and replication,
+- `reso-client` (crates.io, pre-1.0, v0.3.0 published, 0.4.0 next): a client for one server: queries, standard paging and replication,
   bearer token or OAuth2 client credentials, retries and rate limits, a parsed `$metadata` model, file downloads
   (`Downloader`) with their own limits.
-- `reso-ingest` (unpublished, `reso-ingest/`): pulls every resource from many servers into tagged NDJSON or Parquet
+- `reso-ingest` (`reso-ingest/`, first published at 0.4.0 with the same version as `reso-client`): pulls every resource from many servers into tagged NDJSON or Parquet
   files, incrementally and resumably, with delete detection, and downloads the files of `Media` records; library plus
   the `reso-ingest` command.
 
@@ -88,7 +88,7 @@ src/standard_replication.rs  StandardReplication, ReplicationRun (next_batch, ne
 src/network.rs      NetworkOptions: proxy, extra CA certificates, User-Agent, connection pool (#91); used by the client and Downloader
 src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter (RateUsage), ClientStats counters, count_requests scopes
 src/error.rs        ResoError and the Result alias
-reso-ingest/        second workspace crate (unpublished); README.md documents the command
+reso-ingest/        second workspace crate (published from 0.4.0; tests/ and LOADTEST.md stay out of the package); README.md documents the command
   src/config.rs     Config: multi-server TOML, secrets read from the variables (`*_env`) or files (`*_file`) named; server filter,
                     [server.resources.<Name>] (ResourceConfig), flag-field deletes (DeletesConfig), limits, media, network (NetworkConfig)
   src/secrets.rs    ClientHandle: a server's client, rebuilt when its secrets change; retry once after a 401 (#92)

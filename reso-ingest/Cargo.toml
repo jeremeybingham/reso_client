@@ -1,15 +1,21 @@
 [package]
 name = "reso-ingest"
-version = "0.0.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Ingest layer over reso-client: multi-server configuration and runs"
+description = "Pull every resource from many RESO Web API servers into tagged NDJSON or Parquet files, incrementally, with delete detection and media downloads"
 license = "MIT"
 repository = "https://github.com/jeremeybingham/reso_client"
-publish = false
+documentation = "https://docs.rs/reso-ingest"
+readme = "README.md"
+keywords = ["reso", "odata", "real-estate", "mls", "etl"]
+categories = ["command-line-utilities", "web-programming::http-client"]
+# Kept in the repository only: load-test results, and the integration tests, which read files outside this crate
+# (../deploy, ../docs, ../tests/fixtures); run them from a clone
+exclude = ["LOADTEST.md", "tests/", "target/"]
 
 [dependencies]
-reso-client = { path = ".." }
+reso-client = { path = "..", version = "0.4.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 toml = "0.8"
