@@ -37,6 +37,7 @@ Instructions are the sync child's, from callgrind. Top 5 by self cost name the f
 | date | commit | scenario | records | sink | format | wall s | records/s | CPU s | peak RSS MiB | instructions | top 5 by self cost |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-11-26 | ac78902 + tooling | clean | 100000 | local (/dev/shm) | NDJSON | 0.78 | 128000 | 0.42 | 24.5 | 4.61 G | serde_json `format_escaped_str` 11.6%, `_int_free` 7.6%, `memcpy` 5.6%, `malloc` 5.1%, `malloc_consolidate` 4.0% |
+| 2026-11-26 | ed70e57 (#165, #166) | clean | 100000 | local (/dev/shm) | NDJSON | 0.72 | 139000 | 0.34 | 22.8 | 3.52 G | serde_json `format_escaped_str` 15.2%, `_int_malloc` 9.6%, `memcpy` 6.6%, `_int_free` 5.6%, `from_utf8` 4.3% |
 
 ## Baseline findings (2026-11-26, clean, 100k records, NDJSON, local)
 
@@ -51,15 +52,23 @@ server. With a real vendor the network will weigh more (not measured until #32).
 | 11% | `Page::from_response` cloning the whole `value` array out of the body (`.cloned()`) |
 | about 35% | `malloc`/`free` and friends, spread over all of the above |
 
+## After leads 1 and 2 (2026-11-26, #165, #166)
+
+Same scenario, one run each. Instructions fell from 4.61 G to 3.52 G (24% fewer) and CPU time from 0.42 s to 0.34 s;
+more than the 17% the two leads showed, because the copied array was also dropped. `Page::from_response` no longer
+shows in the profile, and the repeated-key check fell from about 6% to about 2% inclusive (hashing the borrowed key and
+the set itself). Parsing the page body (1.50 G instructions, now 43%) and writing NDJSON (1.17 G, 33%, of which 0.97 G
+serializing) are unchanged in absolute terms and are now the two big items: leads 3 and 4. Wall time moved only from
+0.78 s to 0.72 s, since about half of it is waiting on the fake server; a single run's wall time is noisy.
+
 ## Leads
 
 Ranked by expected saving for the cost of the change. Sub-issues of #162 are listed in the issue as they open.
 
-1. **`Page::from_response` clones the record array** (`src/paging.rs`). Taking the array out of the body
-   (`Value::take`) instead of cloning it would remove about 11% of instructions plus the drop of the copy.
-   Small change, no new dependency.
-2. **Repeated-key check allocates a `String` per record** (`reso-ingest/src/checks.rs`, `key.to_string()` into a
-   `HashSet`). Hashing a borrowed key would remove most of the 6%. Small change.
+1. **Done (#165).** `Page::from_response` cloned the record array (`src/paging.rs`); it now moves the array out of
+   the body. Saved more than the 11% expected (see above).
+2. **Done (#166).** The repeated-key check allocated a `String` per record (`reso-ingest/src/checks.rs`); it now
+   hashes the borrowed string key. From about 6% to about 2%.
 3. **Allocator.** About a third of all instructions are in glibc `malloc`/`free`. A faster global allocator in the
    `reso-ingest` binary (mimalloc or jemalloc) is a new dependency, the owner's call; measure it first.
 4. **Parse and serialize round trip for NDJSON.** Parsing into `Value` (32%) and serializing again (17%) could become a

@@ -23,8 +23,9 @@ use crate::error::{ResoError, Result};
 /// One page of an OData collection response
 ///
 /// `records` is the body's `value` array as the server sent it. `next_link` is the absolute
-/// URL of the next page, or `None` on the last page. `body` keeps the whole response, so
-/// annotations such as `@odata.context` stay available.
+/// URL of the next page, or `None` on the last page. `body` keeps the rest of the response, so
+/// annotations such as `@odata.context` stay available; the `value` array itself is moved into
+/// `records` rather than kept twice.
 ///
 /// # Examples
 ///
@@ -63,18 +64,28 @@ pub struct Page {
     /// The URL this page was fetched from
     pub url: String,
 
-    /// The full response body as the server sent it
+    /// The response body as the server sent it, without its `value` array
+    ///
+    /// Every other member (`@odata.context`, `@odata.count`, `@odata.nextLink`, vendor
+    /// annotations) is kept. The `value` array has been moved into [`records`](Page::records),
+    /// so the records are not held twice. A `value` that is not an array is left in place.
     pub body: JsonValue,
 }
 
 impl Page {
     /// Build a page from a response body, its headers and the URL it was fetched from
-    pub(crate) fn from_response(body: JsonValue, headers: &HeaderMap, url: &str) -> Self {
-        let records = body
-            .get("value")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+    ///
+    /// The `value` array is moved out of the body into `records`, not copied (#165).
+    pub(crate) fn from_response(mut body: JsonValue, headers: &HeaderMap, url: &str) -> Self {
+        let records = match body.as_object_mut() {
+            Some(obj) if obj.get("value").is_some_and(JsonValue::is_array) => {
+                match obj.remove("value") {
+                    Some(JsonValue::Array(records)) => records,
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
         let count = body.get("@odata.count").and_then(|v| v.as_u64());
         let next_link = next_link_from(&body, headers, url);
         Self {
@@ -396,7 +407,22 @@ mod tests {
         assert_eq!(page.count, Some(3));
         assert!(page.has_more());
         assert_eq!(page.url, URL);
-        assert_eq!(page.body["value"][0]["ListingKey"], "1");
+        // The records are moved out of the body, not copied; the annotations stay (#165)
+        assert_eq!(page.records[0]["ListingKey"], "1");
+        assert!(page.body.get("value").is_none());
+        assert_eq!(page.body["@odata.count"], 3);
+        assert!(page.body.get("@odata.nextLink").is_some());
+    }
+
+    #[test]
+    fn page_with_non_array_value_keeps_it_in_the_body() {
+        let page = Page::from_response(
+            json!({"value": {"ListingKey": "1"}}),
+            &HeaderMap::new(),
+            URL,
+        );
+        assert!(page.records.is_empty());
+        assert_eq!(page.body["value"]["ListingKey"], "1");
     }
 
     #[test]
