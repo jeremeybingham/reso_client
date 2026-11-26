@@ -14,7 +14,8 @@
 //! - **Media files**: the server's [`MediaStore`]: its directory under the media directory
 //!   (`<media_dir>/<server>/`), or `<prefix>/media/<server>/` in the bucket (#89).
 //! - **State keys**: the server's checkpoints, key sets, event sequences, schema snapshot and lease
-//!   keys (`<server>.*`) and its media index (`media/<server>.json`).
+//!   keys (`<server>.*`) and its media index (`media/<server>.json` and its deltas in
+//!   `media/<server>/`).
 //!
 //! [`execute_purge`] refuses while another process holds a lease on one of the server's feeds,
 //! takes those leases itself so no sync of the server starts meanwhile, deletes, and then writes a
@@ -189,14 +190,13 @@ async fn plan(
     let media_bytes = listed.iter().map(|(_, n)| n).sum();
 
     let prefix = format!("{}.", sanitize(server));
-    let media_key = MediaIndex::key(server);
     let mut state_keys = Vec::new();
     let mut resources = BTreeSet::new();
     let mut held = Vec::new();
     let mut keys = state.list().await?;
     keys.sort();
     for key in keys {
-        if key == media_key {
+        if MediaIndex::is_index_key(server, &key) {
             state_keys.push(key);
             continue;
         }

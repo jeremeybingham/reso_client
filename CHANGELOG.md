@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `reso-ingest`: media index saves cost what changed, not the size of the index (#149). The index is now a snapshot
+  (`media/<server>.json`, as before) plus deltas (`media/<server>/<seq>.json`) holding the entries changed or removed
+  since the save before; a save writes one delta, or a new snapshot once the deltas hold more entries than the index
+  (at least 10 000), and then deletes the deltas. A save with no change writes nothing. At 1M entries a page's save
+  takes 1.8 ms and 0.6 MiB, where the whole rewrite took 0.7 s and 384 MiB (`loadtest --scenario media-index`, rows in
+  `LOADTEST.md`). An index written by earlier versions loads unchanged. `purge` deletes the deltas too. New
+  `MediaIndex::save_changes`, `delta_prefix`, `is_index_key`, `mark_read` and `entry_mut`; `MediaIndex::save` still
+  writes a whole snapshot. Breaking: `MediaIndex` equality compares `read_files` and `entries` only. The index is still
+  held whole in memory during a run.
+
 ### Added
 - `reso-ingest`: media at scale (#89). `sync --media` (and `serve --media`) queues each page's new and changed files
   for a separate pool of download workers (`[server.media] workers`, default 4, with the `[server.media]` rate limits),

@@ -99,8 +99,15 @@ async fn setup(dir: &Path) -> PathBuf {
         fs::create_dir_all(&m).unwrap();
         fs::write(m.join("K1.jpg"), b"jpeg").unwrap();
     }
-    FileStateStore::new(out.join("state"))
-        .put("media/alpha.json", b"{}")
+    let state = FileStateStore::new(out.join("state"));
+    state.put("media/alpha.json", b"{}").await.unwrap();
+    // An index delta (#149), and beta's, which stays
+    state
+        .put("media/alpha/000000000001.json", b"{}")
+        .await
+        .unwrap();
+    state
+        .put("media/beta/000000000001.json", b"{}")
         .await
         .unwrap();
     out
@@ -219,7 +226,7 @@ async fn execute_removes_only_that_servers_data_and_keeps_the_log() {
     assert!(
         state_keys(&out)
             .iter()
-            .all(|k| !k.starts_with("alpha.") && k != "media/alpha.json"),
+            .all(|k| !k.starts_with("alpha.") && !k.starts_with("media/alpha")),
         "{:?}",
         state_keys(&out)
     );
@@ -260,6 +267,10 @@ async fn execute_removes_only_that_servers_data_and_keeps_the_log() {
     assert_eq!(record.by, "Compliance Desk");
     assert_eq!(record.records, 9);
     assert!(record.state_keys.contains(&"media/alpha.json".to_string()));
+    assert!(record
+        .state_keys
+        .contains(&"media/alpha/000000000001.json".to_string()));
+    assert!(!record.state_keys.iter().any(|k| k.contains("beta")));
     assert!(record
         .state_keys
         .contains(&"alpha.Property.json".to_string()));

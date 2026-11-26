@@ -27,6 +27,11 @@
 //!   Member` runs every second against a small feed that grows. Checks every record, the
 //!   `##progress` lines and the resumed count, that the backfill keeps to its share of the
 //!   requests, and that the Member syncs used the rest and kept finishing. Not in `all`.
+//! - `media-index`: the media index alone (#149), in this process, no server: `--records` media
+//!   records arrive in pages of `--page-size`; after each page the downloads of the page before
+//!   finish and the index is saved, as `sync --media` does. Prints the save time and bytes per
+//!   page at each tenth of the run, next to a whole rewrite of the index (the cost of every save
+//!   before #149), and checks that a fresh load equals the index in memory. Not in `all`.
 //!
 //! Linux only for the memory figure (`VmHWM` from `/proc/<pid>/status`). Results print as markdown
 //! table rows for `reso-ingest/LOADTEST.md`. Output is deleted after each scenario unless `--keep`.
@@ -118,6 +123,10 @@ fn main() {
     }
     let args = Args::parse();
     let rt = tokio::runtime::Runtime::new().unwrap();
+    if args.scenario == "media-index" {
+        let ok = rt.block_on(media_index(&args));
+        std::process::exit(i32::from(!ok));
+    }
     let scenarios: Vec<&str> = match args.scenario.as_str() {
         "all" => vec!["clean", "faults", "kill"],
         s @ ("clean" | "faults" | "kill" | "deletes" | "backfill") => vec![s],
@@ -1306,4 +1315,187 @@ mod tests {
         }
         assert_eq!(format_ts(BASE_EPOCH + 59 * 86_400), "2026-03-01T00:00:00Z");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The media index (#149)
+
+/// A state store that counts the bytes written through it
+#[derive(Debug)]
+struct Counting {
+    inner: reso_ingest::FileStateStore,
+    put_bytes: AtomicU64,
+}
+
+impl reso_ingest::StateStore for Counting {
+    fn get<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> reso_ingest::StoreFuture<'a, Option<reso_ingest::Versioned>> {
+        self.inner.get(key)
+    }
+    fn put<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> reso_ingest::StoreFuture<'a, ()> {
+        self.put_bytes
+            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.inner.put(key, bytes)
+    }
+    fn create<'a>(&'a self, key: &'a str, bytes: &'a [u8]) -> reso_ingest::StoreFuture<'a, bool> {
+        self.inner.create(key, bytes)
+    }
+    fn replace<'a>(
+        &'a self,
+        key: &'a str,
+        bytes: &'a [u8],
+        version: &'a str,
+    ) -> reso_ingest::StoreFuture<'a, bool> {
+        self.inner.replace(key, bytes, version)
+    }
+    fn delete<'a>(
+        &'a self,
+        key: &'a str,
+        version: Option<&'a str>,
+    ) -> reso_ingest::StoreFuture<'a, bool> {
+        self.inner.delete(key, version)
+    }
+    fn list(&self) -> reso_ingest::StoreFuture<'_, Vec<String>> {
+        self.inner.list()
+    }
+    fn location(&self, key: &str) -> String {
+        self.inner.location(key)
+    }
+}
+
+fn media_record(i: u64) -> Value {
+    json!({
+        "MediaKey": format!("M{i:010}"),
+        "MediaURL": format!("https://cdn.example.com/photos/{i}.jpg?sig=abcdef0123456789&expires=1767225600"),
+        "MediaModificationTimestamp": format_ts(BASE_EPOCH + i as i64),
+        "ResourceRecordKey": format!("L{}", i / 30),
+    })
+}
+
+/// The media-index scenario; true when the reloaded index matched
+async fn media_index(args: &Args) -> bool {
+    use reso_ingest::{MediaIndex, StateStore as _};
+    let dir = args.workdir.join("media-index");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Counting {
+        inner: reso_ingest::FileStateStore::new(&dir),
+        put_bytes: AtomicU64::new(0),
+    };
+    let server = "load";
+    let page = args.page_size.max(1);
+    let pages = args.records.div_ceil(page);
+    let marks: Vec<u64> = (1..=10).map(|t| (pages * t / 10).max(1)).collect();
+    eprintln!(
+        "== media-index: {} records in {pages} pages of {page}, state in {}",
+        args.records,
+        dir.display()
+    );
+    let mut index = MediaIndex::default();
+    let started = Instant::now();
+    let mut window: Vec<(f64, u64)> = Vec::new();
+    let mut rows = Vec::new();
+    let mut total_save = 0.0;
+    for p in 0..pages {
+        let first = p * page;
+        let last = (first + page).min(args.records);
+        for i in first..last {
+            index.add_record(&media_record(i));
+        }
+        // The downloads of the page before finish
+        if p > 0 {
+            for i in (first - page)..first {
+                if let Some(e) = index.entry_mut(&format!("M{i:010}")) {
+                    e.pending = false;
+                    e.file = Some(format!("{:064x}.jpg", i));
+                    e.sha256 = Some(format!("{:064x}", i));
+                    e.etag = Some(format!("\"{i:x}\""));
+                    e.content_type = Some("image/jpeg".into());
+                    e.bytes = Some(250_000);
+                }
+            }
+        }
+        let before = store.put_bytes.load(Ordering::Relaxed);
+        let t = Instant::now();
+        index.save_changes(&store, server).await.unwrap();
+        let secs = t.elapsed().as_secs_f64();
+        total_save += secs;
+        window.push((secs, store.put_bytes.load(Ordering::Relaxed) - before));
+        if marks.contains(&(p + 1)) {
+            // The cost of a save before #149: the whole index, every page
+            let text = serde_json::to_vec(&index).unwrap();
+            let t = Instant::now();
+            store.inner.put("whole.json", &text).await.unwrap();
+            let whole_secs = t.elapsed().as_secs_f64();
+            let mut times: Vec<f64> = window.iter().map(|w| w.0).collect();
+            times.sort_by(f64::total_cmp);
+            let median = times[times.len() / 2];
+            let max = times.last().copied().unwrap_or(0.0);
+            let mut bytes: Vec<u64> = window.iter().map(|w| w.1).collect();
+            bytes.sort_unstable();
+            let median_bytes = bytes[bytes.len() / 2];
+            let mean_bytes = bytes.iter().sum::<u64>() / bytes.len() as u64;
+            rows.push(format!(
+                "| {} | {:.1} | {:.1} | {} | {} | {:.1} | {} |",
+                index.entries.len(),
+                median * 1000.0,
+                max * 1000.0,
+                median_bytes / 1024,
+                mean_bytes / 1024,
+                (whole_secs + serialize_secs(&index)) * 1000.0,
+                text.len() / 1024,
+            ));
+            eprintln!("##progress step={}/{pages} label=media-index", p + 1);
+            window.clear();
+        }
+    }
+    let _ = store.inner.delete("whole.json", None).await;
+    let wall = started.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let loaded = MediaIndex::load(&store, server).await.unwrap();
+    let load_secs = t.elapsed().as_secs_f64();
+    let ok = loaded == index;
+    let keys = store.list().await.unwrap().len();
+    let peak = vm_hwm_kib(std::process::id()).unwrap_or(0);
+    let written = store.put_bytes.load(Ordering::Relaxed);
+    eprintln!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "scenario": "media-index",
+            "records": args.records,
+            "page_size": page,
+            "wall_seconds": (wall * 10.0).round() / 10.0,
+            "save_seconds_total": (total_save * 10.0).round() / 10.0,
+            "bytes_written_mib": written / (1 << 20),
+            "state_keys_at_end": keys,
+            "load_seconds": (load_secs * 100.0).round() / 100.0,
+            "reloaded_equal": ok,
+            "peak_rss_mib": peak / 1024,
+        }))
+        .unwrap()
+    );
+    println!(
+        "\nmedia-index: {} records, commit {}, {}",
+        args.records,
+        commit(),
+        today()
+    );
+    println!("| entries | save ms (median) | save ms (max) | KiB per save (median) | KiB per save (mean) | whole rewrite ms | whole index KiB |");
+    println!("|---|---|---|---|---|---|---|");
+    for r in rows {
+        println!("{r}");
+    }
+    if !args.keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    ok
+}
+
+/// Time to serialize the whole index (part of every save before #149)
+fn serialize_secs(index: &reso_ingest::MediaIndex) -> f64 {
+    let t = Instant::now();
+    let text = serde_json::to_vec(index).unwrap();
+    std::hint::black_box(text.len());
+    t.elapsed().as_secs_f64()
 }
