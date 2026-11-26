@@ -428,11 +428,15 @@ async fn pull(
                 interrupted = true;
                 break;
             }
-            next = run.next_batch() => next,
+            next = run.next_batch_raw() => next,
         };
         match next {
-            Ok(Some(batch)) => {
-                if let Err(e) = writer.write_batch(&batch, &now_rfc3339()) {
+            Ok(Some(raw_batch)) => {
+                let batch = raw_batch.records;
+                let written = writer.write_raw_batch(&batch, &raw_batch.raw, &now_rfc3339());
+                // The page text is only needed by the writer
+                drop(raw_batch.raw);
+                if let Err(e) = written {
                     error = Some(e.to_string());
                     break;
                 }

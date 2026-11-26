@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use reso_client::{Checkpoint, QueryBuilder, ResoClient};
+use reso_client::{Checkpoint, QueryBuilder, RawRecords, ResoClient};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -263,6 +263,18 @@ pub(crate) fn short_duration(d: Duration) -> String {
 impl RecordWriter for ProgressWriter<'_> {
     fn write_batch(&mut self, records: &[Value], fetched_at: &str) -> Result<(), IngestError> {
         self.inner.write_batch(records, fetched_at)?;
+        self.done += records.len() as u64;
+        self.report();
+        Ok(())
+    }
+
+    fn write_raw_batch(
+        &mut self,
+        records: &[Value],
+        raw: &RawRecords,
+        fetched_at: &str,
+    ) -> Result<(), IngestError> {
+        self.inner.write_raw_batch(records, raw, fetched_at)?;
         self.done += records.len() as u64;
         self.report();
         Ok(())

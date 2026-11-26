@@ -161,6 +161,48 @@ async fn pull_streams_pages_and_the_manifest_lists_them() {
     assert!(written["finished_at"].is_string());
 }
 
+/// The record text is copied as the server sent it (#162): member order, number text and escapes
+/// are kept, line breaks between tokens are dropped so each record stays on one line
+#[tokio::test]
+async fn pull_writes_each_record_as_the_server_sent_it() {
+    let server = MockServer::start().await;
+    let body = "{\"value\": [\n  {\"ModificationTimestamp\": \"2026-01-01T00:00:01Z\",\n   \"ListingKey\": \"A\", \"Price\": 1.50, \"Big\": 12345678901234567890123, \"Note\": \"caf\\u00e9 \\\"x\\\"\\n\"},\n  {\"ListingKey\":\"B\",\"ModificationTimestamp\":\"2026-01-01T00:00:02Z\",\"Z\":1e2,\"A\":[]}\n]}";
+    Mock::given(method("GET"))
+        .and(path("/Property"))
+        .respond_with(move |req: &wiremock::Request| {
+            if req.url.query().unwrap_or("").contains("filter") {
+                ResponseTemplate::new(200).set_body_json(page(&[], None))
+            } else {
+                ResponseTemplate::new(200).set_body_raw(body, "application/json")
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let dir = TempDir::new("rawpull");
+    let mut w = NdjsonWriter::new(dir.path(), "mls", "Property", "r1", 1 << 20).unwrap();
+    let spec = StandardReplication::new("Property", "ListingKey");
+    let entry = pull_resource(&client(&server), "mls", "Property", spec, &mut w).await;
+    assert_eq!(entry.error, None);
+    assert_eq!(entry.records, 2);
+
+    let text = std::fs::read_to_string(dir.path().join(&entry.files[0].name)).unwrap();
+    let got: Vec<&str> = text.lines().collect();
+    assert_eq!(got.len(), 2);
+    let tags = "{\"source\":\"mls\",\"resource\":\"Property\",\"fetched_at\":\"";
+    for line in &got {
+        assert!(line.starts_with(tags), "{line}");
+        let v: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["run_id"], "r1");
+    }
+    assert!(got[0].ends_with(
+        ",\"run_id\":\"r1\",\"record\":{\"ModificationTimestamp\": \"2026-01-01T00:00:01Z\",   \"ListingKey\": \"A\", \"Price\": 1.50, \"Big\": 12345678901234567890123, \"Note\": \"caf\\u00e9 \\\"x\\\"\\n\"}}"
+    ), "{}", got[0]);
+    assert!(got[1].ends_with(
+        ",\"record\":{\"ListingKey\":\"B\",\"ModificationTimestamp\":\"2026-01-01T00:00:02Z\",\"Z\":1e2,\"A\":[]}}"
+    ), "{}", got[1]);
+}
+
 #[tokio::test]
 async fn a_failing_server_still_gets_a_manifest() {
     let good = MockServer::start().await;

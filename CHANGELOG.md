@@ -8,12 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-client`: `ReplicationRun::next_batch_raw` returns a `RawBatch`: the parsed records plus `RawRecords`, each
+  record's JSON text as the server sent it (#162, lead 4). `next_batch` is unchanged. Turns on `serde_json`'s
+  `raw_value` feature (no new crate).
+- `reso-ingest`: `RecordWriter::write_raw_batch` (default: `write_batch`). `NdjsonWriter` copies each record's text
+  instead of serializing the parsed record again, and `sync` uses it. In the 100k-record load test: see
+  `docs/PERFORMANCE.md`.
 - `reso-ingest`: feature `mimalloc`, on by default, makes mimalloc the global allocator of the binary and the
   container image (#162, lead 3). In the 100k-record load test the sync uses about 25% less CPU and about twice the
   peak RSS (about 55 MiB instead of 24); see `docs/PERFORMANCE.md`. It adds C code (built by `cc`, linked statically).
   Build with `--no-default-features` for the system allocator.
 
 ### Changed
+- `reso-ingest`: NDJSON `record` values keep the server's member order and number text (`1.50` stays `1.50`, an
+  integer past 64 bits is no longer turned into a float) instead of being sorted and normalised by a parse and
+  serialize round trip (#162). Line breaks between tokens are dropped. A consumer that compared lines byte for byte
+  with earlier output sees the difference; the parsed records are the same apart from those numbers.
 - `reso-client`: breaking: `Page::body` no longer holds the `value` array; the records are moved out of the body into
   `Page::records` instead of copied, so each page's records are held once (#165, about 11% of a sync's CPU
   instructions in the 100k profile). Every other member of the response (`@odata.context`, `@odata.count`,

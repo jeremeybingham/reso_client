@@ -288,6 +288,10 @@ In `--out` (default `reso-out`):
   ```
 
   A delete event has the same tags, then `"event":"delete"` and the record's `key` instead of `record`.
+  `record` is the record's JSON text as the server sent it: its member order, number text (`1.50`, integers past 64
+  bits) and string escapes are kept. Line breaks between tokens are dropped so each record stays on one line; other
+  whitespace is kept. (Before #162 the record was parsed and serialized again, which sorted its members and normalised
+  numbers.)
 - `manifest.<run>.json`: counts, files, checkpoints and errors for the run.
 - `audit/access.ndjson`: the access log (#93), one line per resource pull, appended at the end of each resource step of
   `sync` and of each `serve` feed sync, also when the pull failed:

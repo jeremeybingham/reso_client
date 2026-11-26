@@ -39,6 +39,7 @@ use tracing::debug;
 
 use crate::client::ResoClient;
 use crate::error::{ResoError, Result};
+use crate::paging::RawRecords;
 
 /// Where a replication run stopped: the last record's timestamp and key
 ///
@@ -250,6 +251,16 @@ pub struct ReplicationRun<'a> {
     done: bool,
 }
 
+/// One batch from [`ReplicationRun::next_batch_raw`]: the parsed records and their JSON text
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct RawBatch {
+    /// The records, parsed (as [`ReplicationRun::next_batch`] returns them)
+    pub records: Vec<JsonValue>,
+    /// The JSON text of each record as the server sent it, in the same order as `records`
+    pub raw: RawRecords,
+}
+
 impl ResoClient {
     /// Start a RESO-standard replication run (see [`StandardReplication`])
     pub fn replicate(&self, spec: StandardReplication) -> ReplicationRun<'_> {
@@ -284,15 +295,49 @@ impl ReplicationRun<'_> {
     /// [`ResoError::Parse`] when a record has no usable timestamp or key; and the errors of
     /// [`ResoClient::fetch_page`].
     pub async fn next_batch(&mut self) -> Result<Option<Vec<JsonValue>>> {
+        Ok(self.next(false).await?.map(|b| b.records))
+    }
+
+    /// [`next_batch`](Self::next_batch) that also returns each record's JSON text as the server
+    /// sent it
+    ///
+    /// For writers that store records unchanged: copying [`RawBatch::raw`] keeps the server's
+    /// member order and number formatting and avoids serializing each record again (#162).
+    ///
+    /// # Errors
+    ///
+    /// As [`next_batch`](Self::next_batch).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use reso_client::{ResoClient, StandardReplication};
+    /// # async fn example(client: &ResoClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut run = client.replicate(StandardReplication::new("Property", "ListingKey"));
+    /// while let Some(batch) = run.next_batch_raw().await? {
+    ///     for line in batch.raw.iter() {
+    ///         println!("{line}");
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn next_batch_raw(&mut self) -> Result<Option<RawBatch>> {
+        self.next(true).await
+    }
+
+    async fn next(&mut self, keep_raw: bool) -> Result<Option<RawBatch>> {
         while !self.done {
-            let page = match self.next_link.take() {
-                Some(link) => self.client.fetch_page(&link).await?,
-                None => {
-                    let url = self
-                        .client
-                        .build_url(&self.spec.path_and_query(self.checkpoint.as_ref()));
-                    self.client.fetch_page(&url).await?
-                }
+            let url = match self.next_link.take() {
+                Some(link) => link,
+                None => self
+                    .client
+                    .build_url(&self.spec.path_and_query(self.checkpoint.as_ref())),
+            };
+            let (page, raw) = if keep_raw {
+                self.client.fetch_page_raw(&url).await?
+            } else {
+                (self.client.fetch_page(&url).await?, RawRecords::default())
             };
 
             if page.next_link.as_deref() == Some(page.url.as_str()) {
@@ -315,7 +360,10 @@ impl ReplicationRun<'_> {
                 page.records.len(),
                 self.checkpoint
             );
-            return Ok(Some(page.records));
+            return Ok(Some(RawBatch {
+                records: page.records,
+                raw,
+            }));
         }
         Ok(None)
     }
