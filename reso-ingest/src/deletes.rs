@@ -232,6 +232,7 @@ pub async fn reconcile_deletes(
         warnings,
         deletes_held: held,
         interrupted: false,
+        backfill: None,
     }
 }
 

@@ -48,6 +48,9 @@ per_day = 40000
 bytes_per_hour = 4000000000
 bytes_per_day = 5000000000
 
+[server.backfill]                            # `sync --backfill`: its share of the limits above
+rate_percent = 40                            # 1 to 99, default 50; other syncs of the server get the rest meanwhile
+
 # A server with a static bearer token and a dataset id
 [[server]]
 name = "mls-two"

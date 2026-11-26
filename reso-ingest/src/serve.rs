@@ -409,6 +409,7 @@ async fn sync_once(
         allow_mass_deletes: options.allow_mass_deletes,
         media: options.media_dir.clone(),
         start_over: false,
+        backfill: None,
         max_file_bytes: options.max_file_bytes,
         format: options.format,
         sink: options.sink.clone(),

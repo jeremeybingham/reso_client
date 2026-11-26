@@ -116,6 +116,29 @@ pub(crate) async fn live_holder(
         }))
 }
 
+/// The (server, resource) names of every live lease in the store; expired and unreadable values
+/// are left out
+pub(crate) async fn live_leases(
+    store: &dyn StateStore,
+) -> Result<Vec<(String, String)>, IngestError> {
+    let mut found = Vec::new();
+    for key in store.list().await? {
+        if key.contains('/') || !key.ends_with(".lock") {
+            continue;
+        }
+        if let Some(f) = store
+            .get(&key)
+            .await?
+            .as_ref()
+            .and_then(parse)
+            .filter(|f| f.expires_at > now_secs())
+        {
+            found.push((f.server, f.resource));
+        }
+    }
+    Ok(found)
+}
+
 fn encode(store: &dyn StateStore, key: &str, lease: &LeaseFile) -> Result<Vec<u8>, IngestError> {
     serde_json::to_vec(lease).map_err(|e| invalid(store, key, e.to_string()))
 }

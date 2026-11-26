@@ -107,6 +107,9 @@ pub struct CheckpointInfo {
 #[derive(Debug, Clone)]
 pub struct CheckpointStore {
     store: Arc<dyn StateStore>,
+    /// Added to resource names of checkpoints (not key sets or events): a backfill window keeps
+    /// its own position (#88)
+    suffix: String,
 }
 
 impl CheckpointStore {
@@ -117,7 +120,24 @@ impl CheckpointStore {
 
     /// A store on any [`StateStore`] backend
     pub fn with_store(store: Arc<dyn StateStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            suffix: String::new(),
+        }
+    }
+
+    /// The same backend, with `suffix` added to the resource name of every checkpoint this store
+    /// loads, saves or clears, so a backfill window (`Property~backfill 2020..2021`) has a position
+    /// of its own beside the feed's. Key sets, event sequences and schema snapshots are not affected.
+    pub fn scoped(&self, suffix: &str) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            suffix: suffix.to_string(),
+        }
+    }
+
+    fn scoped_name(&self, resource: &str) -> String {
+        format!("{resource}{}", self.suffix)
     }
 
     /// The backend
@@ -137,11 +157,12 @@ impl CheckpointStore {
         server: &str,
         resource: &str,
     ) -> Result<Option<Checkpoint>, IngestError> {
+        let resource = &self.scoped_name(resource);
         let key = checkpoint_key(server, resource);
         let Some(file) = self.read::<CheckpointFile>(&key, "checkpoint").await? else {
             return Ok(None);
         };
-        if file.server != server || file.resource != resource {
+        if file.server != server || file.resource != *resource {
             return Err(invalid(
                 self.store.as_ref(),
                 &key,
@@ -168,6 +189,7 @@ impl CheckpointStore {
         resource: &str,
         checkpoint: &Checkpoint,
     ) -> Result<(), IngestError> {
+        let resource = &self.scoped_name(resource);
         let file = CheckpointFile {
             server: server.to_string(),
             resource: resource.to_string(),
@@ -459,7 +481,7 @@ impl CheckpointStore {
     /// [`IngestError::Output`] when the value exists but cannot be removed.
     pub async fn clear(&self, server: &str, resource: &str) -> Result<(), IngestError> {
         self.store
-            .delete(&checkpoint_key(server, resource), None)
+            .delete(&checkpoint_key(server, &self.scoped_name(resource)), None)
             .await
             .map(|_| ())
     }

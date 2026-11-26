@@ -253,6 +253,7 @@ mod tests {
             warnings: vec![],
             deletes_held: 0,
             interrupted: false,
+            backfill: None,
         }
     }
 

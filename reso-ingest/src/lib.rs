@@ -57,6 +57,7 @@
 //! ```
 
 mod audit;
+mod backfill;
 mod checkpoint;
 mod checks;
 pub mod cli;
@@ -85,11 +86,12 @@ mod state;
 mod webhook;
 
 pub use audit::{credential_id, AccessEntry, AccessLog, PurgeNote, ACCESS_LOG};
+pub use backfill::{BackfillEntry, BackfillWindow};
 pub use checkpoint::{CheckpointInfo, CheckpointStore};
 pub use checks::{count_warning, CheckingWriter, SchemaSnapshot};
 pub use config::{
-    parse_interval, AuthConfig, Config, DeletesConfig, LimitsConfig, MediaConfig, ResourceConfig,
-    SecretSource, ServerConfig,
+    parse_interval, AuthConfig, BackfillConfig, Config, DeletesConfig, LimitsConfig, MediaConfig,
+    ResourceConfig, SecretSource, ServerConfig,
 };
 pub use deletes::{reconcile_deletes, DeleteLimits, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;

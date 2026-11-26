@@ -186,11 +186,33 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
         "Resources the last run handled",
     );
 
+    let mut backfill_left = Family::new(
+        "reso_ingest_backfill_remaining_records",
+        "sync --backfill: records still to load after the last run, by the server's count at its start",
+    );
+    let mut backfill_share = Family::new(
+        "reso_ingest_backfill_rate_percent",
+        "sync --backfill: percent of the rate limits the backfill ran with",
+    );
+
     let finished_at = manifest.finished_at.as_deref().and_then(parse_rfc3339);
     for r in &manifest.resources {
         let l = labels(r);
-        if let Some(ts) = checkpoint_secs(r) {
+        // A backfill window's checkpoint is not the feed's, so it says nothing about freshness
+        let windowed = r
+            .backfill
+            .as_ref()
+            .is_some_and(|b| b.from.is_some() || b.to.is_some());
+        if let Some(ts) = checkpoint_secs(r).filter(|_| !windowed) {
             lag.samples.push((l.clone(), (now - ts).max(0.0)));
+        }
+        if let Some(b) = &r.backfill {
+            if let Some(left) = b.remaining(r.records) {
+                backfill_left.samples.push((l.clone(), left as f64));
+            }
+            backfill_share
+                .samples
+                .push((l.clone(), f64::from(b.rate_percent)));
         }
         ok.samples
             .push((l.clone(), if r.error.is_none() { 1.0 } else { 0.0 }));
@@ -247,8 +269,27 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
 
     let mut out = String::new();
     for f in [
-        lag, ok, ok_at, records, deletes, files, file_bytes, duration, rate, requests, retries,
-        http_bytes, responses, warnings, held, schema, failed, finished, resources,
+        lag,
+        ok,
+        ok_at,
+        records,
+        deletes,
+        files,
+        file_bytes,
+        duration,
+        rate,
+        requests,
+        retries,
+        http_bytes,
+        responses,
+        warnings,
+        held,
+        backfill_left,
+        backfill_share,
+        schema,
+        failed,
+        finished,
+        resources,
     ] {
         if f.samples.is_empty() {
             continue;
