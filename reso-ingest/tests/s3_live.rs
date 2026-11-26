@@ -104,3 +104,39 @@ async fn sink_uploads_small_and_multipart_files_on_a_real_server() {
     assert!(back.bytes == data);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lists_more_than_one_page_of_keys_on_a_real_server() {
+    let Some(o) = options("many") else { return };
+    let s = Arc::new(S3StateStore::new(&o).unwrap());
+    // S3 returns at most 1000 keys per ListObjectsV2 page, so 1100 need a second page
+    let keys: Vec<String> = (0..1100).map(|i| format!("k/{i:05}.json")).collect();
+    for chunk in keys.chunks(100) {
+        let tasks: Vec<_> = chunk
+            .iter()
+            .map(|k| {
+                let (s, k) = (Arc::clone(&s), k.clone());
+                tokio::spawn(async move { s.put(&k, b"x").await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+    }
+    let mut listed = s.list().await.unwrap();
+    listed.sort();
+    assert_eq!(listed, keys);
+    for chunk in keys.chunks(100) {
+        let tasks: Vec<_> = chunk
+            .iter()
+            .map(|k| {
+                let (s, k) = (Arc::clone(&s), k.clone());
+                tokio::spawn(async move { s.delete(&k, None).await })
+            })
+            .collect();
+        for t in tasks {
+            assert!(t.await.unwrap().unwrap());
+        }
+    }
+    assert!(s.list().await.unwrap().is_empty());
+}
