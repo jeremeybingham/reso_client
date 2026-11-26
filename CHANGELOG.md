@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `reso-ingest`: `rust-version` is now 1.89, what its dependencies need (`crc-fast` under `object_store`; arrow and
+  parquet need 1.88); it said 1.87, which no longer built. `reso-client` stays at 1.87 (#95).
 - `reso-client`: requests now send a `User-Agent` header, `reso-client/<version>` by default (none was sent before);
   `reso-ingest` sends `reso-ingest/<version>` (#91).
 - `reso-client`: breaking: `ClientConfig` has a new public field `network`; code that builds `ClientConfig` with a
@@ -28,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   held whole in memory during a run.
 
 ### Added
+- Product readiness (#95): `docs/COMPATIBILITY.md` (which servers are checked), `docs/STABILITY.md` (1.0 plan, MSRV and
+  deprecation policy, release checklist), `docs/OPERATIONS.md` (deployment guide, a runbook per shipped alert, support
+  statement), `SECURITY.md`. The alert rules carry `runbook_url` annotations. CI runs `cargo deny` (`deny.toml`:
+  permissive licences, crates.io only, advisories), `cargo semver-checks` on `reso-client` and an MSRV check of both
+  crates.
 - Rate-limit budget and per-task request counts (#109). `reso-client`: `ResoClient::rate_usage` and
   `Downloader::rate_usage` return a `RateUsage`: for each window of the `RateLimit`, the requests or bytes counted in it
   now and the ceiling (`WindowUsage`, `fraction()`); it never waits, also while a request is held back by the limit.

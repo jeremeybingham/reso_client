@@ -2,7 +2,7 @@
 name = "reso-ingest"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.87.0"
+rust-version = "1.89"
 description = "Ingest layer over reso-client: multi-server configuration and runs"
 license = "MIT"
 repository = "https://github.com/jeremeybingham/reso_client"

@@ -30,6 +30,10 @@ listed under "What's next" in `README.md`.
 | API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |
 | Version history | `CHANGELOG.md` |
+| Which vendor servers are checked | `docs/COMPATIBILITY.md` |
+| 1.0 plan, MSRV and deprecation policy, release checklist | `docs/STABILITY.md` |
+| Deployment guide, alert runbooks, support statement | `docs/OPERATIONS.md` (each alert's `runbook_url` points at its section; a test checks they match) |
+| Vulnerability reports, supply-chain checks | `SECURITY.md`, `deny.toml` (cargo-deny), `.cargo/audit.toml` |
 | How the project was built with Claude (background only) | `dev_summary.md` |
 | Current state and next step (local, git-ignored) | `SESSION.md` |
 
@@ -39,6 +43,8 @@ listed under "What's next" in `README.md`.
 cargo fmt && cargo clippy -- -D warnings   # required before every commit
 cargo test                                 # unit, integration (wiremock) and doc tests; no network or credentials needed
 cargo doc --no-deps                        # public items must have doc comments
+cargo deny --workspace --all-features check   # licences, sources, advisories (CI job "Supply chain")
+cargo semver-checks -p reso-client         # API changes against the last release (CI job "Semver checks")
 cargo run --example test_connectivity      # examples need a .env (see example.env); none exists on this machine
 ```
 
@@ -140,8 +146,11 @@ internal; unit tests in the same file (`#[cfg(test)]`), integration tests in `te
   `to_odata_string()`; unit tests there, integration tests in `tests/queries_tests.rs`; doc example; an example file if
   it is a major feature.
 - **New error variant:** add to `ResoError` (`src/error.rs`), handle it in `src/client.rs` where needed, test it.
-- **Release:** bump `Cargo.toml`, update `CHANGELOG.md`, run the full checks, `cargo doc --no-deps`, tag `vX.Y.Z`, then
-  `cargo publish`. Releasing and publishing are the owner's call.
+- **Release:** follow the checklist in `docs/STABILITY.md` (bump, changelog, checks, semver and deny, tag, `cargo
+  publish`). Releasing and publishing are the owner's call.
+- **New alert rule:** add a `runbook_url` and a `### AlertName` section in `docs/OPERATIONS.md`.
+- **Raising the MSRV:** `rust-version` in the crate's `Cargo.toml`, the MSRV matrix in `.github/workflows/ci.yml` and
+  `docs/STABILITY.md` together.
 
 ## Server notes
 

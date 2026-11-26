@@ -186,3 +186,78 @@ jobs:
         uses: rustsec/audit-check@v1.4.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --workspace --all-features
+
+  semver:
+    name: Semver checks (reso-client)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
+
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+
+      # Against the last release on crates.io. While Cargo.toml still holds a released version,
+      # breaking changes are expected (they go into the next minor release) and are reported as a
+      # warning; once the version is bumped, any change it does not allow fails the job.
+      - name: Check reso-client against its last release
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "reso-client") | .version')
+          if curl -sf -A "reso_client-ci" "https://crates.io/api/v1/crates/reso-client/$version" > /dev/null; then
+            cargo semver-checks -p reso-client \
+              || echo "::warning::reso-client has breaking changes since $version; the next release must be a minor bump"
+          else
+            cargo semver-checks -p reso-client
+          fi
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep in step with rust-version in Cargo.toml and reso-ingest/Cargo.toml (docs/STABILITY.md)
+          # reso-client's tests need wiremock, which needs a newer Rust: check the library only
+          - crate: reso-client
+            toolchain: "1.87.0"
+            targets: ""
+          - crate: reso-ingest
+            toolchain: "1.89.0"
+            targets: --all-targets
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      # The newest dependency versions that still support this Rust
+      - name: Resolve dependencies for the MSRV
+        run: cargo update
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+
+      - name: Check
+        run: cargo check -p ${{ matrix.crate }} --all-features ${{ matrix.targets }}
