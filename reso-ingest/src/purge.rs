@@ -7,6 +7,10 @@
 //!   under the server (this covers Parquet files). Ownership comes from the source tag, never from a
 //!   file name; a file whose name starts like the server's but that neither check claims is listed
 //!   as not purged.
+//! - With the data files in a bucket (a [`FileSink`], #139), the run manifests in the bucket name
+//!   the server's files, since reading every object for its tag would be slow and costly. Only the
+//!   NDJSON objects named like the server's that no manifest lists (a run killed before its
+//!   manifest was delivered) are downloaded and judged by their tag.
 //! - **Media files**: the server's directory under the media directory (`<media_dir>/<server>/`).
 //! - **State keys**: the server's checkpoints, key sets, event sequences, schema snapshot and lease
 //!   keys (`<server>.*`) and its media index (`media/<server>.json`).
@@ -15,12 +19,14 @@
 //! takes those leases itself so no sync of the server starts meanwhile, deletes, and then writes a
 //! **purge record** (`<out>/audit/purge.<id>.json`, with its SHA-256 in `purge.<id>.json.sha256`)
 //! and one line in the access log (status `purged`, the record's name and hash). The record is
-//! tamper-evident through the hash kept in the append-only access log; it is not signed.
+//! tamper-evident through the hash kept in the append-only access log; it is not signed. With a
+//! bucket, the record, its `.sha256` and the access line (`access.<id>.ndjson`) are also put in
+//! the bucket next to the data files, as `sync` does with its access lines.
 //!
 //! Kept on purpose: the access log (the proof of what was pulled), run manifests and media
 //! manifests (run records that list file names and counts, not records, and cover other servers).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -37,6 +43,7 @@ use crate::error::IngestError;
 use crate::lease::{live_holder, Lease, LeaseHolder, LeaseOutcome};
 use crate::media::{encode_name, MediaIndex};
 use crate::output::{new_run_id, now_rfc3339, output_error};
+use crate::sink::{FileSink, LocalDirSink};
 use crate::state::StateStore;
 
 /// The directory, inside the output directory, that holds the access log and purge records
@@ -136,12 +143,19 @@ pub enum PurgeOutcome {
         path: PathBuf,
         /// SHA-256 of the record file, as hex
         sha256: String,
+        /// Where copies of the record, its checksum and the access line went (a bucket)
+        delivered: Vec<String>,
+        /// Why a copy to the bucket failed; the local record and access line are written
+        delivery_error: Option<String>,
     },
     /// Another process holds a lease on one of the server's feeds; nothing was deleted
     Held(Vec<(String, LeaseHolder)>),
 }
 
 /// List what belongs to `server`, changing nothing
+///
+/// The data files are in `files` (a bucket), or in `out` when it is `None`. With a bucket, `out`
+/// is the local directory where objects are downloaded to be read.
 ///
 /// # Errors
 ///
@@ -150,20 +164,24 @@ pub enum PurgeOutcome {
 pub async fn plan_purge(
     server: &str,
     out: &Path,
+    files: Option<&dyn FileSink>,
     media_dir: &Path,
     state: &dyn StateStore,
 ) -> Result<PurgePlan, IngestError> {
-    plan(server, out, media_dir, state, &BTreeSet::new()).await
+    let local = LocalDirSink::existing(out);
+    let files = files.unwrap_or(&local);
+    plan(server, out, files, media_dir, state, &BTreeSet::new()).await
 }
 
 async fn plan(
     server: &str,
     out: &Path,
+    sink: &dyn FileSink,
     media_dir: &Path,
     state: &dyn StateStore,
     own_leases: &BTreeSet<String>,
 ) -> Result<PurgePlan, IngestError> {
-    let (files, not_purged) = data_files(server, out)?;
+    let (files, not_purged) = data_files(server, sink, out)?;
     let media_dir = media_dir.join(encode_name(server));
     let (media_files, media_bytes) = dir_size(&media_dir)?;
 
@@ -210,7 +228,9 @@ async fn plan(
 
 /// Delete what belongs to `server` and write the purge record and its access-log line
 ///
-/// `by` names who ran the purge. Leases on the server's feeds are taken for the duration, so a
+/// The data files are in `files` (a bucket), or in `out` when it is `None`; the record and the
+/// access log are always written to `<out>/audit/`, and with a bucket copied to it as well. `by`
+/// names who ran the purge. Leases on the server's feeds are taken for the duration, so a
 /// sync of the server waits (it skips held feeds); when another process holds one, nothing is
 /// deleted and [`PurgeOutcome::Held`] says who.
 ///
@@ -222,11 +242,12 @@ async fn plan(
 pub async fn execute_purge(
     server: &str,
     out: &Path,
+    files: Option<&dyn FileSink>,
     media_dir: &Path,
     state: &Arc<dyn StateStore>,
     by: &str,
 ) -> Result<PurgeOutcome, IngestError> {
-    let first = plan_purge(server, out, media_dir, state.as_ref()).await?;
+    let first = plan_purge(server, out, files, media_dir, state.as_ref()).await?;
     if !first.held.is_empty() {
         return Ok(PurgeOutcome::Held(first.held));
     }
@@ -250,7 +271,7 @@ pub async fn execute_purge(
             }
         }
     }
-    let result = delete(server, out, media_dir, state.as_ref(), &own, by).await;
+    let result = delete(server, out, files, media_dir, state.as_ref(), &own, by).await;
     release_all(leases).await;
     result
 }
@@ -258,13 +279,16 @@ pub async fn execute_purge(
 async fn delete(
     server: &str,
     out: &Path,
+    bucket: Option<&dyn FileSink>,
     media_dir: &Path,
     state: &dyn StateStore,
     own: &BTreeSet<String>,
     by: &str,
 ) -> Result<PurgeOutcome, IngestError> {
+    let local = LocalDirSink::existing(out);
+    let files = bucket.unwrap_or(&local);
     // Plan again now that the feeds are held, so nothing written in between is missed
-    let plan = plan(server, out, media_dir, state, own).await?;
+    let plan = plan(server, out, files, media_dir, state, own).await?;
     if !plan.held.is_empty() {
         return Ok(PurgeOutcome::Held(plan.held));
     }
@@ -286,7 +310,7 @@ async fn delete(
         state_keys: Vec::new(),
         not_purged: plan.not_purged.clone(),
     };
-    let error = delete_planned(&plan, out, state, &mut record).await.err();
+    let error = delete_planned(&plan, files, state, &mut record).await.err();
     if let Some(e) = error {
         tracing::error!(server, error = %e, "purge stopped");
         record.status = "failed".into();
@@ -324,7 +348,7 @@ async fn delete(
         error: record.error.clone(),
         purge: Some(PurgeNote {
             by: by.to_string(),
-            record: name,
+            record: name.clone(),
             sha256: sha256.clone(),
             files: record.files.len() as u64,
             media_files: record.media_files,
@@ -332,27 +356,45 @@ async fn delete(
             bytes: record.files.iter().map(|f| f.bytes).sum::<u64>() + record.media_bytes,
         }),
     };
-    AccessLog::new(out).append(&line)?;
+    let log = AccessLog::new(out);
+    log.append(&line)?;
+
+    // With a bucket, copies go next to the data files; the local record and log line stand alone
+    let mut delivered = Vec::new();
+    let mut delivery_error = None;
+    if let Some(sink) = bucket {
+        let copies = (|| {
+            for (stored, local) in [(name.clone(), &path), (format!("{name}.sha256"), &sum_path)] {
+                sink.put_file(&stored, local)?;
+                delivered.push(sink.location(&stored));
+            }
+            delivered.extend(log.deliver(out, &record.id, Some(sink))?);
+            Ok::<(), IngestError>(())
+        })();
+        if let Err(e) = copies {
+            tracing::error!(server, error = %e, "purge record not copied to the bucket");
+            delivery_error = Some(e.to_string());
+        }
+    }
     Ok(PurgeOutcome::Done {
         record: Box::new(record),
         path,
         sha256,
+        delivered,
+        delivery_error,
     })
 }
 
 /// Delete in order: data files, media, state; each success goes into `record` as it happens
 async fn delete_planned(
     plan: &PurgePlan,
-    out: &Path,
+    files: &dyn FileSink,
     state: &dyn StateStore,
     record: &mut PurgeRecord,
 ) -> Result<(), IngestError> {
     for f in &plan.files {
-        let path = out.join(&f.name);
-        match fs::remove_file(&path) {
-            Ok(()) => record.files.push(f.clone()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(output_error(&path, e)),
+        if files.delete(&f.name)? {
+            record.files.push(f.clone());
         }
     }
     match fs::remove_dir_all(&plan.media_dir) {
@@ -402,48 +444,51 @@ fn reserve_record(out: &Path, server: &str) -> Result<(String, PathBuf, fs::File
 }
 
 /// The server's data files, and the files with a name like the server's that are not
-fn data_files(server: &str, out: &Path) -> Result<(Vec<PurgedFile>, Vec<String>), IngestError> {
-    let entries = match fs::read_dir(out) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
-        Err(e) => return Err(output_error(out, e)),
-    };
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| output_error(out, e))?;
-        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
-        if let (true, Some(name)) = (is_file, entry.file_name().to_str()) {
-            names.push(name.to_string());
-        }
-    }
-    names.sort();
+///
+/// On local disk every NDJSON file is read for its tag, then the manifests add the rest. In a
+/// bucket the manifests come first, and only unlisted NDJSON objects named like the server's are
+/// downloaded (into `scratch`) and read.
+fn data_files(
+    server: &str,
+    sink: &dyn FileSink,
+    scratch: &Path,
+) -> Result<(Vec<PurgedFile>, Vec<String>), IngestError> {
+    let sizes: BTreeMap<String, u64> = sink.list()?.into_iter().collect();
+    let local = sink.local_path("").is_some();
+    let prefix = format!("{}.", sanitize(server));
+    let is_ndjson = |n: &str| n.ends_with(".ndjson") || n.ends_with(".ndjson.part");
 
     let mut files = Vec::new();
     let mut claimed = BTreeSet::new();
-    // NDJSON files, by the source tag of their lines
-    for name in names
-        .iter()
-        .filter(|n| n.ends_with(".ndjson") || n.ends_with(".ndjson.part"))
-    {
-        let path = out.join(name);
-        if let Some(records) = tagged_lines(&path, server)? {
+    let by_tag = |name: &str, files: &mut Vec<PurgedFile>, claimed: &mut BTreeSet<String>| {
+        if let Some(Some(records)) = read_file(sink, name, scratch, |p| tagged_lines(p, server))? {
             files.push(PurgedFile {
-                name: name.clone(),
+                name: name.to_string(),
                 records,
-                bytes: file_len(&path)?,
+                bytes: sizes.get(name).copied().unwrap_or(0),
             });
-            claimed.insert(name.clone());
+            claimed.insert(name.to_string());
+        }
+        Ok::<(), IngestError>(())
+    };
+    if local {
+        for name in sizes.keys().filter(|n| is_ndjson(n)) {
+            by_tag(name, &mut files, &mut claimed)?;
         }
     }
-    // Files the manifests list under the server (Parquet, and NDJSON already found)
-    for name in names
-        .iter()
+    // Files the manifests list under the server (Parquet, and NDJSON)
+    for name in sizes
+        .keys()
         .filter(|n| n.starts_with("manifest.") && n.ends_with(".json"))
     {
-        let path = out.join(name);
-        let text = fs::read_to_string(&path).map_err(|e| output_error(&path, e))?;
+        let Some(text) = read_file(sink, name, scratch, |p| {
+            fs::read_to_string(p).map_err(|e| output_error(p, e))
+        })?
+        else {
+            continue;
+        };
         let manifest: Value = serde_json::from_str(&text).map_err(|e| IngestError::Output {
-            path: path.display().to_string(),
+            path: sink.location(name),
             message: e.to_string(),
         })?;
         for r in manifest["resources"].as_array().into_iter().flatten() {
@@ -454,26 +499,60 @@ fn data_files(server: &str, out: &Path) -> Result<(Vec<PurgedFile>, Vec<String>)
                 let Some(file) = f["name"].as_str().filter(|n| plain_name(n)) else {
                     continue;
                 };
-                let path = out.join(file);
-                if claimed.contains(file) || !path.is_file() {
+                let Some(&bytes) = sizes.get(file) else {
                     continue;
+                };
+                if claimed.insert(file.to_string()) {
+                    files.push(PurgedFile {
+                        name: file.to_string(),
+                        records: f["records"].as_u64().unwrap_or(0),
+                        bytes,
+                    });
                 }
-                files.push(PurgedFile {
-                    name: file.to_string(),
-                    records: f["records"].as_u64().unwrap_or(0),
-                    bytes: file_len(&path)?,
-                });
-                claimed.insert(file.to_string());
             }
         }
     }
+    if !local {
+        let unlisted: Vec<&String> = sizes
+            .keys()
+            .filter(|n| n.starts_with(&prefix) && is_ndjson(n) && !claimed.contains(*n))
+            .collect();
+        for name in unlisted {
+            by_tag(name, &mut files, &mut claimed)?;
+        }
+    }
     files.sort_by(|a, b| a.name.cmp(&b.name));
-    let prefix = format!("{}.", sanitize(server));
-    let not_purged = names
-        .into_iter()
+    let not_purged = sizes
+        .into_keys()
         .filter(|n| n.starts_with(&prefix) && !claimed.contains(n))
         .collect();
     Ok((files, not_purged))
+}
+
+/// Run `read` on `name`: in place on local disk, else on a copy downloaded into `scratch`;
+/// `None` when the file is gone
+fn read_file<T>(
+    sink: &dyn FileSink,
+    name: &str,
+    scratch: &Path,
+    read: impl FnOnce(&Path) -> Result<T, IngestError>,
+) -> Result<Option<T>, IngestError> {
+    if let Some(path) = sink.local_path(name) {
+        return if path.is_file() {
+            read(&path).map(Some)
+        } else {
+            Ok(None)
+        };
+    }
+    fs::create_dir_all(scratch).map_err(|e| output_error(scratch, e))?;
+    let copy = scratch.join(format!(".purge-{}-{name}", std::process::id()));
+    let result = match sink.get_file(name, &copy) {
+        Ok(true) => read(&copy).map(Some),
+        Ok(false) => Ok(None),
+        Err(e) => Err(e),
+    };
+    let _ = fs::remove_file(&copy);
+    result
 }
 
 /// Lines in `path` when its lines are `server`'s; `None` when the file is another server's or has
@@ -514,12 +593,6 @@ fn plain_name(name: &str) -> bool {
         && name != "."
         && name != ".."
         && !name.starts_with('.')
-}
-
-fn file_len(path: &Path) -> Result<u64, IngestError> {
-    fs::metadata(path)
-        .map(|m| m.len())
-        .map_err(|e| output_error(path, e))
 }
 
 /// Files and bytes under `dir`, at all levels; zero when it does not exist

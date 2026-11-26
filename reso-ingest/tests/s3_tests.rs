@@ -428,6 +428,152 @@ async fn sync_keeps_manifests_and_last_run_in_the_bucket() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The servers whose lines an object holds, by its `source` tags
+fn sources(bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["source"].as_str().map(String::from))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn purge_deletes_one_servers_objects_and_copies_its_record_to_the_bucket() {
+    set_credentials();
+    std::env::set_var("S3_PURGE_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3().await;
+    let reso = reso_server().await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-purge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    let server = |name: &str| {
+        format!(
+            "[[server]]\nname = \"{name}\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_PURGE_TEST_TOKEN\"\n",
+            reso.uri()
+        )
+    };
+    std::fs::write(&config, server("mls") + &server("other")).unwrap();
+    let out = dir.join("out");
+    let bucket = [
+        "--out",
+        out.to_str().unwrap(),
+        "--s3-bucket",
+        "bkt",
+        "--s3-prefix",
+        "p",
+        "--s3-endpoint",
+        &endpoint,
+        "--s3-region",
+        "us-east-1",
+        "--s3-allow-http",
+        "--s3-single-delete",
+    ]
+    .map(String::from);
+    let args = |cmd: &[&str]| -> Vec<String> {
+        cmd.iter()
+            .map(|s| s.to_string())
+            .chain(bucket.iter().cloned())
+            .collect()
+    };
+    let (code, o, e) = cli(&args(&["sync", "--config", config.to_str().unwrap()])).await;
+    assert_eq!(code, 0, "{o}{e}");
+
+    // A file a killed run left without a manifest, and one named like mls's that is not
+    {
+        let mut map = objects.lock().unwrap();
+        map.insert(
+            "p/data/mls.Property.killed.0001.ndjson".into(),
+            (b"{\"source\":\"mls\",\"record\":{}}\n".to_vec(), 1),
+        );
+        map.insert(
+            "p/data/mls.Lookalike.x.ndjson".into(),
+            (b"{\"source\":\"other\",\"record\":{}}\n".to_vec(), 1),
+        );
+    }
+    let mls_data = |objects: &Objects| -> Vec<String> {
+        objects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, (b, _))| k.starts_with("p/data/") && sources(b).contains("mls"))
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    let keys =
+        |objects: &Objects| -> Vec<String> { objects.lock().unwrap().keys().cloned().collect() };
+    assert_eq!(mls_data(&objects).len(), 2, "{:?}", keys(&objects));
+    assert!(keys(&objects).iter().any(|k| k.starts_with("p/state/mls.")));
+
+    // A dry run lists the synced file and the orphan, and changes nothing
+    let before = keys(&objects);
+    let (code, o, e) = cli(&args(&["purge", "--server", "mls"])).await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(o.contains("data files: 2 (3 records"), "{o}");
+    assert!(o.contains("mls.Property.killed.0001.ndjson"), "{o}");
+    assert!(
+        o.contains("not purged (no source tag or manifest names it): mls.Lookalike.x.ndjson"),
+        "{o}"
+    );
+    assert_eq!(keys(&objects), before);
+
+    let (code, o, e) = cli(&args(&[
+        "purge",
+        "--server",
+        "mls",
+        "--execute",
+        "--by",
+        "tester",
+    ]))
+    .await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(
+        o.contains("purged server mls: 2 data files (3 records)"),
+        "{o}"
+    );
+    assert!(o.contains("copy s3://bkt/p/data/purge."), "{o}");
+    let after = keys(&objects);
+    assert!(mls_data(&objects).is_empty(), "{after:?}");
+    assert!(
+        !after.iter().any(|k| k.starts_with("p/state/mls.")),
+        "{after:?}"
+    );
+    // The other server's files and state, the lookalike and the run manifest stay
+    let map = objects.lock().unwrap();
+    assert!(map
+        .iter()
+        .any(|(k, (b, _))| k.starts_with("p/data/other.") && sources(b).contains("other")));
+    assert!(after.iter().any(|k| k.starts_with("p/state/other.")));
+    assert!(after.contains(&"p/data/mls.Lookalike.x.ndjson".to_string()));
+    assert!(after.iter().any(|k| k.starts_with("p/data/manifest.")));
+
+    // The record in the bucket is the local one, its checksum matches, and the access line names it
+    let audit = out.join("audit");
+    let local: Vec<String> = local_names(&audit)
+        .into_iter()
+        .filter(|n| n.starts_with("purge.") && n.ends_with(".json"))
+        .collect();
+    assert_eq!(local.len(), 1, "{local:?}");
+    let record = std::fs::read(audit.join(&local[0])).unwrap();
+    assert_eq!(map[&format!("p/data/{}", local[0])].0, record);
+    let sum = String::from_utf8(map[&format!("p/data/{}.sha256", local[0])].0.clone()).unwrap();
+    assert!(sum.starts_with(&reso_ingest::sha256_hex(&record)), "{sum}");
+    let id = local[0]
+        .trim_start_matches("purge.")
+        .trim_end_matches(".json");
+    let access = map
+        .iter()
+        .find(|(k, _)| k.starts_with("p/data/access.") && k.contains(&id.replace('.', "_")))
+        .map(|(_, (b, _))| String::from_utf8(b.clone()).unwrap())
+        .unwrap_or_else(|| panic!("no access copy for {id}: {after:?}"));
+    let line: serde_json::Value = serde_json::from_str(access.trim()).unwrap();
+    assert_eq!(line["status"], "purged");
+    assert_eq!(line["purge"]["record"], local[0]);
+    drop(map);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Data files in the bucket under `p/data/`, in name order (run id, then file number)
 fn bucket_lines(objects: &Objects) -> Vec<serde_json::Value> {
     let map = objects.lock().unwrap();

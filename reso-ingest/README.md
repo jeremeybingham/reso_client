@@ -259,7 +259,7 @@ multi-delete), or Google Cloud Storage through its own API (`Provider::Gcs`: ver
 `replace` and versioned `delete` use `x-goog-if-generation-match`; credentials from a service-account key file). `S3FileSink` uploads finished data files to the same kind of bucket (one conditional `PUT` up to 32 MiB,
 multipart above; never replaces a name; use it from a multi-threaded runtime).
 
-**Running against a bucket (`--features s3`).** `sync`, `serve`, `media` and `status` take `--s3-bucket` (env
+**Running against a bucket (`--features s3`).** `sync`, `serve`, `media`, `status` and `purge` take `--s3-bucket` (env
 `RESO_S3_BUCKET`), `--s3-prefix`, `--s3-endpoint` (R2, MinIO, RustFS), `--s3-region`, `--s3-allow-http` (a local test
 server) and `--s3-single-delete` (a store without multi-delete), or `--gcs-bucket` (env `RESO_GCS_BUCKET`) with
 `--gcs-prefix` (an alias of `--s3-prefix`) for Google Cloud Storage. State then goes to `<prefix>/state/` and finished data files to `<prefix>/data/`,
@@ -358,8 +358,16 @@ deletion fails, the purge stops, the record lists what was deleted with `"status
 command exits 1. Remove the server from the configuration afterwards: a later `sync` would start a full load again, and
 `media` for it would look for data files that are gone.
 
-`purge` works on local storage only. With `--s3-bucket` or `--gcs-bucket` it refuses: deleting data files in a bucket
-needs `list` and `delete` on the file sink (#139).
+**With a bucket** (`--s3-bucket` or `--gcs-bucket`, #139), the data files and state keys are deleted in the bucket
+(`<prefix>/data/`, `<prefix>/state/`); media files are local with a bucket too, so `--media-dir` is purged as above.
+The server's files are found by the run manifests in `<prefix>/data/` rather than by reading every object: only NDJSON
+objects named like the server's that no manifest lists (a run killed before delivering its manifest) are downloaded
+into `--out` and judged by their tag. The record, its `.sha256` and the access line are written to `<out>/audit/` as
+above and copied to `<prefix>/data/` (`purge.<id>.json`, `purge.<id>.json.sha256`, `access.<id>.ndjson`, the last with
+the dots of the id as `_`), next to the access copies `sync` leaves there. If a copy fails after the deletes, the
+local record and access line stand, the error is printed and the command exits 1. The sink's list, read and delete were checked
+against AWS S3 and GCS on 2026-11-26 (`s3_live`); the whole `purge` command only against an in-process S3 fake. It uses
+only actions the IAM policy below already grants (`s3:ListBucket`, `s3:GetObject`, `s3:DeleteObject`, `s3:PutObject`).
 
 ## Daemon mode (`serve`)
 

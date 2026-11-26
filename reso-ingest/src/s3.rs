@@ -834,6 +834,61 @@ impl FileSink for S3FileSink {
     fn location(&self, name: &str) -> String {
         format!("{}/{name}", self.label.trim_end_matches('/'))
     }
+
+    /// Objects directly under the prefix (`<prefix>/data/`), not those in deeper folders
+    fn list(&self) -> Result<Vec<(String, u64)>, IngestError> {
+        block_on(async {
+            let metas: Vec<_> = self
+                .store
+                .list(self.prefix.as_ref())
+                .try_collect()
+                .await
+                .map_err(|e| self.error("", chain(&e)))?;
+            let skip = self.prefix.as_ref().map_or(0, |p| p.parts().count());
+            let mut files: Vec<(String, u64)> = metas
+                .into_iter()
+                .filter_map(|m| {
+                    let mut parts = m.location.parts().skip(skip);
+                    let name = parts.next()?.as_ref().to_string();
+                    parts.next().is_none().then_some((name, m.size))
+                })
+                .collect();
+            files.sort();
+            Ok(files)
+        })
+    }
+
+    fn get_file(&self, name: &str, dest: &Path) -> Result<bool, IngestError> {
+        block_on(async {
+            let result = match self.store.get(&self.path(name)?).await {
+                Ok(r) => r,
+                Err(ObjectError::NotFound { .. }) => return Ok(false),
+                Err(e) => return Err(self.error(name, chain(&e))),
+            };
+            let io = |e: std::io::Error| self.error(name, format!("{}: {e}", dest.display()));
+            let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
+            let mut stream = result.into_stream();
+            while let Some(chunk) = stream
+                .try_next()
+                .await
+                .map_err(|e| self.error(name, chain(&e)))?
+            {
+                file.write_all(&chunk).await.map_err(io)?;
+            }
+            file.flush().await.map_err(io)?;
+            Ok(true)
+        })
+    }
+
+    fn delete(&self, name: &str) -> Result<bool, IngestError> {
+        block_on(async {
+            match self.store.delete(&self.path(name)?).await {
+                Ok(()) => Ok(true),
+                Err(ObjectError::NotFound { .. }) => Ok(false),
+                Err(e) => Err(self.error(name, chain(&e))),
+            }
+        })
+    }
 }
 
 #[cfg(test)]

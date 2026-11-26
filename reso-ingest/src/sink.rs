@@ -39,6 +39,53 @@ pub trait FileSink: Debug + Send + Sync {
     fn location(&self, name: &str) -> String {
         name.to_string()
     }
+
+    /// The stored names with their sizes in bytes, in name order (`purge`, #139)
+    ///
+    /// Only names at the top level: no directory part. The default refuses, for sinks that only
+    /// take files.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the destination cannot be listed, or the sink cannot list.
+    fn list(&self) -> Result<Vec<(String, u64)>, IngestError> {
+        Err(unsupported(self, "list"))
+    }
+
+    /// Copy `name` into the local file `dest` (replaced if it exists); `false` when `name` is not
+    /// stored
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the file cannot be read or written, or the sink cannot read.
+    fn get_file(&self, name: &str, dest: &Path) -> Result<bool, IngestError> {
+        let _ = dest;
+        Err(unsupported(self, &format!("read {name}")))
+    }
+
+    /// Delete `name`; `false` when it was not stored (an S3-compatible store does not say, so it
+    /// reports `true`)
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the file cannot be deleted, or the sink cannot delete.
+    fn delete(&self, name: &str) -> Result<bool, IngestError> {
+        Err(unsupported(self, &format!("delete {name}")))
+    }
+
+    /// The local path of `name` when the sink is a directory on this machine, so a reader can open
+    /// it in place; `None` for remote storage
+    fn local_path(&self, name: &str) -> Option<PathBuf> {
+        let _ = name;
+        None
+    }
+}
+
+fn unsupported<S: FileSink + ?Sized>(sink: &S, what: &str) -> IngestError {
+    IngestError::Output {
+        path: sink.location(""),
+        message: format!("this sink cannot {what}"),
+    }
 }
 
 /// A directory: today's behaviour when the writer's staging directory is somewhere else
@@ -57,6 +104,14 @@ impl LocalDirSink {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir).map_err(|e| output_error(&dir, e))?;
         Ok(Self { dir })
+    }
+
+    /// A sink over `dir` that does not create it (a dry-run `purge` changes nothing); listing a
+    /// missing directory finds no files
+    pub fn existing(dir: impl AsRef<Path>) -> Self {
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+        }
     }
 }
 
@@ -81,5 +136,46 @@ impl FileSink for LocalDirSink {
 
     fn location(&self, name: &str) -> String {
         self.dir.join(name).display().to_string()
+    }
+
+    /// Regular files in the directory (including `.part` files a killed run left)
+    fn list(&self) -> Result<Vec<(String, u64)>, IngestError> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(output_error(&self.dir, e)),
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| output_error(&self.dir, e))?;
+            let Ok(meta) = entry.metadata() else { continue };
+            if let (true, Some(name)) = (meta.is_file(), entry.file_name().to_str()) {
+                files.push((name.to_string(), meta.len()));
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+
+    fn get_file(&self, name: &str, dest: &Path) -> Result<bool, IngestError> {
+        let src = self.dir.join(name);
+        match fs::copy(&src, dest) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !src.exists() => Ok(false),
+            Err(e) => Err(output_error(&src, e)),
+        }
+    }
+
+    fn delete(&self, name: &str) -> Result<bool, IngestError> {
+        let path = self.dir.join(name);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(output_error(&path, e)),
+        }
+    }
+
+    fn local_path(&self, name: &str) -> Option<PathBuf> {
+        Some(self.dir.join(name))
     }
 }

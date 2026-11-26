@@ -311,3 +311,73 @@ async fn execute_needs_by() {
     let (code, _, _) = cli(&["purge", "--server", "alpha", "--by", "x"]).await;
     assert_eq!(code, 2);
 }
+
+/// A directory that acts like a bucket (no local paths, so objects are downloaded to be read) and
+/// refuses new files, as a bucket might after the deletes
+#[derive(Debug)]
+struct RemoteRefusingPuts(reso_ingest::LocalDirSink);
+
+impl reso_ingest::FileSink for RemoteRefusingPuts {
+    fn put_file(&self, name: &str, _local: &Path) -> Result<(), reso_ingest::IngestError> {
+        Err(reso_ingest::IngestError::Output {
+            path: name.to_string(),
+            message: "access denied".into(),
+        })
+    }
+    fn exists(&self, name: &str) -> Result<bool, reso_ingest::IngestError> {
+        self.0.exists(name)
+    }
+    fn list(&self) -> Result<Vec<(String, u64)>, reso_ingest::IngestError> {
+        self.0.list()
+    }
+    fn get_file(&self, name: &str, dest: &Path) -> Result<bool, reso_ingest::IngestError> {
+        self.0.get_file(name, dest)
+    }
+    fn delete(&self, name: &str) -> Result<bool, reso_ingest::IngestError> {
+        self.0.delete(name)
+    }
+}
+
+#[tokio::test]
+async fn a_failed_copy_to_the_bucket_keeps_the_local_record() {
+    let dir = TempDir::new("remote");
+    let out = setup(&dir.0).await;
+    // Move the data files and manifests into the "bucket"
+    let bucket = dir.0.join("bucket");
+    fs::create_dir_all(&bucket).unwrap();
+    for entry in fs::read_dir(&out).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::rename(entry.path(), bucket.join(entry.file_name())).unwrap();
+        }
+    }
+    let sink = RemoteRefusingPuts(reso_ingest::LocalDirSink::new(&bucket).unwrap());
+    let state: Arc<dyn StateStore> = Arc::new(FileStateStore::new(out.join("state")));
+    let outcome =
+        reso_ingest::execute_purge("alpha", &out, Some(&sink), &out.join("media"), &state, "t")
+            .await
+            .unwrap();
+    let reso_ingest::PurgeOutcome::Done {
+        record,
+        path,
+        delivered,
+        delivery_error,
+        ..
+    } = outcome
+    else {
+        panic!("held")
+    };
+    assert_eq!(record.status, "purged");
+    assert_eq!(record.files.len(), 1, "{record:?}");
+    assert!(delivered.is_empty());
+    assert!(delivery_error.unwrap().contains("access denied"));
+    assert!(path.is_file());
+    assert!(data_files(&bucket, "alpha").is_empty());
+    assert_eq!(data_files(&bucket, "beta").len(), 1);
+    // No downloaded copies are left in the local directory
+    assert!(!fs::read_dir(&out).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".purge-")));
+}

@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nothing has changed for a day, which runs killed mid-pass (`kill -9`, OOM, eviction) left behind at about 40 MB per
   million keys (#134). Age decides rather than a pid check, so an output volume shared by several hosts is safe; a
   library caller's `DeleteTarget::scratch_dir` is swept the same way, the system temporary directory never.
+- `reso-ingest`: `purge` works with a bucket (`--s3-bucket`, `--gcs-bucket`, #139). The server's data files are found
+  by the run manifests in the bucket (plus unlisted NDJSON objects named like the server's, read for their tag) and
+  deleted there with its state keys; the purge record, its `.sha256` and the access line are copied to `<prefix>/data/`
+  besides the local `audit/`. `FileSink` gains `list`, `get_file`, `delete` and `local_path` (defaults refuse, so
+  existing sinks still compile), implemented by `LocalDirSink` and `S3FileSink`; `LocalDirSink::existing` opens a
+  directory without creating it. Breaking: `plan_purge` and `execute_purge` take `files: Option<&dyn FileSink>`, and
+  `PurgeOutcome::Done` gains `delivered` and `delivery_error`.
 
 ### Changed
 - `reso-ingest`: an S3 endpoint at `storage.googleapis.com` is refused, since GCS's interoperability API ignores the
