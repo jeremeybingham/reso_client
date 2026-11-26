@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use reso_client::Metadata;
+use reso_client::{Metadata, RawRecords};
 use reso_ingest::{arrow_type, IngestError, ParquetWriter, RecordWriter};
 use serde_json::{json, Value};
 
@@ -393,4 +393,105 @@ fn fetched_at_is_a_parquet_timestamp() {
         ty.contains("Timestamp") && ty.contains("MILLIS") && ty.contains("true"),
         "{ty}"
     );
+}
+
+/// Rows of the single file a writer wrote after `write` ran on it
+fn rows_after(tag: &str, write: impl FnOnce(&mut ParquetWriter)) -> Vec<Value> {
+    let dir = TempDir::new(tag);
+    let mut w = writer(&dir, 1 << 30);
+    write(&mut w);
+    let files = w.finish().unwrap();
+    assert_eq!(files.len(), 1);
+    read_rows(&dir.0.join(&files[0].name))
+}
+
+#[test]
+fn record_text_gives_the_same_rows_as_parsed_records() {
+    // Every column type, nulls, a missing field, unknown members, escapes and line breaks
+    let texts = [
+        r#"{"ListingKey":"A1","ListPrice":250000.5,"Bedrooms":3,"Views":9000000000,
+            "HasPool":true,"ListingDate":"2026-03-04","ModificationTimestamp":"2026-11-24T10:00:00.123Z",
+            "Appliances":["Oven","Fridge"],"Status":"Active","@odata.etag":"W/\"1\"","Unknown":{"x":[1]}}"#,
+        r#"{"ListingKey":"A2 \"quoted\" é\n","ListPrice":"99.5","Bedrooms":null,"Appliances":[]}"#,
+        r#"{"ListingKey":"A3","HasPool":false,"Status":null,"Extra":"plain text"}"#,
+    ];
+    let raw = RawRecords::from_texts(texts);
+    let parsed = raw.values().unwrap();
+    let at = "2026-11-24T10:00:05Z";
+    let from_text = rows_after("rawsame-text", |w| w.write_raw_batch(&raw, at).unwrap());
+    let from_values = rows_after("rawsame-values", |w| w.write_batch(&parsed, at).unwrap());
+    assert_eq!(from_text.len(), 3);
+    assert_eq!(from_text, from_values);
+    assert_eq!(from_text[1]["record"]["ListingKey"], "A2 \"quoted\" é\n");
+}
+
+#[test]
+fn record_text_with_more_rows_than_one_decode_batch() {
+    let texts: Vec<String> = (0..20_000)
+        .map(|i| format!(r#"{{"ListingKey":"K{i}","Bedrooms":{}}}"#, i % 7))
+        .collect();
+    let raw = RawRecords::from_texts(&texts);
+    let rows = rows_after("rawmany", |w| {
+        w.write_raw_batch(&raw, "2026-11-24T10:00:05Z").unwrap();
+    });
+    assert_eq!(rows.len(), 20_000);
+    assert_eq!(rows[19_999]["record"]["ListingKey"], "K19999");
+    assert_eq!(rows[19_999]["record"]["Bedrooms"], 19_999 % 7);
+}
+
+#[test]
+fn record_text_with_an_object_in_a_text_column_falls_back_to_json_text() {
+    let raw = RawRecords::from_texts([
+        r#"{"ListingKey":"A1","Status":"Active"}"#,
+        r#"{"ListingKey":"A2","Extra":{"a":[1,2]},"Appliances":[{"n":1},"Oven"]}"#,
+    ]);
+    let rows = rows_after("rawobject", |w| {
+        w.write_raw_batch(&raw, "2026-11-24T10:00:05Z").unwrap();
+        // The next batch goes the parsed way too and still fits
+        w.write_raw_batch(
+            &RawRecords::from_texts([r#"{"ListingKey":"A3"}"#]),
+            "2026-11-24T10:00:06Z",
+        )
+        .unwrap();
+    });
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0]["record"]["Status"], "Active");
+    let extra: Value = serde_json::from_str(rows[1]["record"]["Extra"].as_str().unwrap()).unwrap();
+    assert_eq!(extra, json!({"a": [1, 2]}));
+    assert_eq!(
+        rows[1]["record"]["Appliances"],
+        json!(["{\"n\":1}", "Oven"])
+    );
+    assert_eq!(rows[2]["record"]["ListingKey"], "A3");
+}
+
+#[test]
+fn record_text_that_does_not_fit_or_parse_fails_the_write() {
+    let at = "2026-11-24T10:00:05Z";
+    for (tag, text) in [
+        ("rawbadtype", r#"{"ListingKey":"A","Bedrooms":"many"}"#),
+        ("rawtwo", r#"{"ListingKey":"A"}{"ListingKey":"B"}"#),
+        ("rawcut", r#"{"ListingKey":"A""#),
+        ("rawarray", r#"[1,2]"#),
+    ] {
+        let dir = TempDir::new(tag);
+        let mut w = writer(&dir, 1 << 30);
+        let err = w
+            .write_raw_batch(&RawRecords::from_texts([text]), at)
+            .unwrap_err();
+        assert!(matches!(err, IngestError::Output { .. }), "{tag}: {err}");
+    }
+}
+
+#[test]
+fn record_text_keeps_a_number_in_a_text_column_as_sent() {
+    let rows = rows_after("rawnumber", |w| {
+        w.write_raw_batch(
+            &RawRecords::from_texts([r#"{"ListingKey":1.50,"ListPrice":1.50}"#]),
+            "2026-11-24T10:00:05Z",
+        )
+        .unwrap();
+    });
+    assert_eq!(rows[0]["record"]["ListingKey"], "1.50");
+    assert_eq!(rows[0]["record"]["ListPrice"], 1.5);
 }

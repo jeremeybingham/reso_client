@@ -29,7 +29,8 @@ pub trait RecordWriter: Send {
     /// it (what `sync` uses, #162)
     ///
     /// A writer that stores records unchanged ([`NdjsonWriter`]) copies the text, so no record is
-    /// parsed into a `Value`. The default parses every record and calls `write_batch` (Parquet).
+    /// parsed into a `Value`; `ParquetWriter` (feature `parquet`) hands the text to its Arrow
+    /// decoder. The default parses every record and calls `write_batch`.
     /// Wrappers forward it and read the members they need with [`reso_client::record_fields`].
     ///
     /// # Errors
