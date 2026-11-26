@@ -244,26 +244,37 @@ enum Command {
 
 /// Where state and output live when not on the local disk (feature `s3`)
 ///
-/// With `--s3-bucket`, checkpoints, leases and media indexes go to `<prefix>/state/` in the bucket
-/// and finished data files to `<prefix>/data/`, so several workers share them. Manifests, the
-/// metrics file and media files still go to `--out` and `--media-dir`. Credentials come from the
-/// standard `AWS_*` environment variables, never from options.
+/// With `--s3-bucket` or `--gcs-bucket`, checkpoints, leases and media indexes go to
+/// `<prefix>/state/` in the bucket and finished data files to `<prefix>/data/`, so several workers
+/// share them. Manifests, the metrics file and media files still go to `--out` and `--media-dir`.
+/// Credentials come from the standard `AWS_*` or `GOOGLE_*` environment variables, never from
+/// options.
 #[derive(Debug, Clone, Default, clap::Args)]
+#[cfg_attr(
+    feature = "s3",
+    command(group = clap::ArgGroup::new("bucket").args(["s3_bucket", "gcs_bucket"]))
+)]
 struct StorageArgs {
     /// S3-compatible bucket for state and data files (env RESO_S3_BUCKET)
     #[cfg(feature = "s3")]
     #[arg(long, env = "RESO_S3_BUCKET", conflicts_with = "state")]
     s3_bucket: Option<String>,
-    /// Key prefix inside the bucket (env RESO_S3_PREFIX)
+    /// Google Cloud Storage bucket for state and data files, through GCS's own API (env
+    /// RESO_GCS_BUCKET; key file from GOOGLE_SERVICE_ACCOUNT or GOOGLE_APPLICATION_CREDENTIALS)
+    #[cfg(feature = "s3")]
+    #[arg(long, env = "RESO_GCS_BUCKET", conflicts_with = "state")]
+    gcs_bucket: Option<String>,
+    /// Key prefix inside the bucket, S3 or GCS (env RESO_S3_PREFIX)
     #[cfg(feature = "s3")]
     #[arg(
         long,
+        visible_alias = "gcs-prefix",
         env = "RESO_S3_PREFIX",
         default_value = "",
-        requires = "s3_bucket"
+        requires = "bucket"
     )]
     s3_prefix: String,
-    /// Endpoint URL of a non-AWS store: R2, MinIO, GCS interoperability (env RESO_S3_ENDPOINT)
+    /// Endpoint URL of a non-AWS S3 store: R2, MinIO, RustFS (env RESO_S3_ENDPOINT)
     #[cfg(feature = "s3")]
     #[arg(long, env = "RESO_S3_ENDPOINT", requires = "s3_bucket")]
     s3_endpoint: Option<String>,
@@ -275,7 +286,7 @@ struct StorageArgs {
     #[cfg(feature = "s3")]
     #[arg(long, requires = "s3_bucket")]
     s3_allow_http: bool,
-    /// One DELETE per object instead of multi-delete (GCS interoperability)
+    /// One DELETE per object instead of multi-delete (stores without multi-delete)
     #[cfg(feature = "s3")]
     #[arg(long, requires = "s3_bucket")]
     s3_single_delete: bool,
@@ -324,20 +335,24 @@ impl Args {
             .unwrap_or_else(|| self.out().join("state"))
     }
 
-    /// The bucket options when `--s3-bucket` is set, with `suffix` under the prefix
+    /// The bucket options when `--s3-bucket` or `--gcs-bucket` is set, with `suffix` under the
+    /// prefix
     #[cfg(feature = "s3")]
     fn s3_options(&self, suffix: &str) -> Option<crate::S3Options> {
         let s = &self.storage;
+        if let Some(bucket) = s.gcs_bucket.clone() {
+            return Some(crate::S3Options {
+                provider: crate::Provider::Gcs,
+                bucket,
+                prefix: bucket_prefix(&s.s3_prefix, suffix),
+                ..crate::S3Options::default()
+            });
+        }
         let bucket = s.s3_bucket.clone()?;
-        let prefix = s.s3_prefix.trim_matches('/');
-        let prefix = if prefix.is_empty() {
-            suffix.to_string()
-        } else {
-            format!("{prefix}/{suffix}")
-        };
         Some(crate::S3Options {
+            provider: crate::Provider::S3,
             bucket,
-            prefix,
+            prefix: bucket_prefix(&s.s3_prefix, suffix),
             endpoint: s.s3_endpoint.clone(),
             region: s.s3_region.clone(),
             allow_http: s.s3_allow_http,
@@ -345,7 +360,16 @@ impl Args {
         })
     }
 
-    /// The state store: the bucket with `--s3-bucket`, else the state directory
+    /// Whether state and data files are in a bucket
+    fn in_bucket(&self) -> bool {
+        #[cfg(feature = "s3")]
+        if self.storage.s3_bucket.is_some() || self.storage.gcs_bucket.is_some() {
+            return true;
+        }
+        false
+    }
+
+    /// The state store: the bucket with `--s3-bucket` or `--gcs-bucket`, else the state directory
     fn state_store(&self) -> Result<Arc<dyn StateStore>, IngestError> {
         #[cfg(feature = "s3")]
         if let Some(options) = self.s3_options("state") {
@@ -354,13 +378,25 @@ impl Args {
         Ok(Arc::new(FileStateStore::new(self.state())))
     }
 
-    /// Where finished data files go: the bucket with `--s3-bucket`, else they stay in `--out`
+    /// Where finished data files go: the bucket with `--s3-bucket` or `--gcs-bucket`, else they
+    /// stay in `--out`
     fn file_sink(&self) -> Result<Option<Arc<dyn crate::sink::FileSink>>, IngestError> {
         #[cfg(feature = "s3")]
         if let Some(options) = self.s3_options("data") {
             return Ok(Some(Arc::new(crate::S3FileSink::new(&options)?)));
         }
         Ok(None)
+    }
+}
+
+/// `<prefix>/<suffix>` with the prefix's slashes trimmed, or `suffix` alone
+#[cfg(feature = "s3")]
+fn bucket_prefix(prefix: &str, suffix: &str) -> String {
+    let prefix = prefix.trim_matches('/');
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{prefix}/{suffix}")
     }
 }
 
@@ -1406,7 +1442,7 @@ async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         Ok(Some(_)) => {
             let _ = writeln!(
                 err,
-                "error: `media` reads the data files in --out, but with --s3-bucket they are in the \
+                "error: `media` reads the data files in --out, but with a bucket they are in the \
                  bucket; use `sync --media` to download Media files while syncing"
             );
             return 2;
@@ -1621,8 +1657,7 @@ fn describe(metadata: &Metadata, resources: &[String]) -> Value {
 
 /// `purge`: a dry run, or with `by` set, the purge itself
 async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
-    #[cfg(feature = "s3")]
-    if args.storage.s3_bucket.is_some() {
+    if args.in_bucket() {
         let _ = writeln!(
             err,
             "error: purge works on local storage only; a bucket needs delete and list on the sink (#107)"
