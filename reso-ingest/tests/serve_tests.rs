@@ -836,6 +836,7 @@ paused = true
     .unwrap();
     let mut opts = options(&dir);
     opts.ui = true;
+    opts.grafana_url = Some("http://127.0.0.1:3000/".into());
     let shutdown = Shutdown::new();
     let daemon = Daemon::start(config.clone(), opts, shutdown.clone())
         .await
@@ -875,6 +876,14 @@ paused = true
         "{index}"
     );
     assert!(index.contains(r#"http-equiv="refresh" content="15""#));
+    // --grafana-url: each row links to the kit's dashboard filtered to the feed
+    assert!(index.contains("<th>History</th>"), "{index}");
+    assert!(
+        index.contains(
+            r#"<td><a href="http://127.0.0.1:3000/d/reso-ingest-serve?var-server=mls&amp;var-resource=Property" rel="noreferrer">Grafana</a></td></tr>"#
+        ),
+        "{index}"
+    );
 
     let (code, member) = get(&daemon, "/feed/mls/Member").await;
     assert_eq!(code, 200);
@@ -884,6 +893,10 @@ paused = true
     );
     assert!(!member.contains("<script>"), "{member}");
     assert!(member.contains("<td>failed</td>"), "{member}");
+    assert!(
+        member.contains("<dt>History</dt><dd><a href=\"http://127.0.0.1:3000/d/reso-ingest-serve?var-server=mls&amp;var-resource=Member\""),
+        "{member}"
+    );
 
     let (_, property) = get(&daemon, "/feed/mls/Property").await;
     assert!(
@@ -915,6 +928,37 @@ paused = true
     assert_eq!(get(&daemon, "/status").await.0, 200);
     shutdown.trigger();
     daemon.wait().await;
+}
+
+/// `--grafana-url` needs `ui` and an http(s) URL: anything else is a start-up error, so a
+/// `javascript:` URL never reaches a page
+#[tokio::test]
+async fn a_bad_grafana_url_is_a_startup_error() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let (srv, _, _) = server(false).await;
+    let dir = TempDir::new("grafana");
+    for (ui, url, want) in [
+        (false, "http://127.0.0.1:3000", "needs --ui"),
+        (true, "javascript:alert(1)", "http:// or https://"),
+        (true, "127.0.0.1:3000", "http:// or https://"),
+    ] {
+        if ui && !cfg!(feature = "ui") {
+            continue;
+        }
+        let mut opts = options(&dir);
+        opts.ui = ui;
+        opts.grafana_url = Some(url.into());
+        let e = Daemon::start(
+            config(&srv.uri(), "", "interval = \"1h\"", ""),
+            opts,
+            Shutdown::new(),
+        )
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(e.contains(want), "{url}: {e}");
+    }
 }
 
 /// Without the `ui` feature, `--ui` is a start-up error rather than a silent no-op
@@ -960,6 +1004,27 @@ async fn observability_kit_uses_only_metrics_serve_exports() {
     let metrics = get(&daemon, "/metrics").await.1;
     shutdown.trigger();
     daemon.wait().await;
+
+    // `serve --grafana-url` links to this dashboard by uid with these two variables
+    let dashboard: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deploy/observability/grafana/dashboards/reso-ingest-serve.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dashboard["uid"], "reso-ingest-serve");
+    let vars: Vec<&str> = dashboard["templating"]["list"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["name"].as_str())
+        .collect();
+    assert!(
+        vars.contains(&"server") && vars.contains(&"resource"),
+        "{vars:?}"
+    );
 
     let sample = metrics
         .lines()

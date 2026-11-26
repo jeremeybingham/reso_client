@@ -20,6 +20,9 @@ use crate::metrics::{checkpoint_secs, parse_rfc3339};
 /// How many runs `/runs` lists
 const RUNS_PAGE: usize = 100;
 
+/// The uid of `deploy/observability/grafana/dashboards/reso-ingest-serve.json`
+const GRAFANA_DASHBOARD: &str = "reso-ingest-serve";
+
 /// The page routes, merged into the endpoint router when `ui` is on
 pub(super) fn routes() -> Router<Arc<Shared>> {
     Router::new()
@@ -65,6 +68,19 @@ fn feed_link(server: &str, resource: &str) -> String {
         html(server),
         html(resource)
     )
+}
+
+/// The kit's dashboard (`deploy/observability`) filtered to one feed, as a link; `None` without
+/// a Grafana URL
+fn grafana_link(base: Option<&str>, server: &str, resource: &str) -> Option<String> {
+    base.map(|base| {
+        let url = format!(
+            "{base}/d/{GRAFANA_DASHBOARD}?var-server={}&var-resource={}",
+            segment(server),
+            segment(resource)
+        );
+        format!("<a href=\"{}\" rel=\"noreferrer\">Grafana</a>", html(&url))
+    })
 }
 
 /// A duration as `850 ms`, `12.3 s`, `4m 05s`, `2h 07m` or `3d 04h`
@@ -202,8 +218,15 @@ async fn index(State(shared): State<Arc<Shared>>) -> Response {
             html(e)
         );
     }
-    body.push_str("</p>\n<table><thead><tr><th>Feed</th><th>State</th><th>Last run</th><th>Records</th>\
-<th>Took</th><th>Result</th><th>Failures in a row</th><th>Next run</th><th>Freshness lag</th></tr></thead><tbody>\n");
+    let grafana = shared.grafana_url.as_deref();
+    body.push_str(
+        "</p>\n<table><thead><tr><th>Feed</th><th>State</th><th>Last run</th><th>Records</th>\
+<th>Took</th><th>Result</th><th>Failures in a row</th><th>Next run</th><th>Freshness lag</th>",
+    );
+    if grafana.is_some() {
+        body.push_str("<th>History</th>");
+    }
+    body.push_str("</tr></thead><tbody>\n");
     for f in &feeds {
         let last = f.recent.back();
         let result = match last {
@@ -211,10 +234,13 @@ async fn index(State(shared): State<Arc<Shared>>) -> Response {
             Some(r) => r.outcome.to_string(),
             None => "–".into(),
         };
+        let history = grafana_link(grafana, &f.server, &f.resource)
+            .map(|a| format!("<td>{a}</td>"))
+            .unwrap_or_default();
         let _ = writeln!(
             body,
             "<tr{}><td>{}</td><td>{}</td><td>{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td>\
-<td>{result}</td><td class=\"n\">{}</td><td>{}</td><td class=\"n\">{}</td></tr>",
+<td>{result}</td><td class=\"n\">{}</td><td>{}</td><td class=\"n\">{}</td>{history}</tr>",
             row_class(f),
             feed_link(&f.server, &f.resource),
             f.state,
@@ -296,6 +322,9 @@ async fn feed(
     item("Failures in a row", f.consecutive_failures.to_string());
     item("Last success", ago(f.last_success.as_deref()));
     item("Freshness lag", freshness_lag(&f));
+    if let Some(a) = grafana_link(shared.grafana_url.as_deref(), &f.server, &f.resource) {
+        item("History", a);
+    }
     if let Some(m) = &f.media {
         item(
             "Media files",
@@ -365,6 +394,16 @@ mod tests {
         assert_eq!(segment("Prop erty/a?b"), "Prop%20erty%2Fa%3Fb");
         assert_eq!(segment("mls-1_x.y~z"), "mls-1_x.y~z");
         assert_eq!(segment("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn grafana_links_filter_the_dashboard_to_one_feed() {
+        assert_eq!(grafana_link(None, "mls", "Property"), None);
+        assert_eq!(
+            grafana_link(Some("http://g:3000/grafana"), "my mls", "Prop&\"x").unwrap(),
+            "<a href=\"http://g:3000/grafana/d/reso-ingest-serve?var-server=my%20mls&amp;\
+var-resource=Prop%26%22x\" rel=\"noreferrer\">Grafana</a>"
+        );
     }
 
     #[test]

@@ -76,6 +76,8 @@ On Docker Desktop (macOS, Windows), replace `network_mode: host` with port mappi
 1. Prometheus → Status → Targets: `reso-ingest` is `UP`.
 2. Open `http://127.0.0.1:3000/d/reso-ingest-serve`. Every feed has a row under "Feeds now", and the hourly panels fill
    in after the feeds' first syncs.
+   Start `serve` with `--ui --grafana-url http://127.0.0.1:3000` and each feed on its status pages links here,
+   filtered to that feed.
 3. Prometheus → Alerts lists the rules from both files. Break a feed (for example, point a resource at a name the
    server doesn't have) and `ResoFeedFailing` fires after its third failure.
 

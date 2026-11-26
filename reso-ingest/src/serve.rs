@@ -89,6 +89,9 @@ pub struct ServeOptions {
     /// Also serve the read-only status pages (`/`, `/feed/{server}/{resource}`, `/runs`); needs
     /// the `ui` feature
     pub ui: bool,
+    /// Grafana's root URL (`http://` or `https://`, a sub-path allowed): with `ui`, each feed links
+    /// to the kit's dashboard (`/d/reso-ingest-serve`) filtered to that feed (#161)
+    pub grafana_url: Option<String>,
 }
 
 impl ServeOptions {
@@ -107,6 +110,7 @@ impl ServeOptions {
             format: Format::Ndjson,
             partition: false,
             ui: false,
+            grafana_url: None,
         }
     }
 }
@@ -197,6 +201,9 @@ struct Shared {
     reload: Mutex<ReloadInfo>,
     state: Arc<dyn StateStore>,
     started_at: String,
+    /// [`ServeOptions::grafana_url`] without a trailing `/`
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
+    grafana_url: Option<String>,
 }
 
 impl Shared {
@@ -548,6 +555,22 @@ impl Daemon {
                 "--ui needs reso-ingest built with the `ui` feature".into(),
             ));
         }
+        let grafana_url = match options.grafana_url.as_deref() {
+            None => None,
+            Some(_) if !options.ui => {
+                return Err(IngestError::Parse(
+                    "--grafana-url needs --ui: the links are on the status pages".into(),
+                ))
+            }
+            Some(u) if u.starts_with("http://") || u.starts_with("https://") => {
+                Some(u.trim_end_matches('/').to_owned())
+            }
+            Some(u) => {
+                return Err(IngestError::Parse(format!(
+                    "--grafana-url must start with http:// or https://, not {u:?}"
+                )))
+            }
+        };
         // Fail now rather than at the first sync when state cannot be saved
         probe(options.state.as_ref()).await?;
 
@@ -557,6 +580,7 @@ impl Daemon {
             reload: Mutex::new(ReloadInfo::default()),
             state: Arc::clone(&options.state),
             started_at: now_rfc3339(),
+            grafana_url,
         });
         let listener = tokio::net::TcpListener::bind(options.listen)
             .await
