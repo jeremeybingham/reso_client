@@ -290,6 +290,11 @@ struct StorageArgs {
     #[cfg(feature = "s3")]
     #[arg(long, requires = "s3_bucket")]
     s3_single_delete: bool,
+    /// Skip the start-up check that the bucket honours conditional writes. Without them leases
+    /// and run ids do nothing, so use this only when one worker alone ever uses the bucket
+    #[cfg(feature = "s3")]
+    #[arg(long, requires = "bucket")]
+    s3_unsafe_no_conditional_writes: bool,
 }
 
 /// File format of the data files
@@ -379,6 +384,26 @@ impl Args {
             return Ok(Arc::new(crate::S3StateStore::new(&options)?));
         }
         Ok(Arc::new(FileStateStore::new(self.state())))
+    }
+
+    /// The state store for a command that writes leases and run ids (`sync`, `serve`): a bucket
+    /// is first checked to honour conditional writes (#131), unless
+    /// `--s3-unsafe-no-conditional-writes`
+    async fn writable_state_store(&self) -> Result<Arc<dyn StateStore>, IngestError> {
+        #[cfg(feature = "s3")]
+        if let Some(options) = self.s3_options("state") {
+            let store = crate::S3StateStore::new(&options)?;
+            if self.storage.s3_unsafe_no_conditional_writes {
+                tracing::warn!(
+                    store = %store.location(""),
+                    "conditional-write check skipped (--s3-unsafe-no-conditional-writes)"
+                );
+            } else {
+                store.check_conditional_writes().await?;
+            }
+            return Ok(Arc::new(store));
+        }
+        self.state_store()
     }
 
     /// Where finished data files go: the bucket with `--s3-bucket` or `--gcs-bucket`, else they
@@ -742,7 +767,7 @@ async fn serve(
     config.servers = servers;
     let mut options = ServeOptions::new(args.out());
     options.listen = listen;
-    options.state = match args.state_store() {
+    options.state = match args.writable_state_store().await {
         Ok(v) => v,
         Err(e) => return usage_error(err, &e),
     };
@@ -800,7 +825,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         Ok(v) => v,
         Err(code) => return code,
     };
-    let (state, sink) = match (args.state_store(), args.file_sink()) {
+    let (state, sink) = match (args.writable_state_store().await, args.file_sink()) {
         (Ok(state), Ok(sink)) => (state, sink),
         (Err(e), _) | (_, Err(e)) => return usage_error(err, &e),
     };

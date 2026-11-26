@@ -358,6 +358,56 @@ impl S3StateStore {
         })
     }
 
+    /// Check that the store honours conditional writes (#131)
+    ///
+    /// Leases, run-id reservations and the sink's never-replace rule rely on the store refusing a
+    /// create of an existing object (`If-None-Match: *`) and a replace with a stale version
+    /// (`If-Match`). Some S3-compatible stores accept those headers and ignore them (GCS through
+    /// its S3 interoperability endpoint does, #115), and then two workers can hold one lease
+    /// without any error. This writes a throwaway object `.probe/<pid>-<nanos>`, tries to create
+    /// it again and to replace it with a wrong version, and deletes it: two or three PUTs and one
+    /// DELETE. `sync` and `serve` run it once at start-up.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError::Output`] when the second create or the stale replace succeeds, or when the
+    /// store cannot be reached.
+    pub async fn check_conditional_writes(&self) -> Result<(), IngestError> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let key = format!(".probe/{}-{nanos}", std::process::id());
+        if !self.create(&key, b"probe").await? {
+            return Err(self.error(&key, "the probe object already exists; try again"));
+        }
+        // A version no object has, in the form the store uses
+        let stale = match self.versions {
+            Versions::ETag => "\"0\"",
+            Versions::Generation(_) => "1",
+        };
+        let ignored = if self.create(&key, b"probe").await? {
+            Some("a create of an existing object (If-None-Match: *) succeeded")
+        } else if self.replace(&key, b"probe", stale).await? {
+            Some("a replace with a stale version (If-Match) succeeded")
+        } else {
+            None
+        };
+        let deleted = self.delete(&key, None).await;
+        if let Some(what) = ignored {
+            return Err(IngestError::Output {
+                path: self.label.clone(),
+                message: format!(
+                    "the store does not honour conditional writes ({what}), so leases and run ids \
+                     would not be safe; use a store that does (AWS S3, R2, MinIO, RustFS, or GCS \
+                     through --gcs-bucket), or pass --s3-unsafe-no-conditional-writes if only one \
+                     worker ever uses this bucket"
+                ),
+            });
+        }
+        deleted.map(|_| ())
+    }
+
     fn path(&self, key: &str) -> Result<ObjectPath, IngestError> {
         let key_path = ObjectPath::parse(key).map_err(|e| self.error(key, chain(&e)))?;
         Ok(match &self.prefix {

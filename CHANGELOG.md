@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are object generations, and a versioned delete is a conditional `DELETE` (`x-goog-if-generation-match`). The `s3`
   feature now enables `object_store`'s `gcp` feature as well (no new C code: the same rustls and aws-lc-rs stack).
   Checked against a real bucket.
+- `reso-ingest`: `sync` and `serve` check at start-up that a bucket enforces conditional writes (#131):
+  `S3StateStore::check_conditional_writes` creates a throwaway object, tries to create it again and to replace it with
+  a stale version, and deletes it; if either second write succeeds the command stops with exit code 2.
+  `--s3-unsafe-no-conditional-writes` skips the check.
 
 ### Changed
 - `reso-ingest`: an S3 endpoint at `storage.googleapis.com` is refused, since GCS's interoperability API ignores the

@@ -52,6 +52,7 @@ fn options(tag: &str) -> Option<S3Options> {
 async fn state_store_conditional_writes_on_a_real_server() {
     let Some(o) = options("state") else { return };
     let s = Arc::new(S3StateStore::new(&o).unwrap());
+    s.check_conditional_writes().await.unwrap();
     assert_eq!(s.get("a.json").await.unwrap(), None);
     assert!(s.create("a.json", b"one").await.unwrap());
     assert!(!s.create("a.json", b"two").await.unwrap());
