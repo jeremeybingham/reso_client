@@ -46,6 +46,7 @@ use crate::error::{ResoError, Result};
 /// # }
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Page {
     /// The records on this page (the body's `value` array)
     pub records: Vec<JsonValue>,

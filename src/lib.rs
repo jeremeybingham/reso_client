@@ -158,6 +158,21 @@
 //! be told apart; [`ResoError::Io`] covers files that cannot be written. The enum is
 //! `#[non_exhaustive]`.
 //!
+//! # Growing types
+//!
+//! Configuration and result structs (`ClientConfig`, `RateLimit`, `ClientStats`, the
+//! [`Metadata`] types and others) are `#[non_exhaustive]` so that new fields are not breaking
+//! changes. Their fields stay public to read and assign, but outside this crate they are built
+//! with constructors and builders rather than struct literals:
+//!
+//! ```
+//! # use reso_client::{RateLimit, Validators};
+//! let limit = RateLimit::default().per_second(2).per_hour(7_200);
+//! let mut validators = Validators::default();
+//! validators.etag = Some("\"v1\"".into());
+//! # let _ = (limit, validators);
+//! ```
+//!
 //! # Server support
 //!
 //! `$count`, `$expand`, `$apply` and the paths servers accept vary. Tests run against mock

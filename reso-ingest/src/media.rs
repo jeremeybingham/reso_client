@@ -714,13 +714,11 @@ impl MediaWorkers<'_> {
             Some(f) => shared.store.exists(f).await.unwrap_or(false),
             None => false,
         };
-        let validators = match stored {
-            true => Validators {
-                etag: job.etag.clone(),
-                last_modified: job.last_modified.clone(),
-            },
-            false => Validators::default(),
-        };
+        let mut validators = Validators::default();
+        if stored {
+            validators.etag = job.etag.clone();
+            validators.last_modified = job.last_modified.clone();
+        }
         let mut target = HashingTarget {
             store: shared.store.as_ref(),
             upload: None,

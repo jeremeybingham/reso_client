@@ -665,13 +665,13 @@ pub(crate) fn share_of(limit: &RateLimit, percent: u8) -> RateLimit {
     // Below `n`, so it fits back into the type it came from
     let cut = |n: u64| ((u128::from(n) * p / 100) as u64).max(1);
     let cut32 = |n: u32| cut(u64::from(n)) as u32;
-    RateLimit {
-        per_second: limit.per_second.map(cut32),
-        per_hour: limit.per_hour.map(cut32),
-        per_day: limit.per_day.map(cut32),
-        bytes_per_hour: limit.bytes_per_hour.map(cut),
-        bytes_per_day: limit.bytes_per_day.map(cut),
-    }
+    let mut share = RateLimit::default();
+    share.per_second = limit.per_second.map(cut32);
+    share.per_hour = limit.per_hour.map(cut32);
+    share.per_day = limit.per_day.map(cut32);
+    share.bytes_per_hour = limit.bytes_per_hour.map(cut);
+    share.bytes_per_day = limit.bytes_per_day.map(cut);
+    share
 }
 
 fn rate_limit(
@@ -1213,13 +1213,11 @@ mod tests {
 
     #[test]
     fn shares_round_down_but_keep_one() {
-        let limit = RateLimit {
-            per_second: Some(3),
-            per_hour: Some(7200),
-            per_day: None,
-            bytes_per_hour: Some(1),
-            bytes_per_day: Some(u64::MAX),
-        };
+        let limit = RateLimit::default()
+            .per_second(3)
+            .per_hour(7200)
+            .bytes_per_hour(1)
+            .bytes_per_day(u64::MAX);
         let half = share_of(&limit, 50);
         assert_eq!(half.per_second, Some(1));
         assert_eq!(half.per_hour, Some(3600));

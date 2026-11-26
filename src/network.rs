@@ -54,6 +54,7 @@ pub const DEFAULT_USER_AGENT: &str = concat!("reso-client/", env!("CARGO_PKG_VER
 /// sends [`DEFAULT_USER_AGENT`] and keeps reqwest's pool defaults (no cap on idle connections,
 /// 90 seconds idle timeout).
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NetworkOptions {
     /// Proxy for every request (`http://`, `https://`); may hold `user:password@`
     pub proxy: Option<String>,

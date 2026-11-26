@@ -172,9 +172,9 @@ impl CheckpointStore {
                 ),
             ));
         }
-        Ok(Some(Checkpoint {
-            timestamp: file.timestamp,
-            key: file.key,
+        Ok(Some(match file.key {
+            Some(key) => Checkpoint::new(file.timestamp, key),
+            None => Checkpoint::at(file.timestamp),
         }))
     }
 

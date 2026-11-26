@@ -52,6 +52,7 @@ use crate::error::{ResoError, Result};
 /// assert_eq!(cp.timestamp, "2026-01-01T00:00:00.000Z");
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Checkpoint {
     /// `ModificationTimestamp` of the last record, exactly as the server sent it
     pub timestamp: String,

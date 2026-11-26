@@ -35,6 +35,7 @@ use serde_json::Value as JsonValue;
 /// # }
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ReplicationResponse {
     /// The array of records returned by the query
     pub records: Vec<JsonValue>,

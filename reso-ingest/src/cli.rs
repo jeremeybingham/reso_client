@@ -2758,10 +2758,7 @@ async fn change_checkpoint(
             ));
         }
     }
-    let checkpoint = reso_client::Checkpoint {
-        timestamp: after.to_string(),
-        key: None,
-    };
+    let checkpoint = reso_client::Checkpoint::at(after);
     store
         .save(server, resource, &checkpoint)
         .await

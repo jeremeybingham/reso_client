@@ -8,6 +8,7 @@ use roxmltree::{Document, Node};
 
 /// One property of an entity type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Property {
     /// Field name, e.g. `ListPrice`.
     pub name: String,
@@ -23,6 +24,7 @@ pub struct Property {
 
 /// A navigation property (a link to another entity type).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NavigationProperty {
     /// Name, e.g. `ListAgent`.
     pub name: String,
@@ -32,6 +34,7 @@ pub struct NavigationProperty {
 
 /// An entity type: key, properties and navigation properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntityType {
     /// Type name without namespace, e.g. `Property`.
     pub name: String,
@@ -52,6 +55,7 @@ impl EntityType {
 
 /// An entity set (a queryable resource) and the entity type it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntitySet {
     /// Resource name used in URLs, e.g. `Property`.
     pub name: String,
@@ -61,6 +65,7 @@ pub struct EntitySet {
 
 /// One member of an enum type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnumMember {
     /// Member name, e.g. `Active`.
     pub name: String,
@@ -72,6 +77,7 @@ pub struct EnumMember {
 
 /// An enum (lookup) type.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EnumType {
     /// Type name without namespace.
     pub name: String,
@@ -83,6 +89,7 @@ pub struct EnumType {
 
 /// The parsed metadata document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Metadata {
     /// Entity sets from the `EntityContainer`; empty when the server declares none.
     pub entity_sets: Vec<EntitySet>,

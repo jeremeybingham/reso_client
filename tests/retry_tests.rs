@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use reso_client::{
     count_requests, ClientConfig, QueryBuilder, RateLimit, ResoClient, ResoError, RetryPolicy,
-    WindowUsage,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -320,13 +319,7 @@ async fn rate_usage_counts_requests_and_bytes() {
     c.execute(&query()).await.unwrap();
     c.execute(&query()).await.unwrap();
     let usage = c.rate_usage();
-    assert_eq!(
-        usage.per_hour,
-        Some(WindowUsage {
-            used: 2,
-            limit: 100
-        })
-    );
+    assert_eq!(usage.per_hour.map(|w| (w.used, w.limit)), Some((2, 100)));
     assert_eq!(usage.per_second, None);
     assert_eq!(usage.bytes_per_day.map(|w| w.used), Some(c.stats().bytes));
 }
