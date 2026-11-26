@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::IngestError;
 use crate::manifest::{ResourceEntry, RunManifest};
+use crate::media::MediaReport;
 
 /// Seconds since the Unix epoch for an RFC 3339 timestamp (`2026-11-24T17:30:05.123Z`, or with a
 /// `+hh:mm` offset), or `None` if it does not parse
@@ -268,29 +269,37 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
         .push((String::new(), manifest.resources.len() as f64));
 
     let mut out = String::new();
-    for f in [
-        lag,
-        ok,
-        ok_at,
-        records,
-        deletes,
-        files,
-        file_bytes,
-        duration,
-        rate,
-        requests,
-        retries,
-        http_bytes,
-        responses,
-        warnings,
-        held,
-        backfill_left,
-        backfill_share,
-        schema,
-        failed,
-        finished,
-        resources,
-    ] {
+    write_families(
+        &mut out,
+        vec![
+            lag,
+            ok,
+            ok_at,
+            records,
+            deletes,
+            files,
+            file_bytes,
+            duration,
+            rate,
+            requests,
+            retries,
+            http_bytes,
+            responses,
+            warnings,
+            held,
+            backfill_left,
+            backfill_share,
+            schema,
+            failed,
+            finished,
+            resources,
+        ],
+    );
+    out
+}
+
+fn write_families(out: &mut String, families: Vec<Family>) {
+    for f in families {
         if f.samples.is_empty() {
             continue;
         }
@@ -304,7 +313,117 @@ pub fn render_prometheus_at(manifest: &RunManifest, now: f64) -> String {
             }
         }
     }
+}
+
+/// Media file counts, by outcome; `serve` adds them up over its runs
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct MediaCounts {
+    downloaded: u64,
+    unchanged: u64,
+    shared: u64,
+    not_modified: u64,
+    failed: u64,
+    expired: u64,
+    deleted: u64,
+    bytes: u64,
+    /// Files still to fetch after the latest run (not added up)
+    pending: u64,
+    /// The latest run's index error, if any (not added up)
+    error: bool,
+}
+
+impl MediaCounts {
+    /// Add a run's report: counts and bytes add up, `pending` and the error are the latest
+    pub(crate) fn add(&mut self, r: &MediaReport) {
+        self.downloaded += r.downloaded;
+        self.unchanged += r.unchanged;
+        self.shared += r.shared;
+        self.not_modified += r.not_modified;
+        self.failed += r.failed.len() as u64;
+        self.expired += r.expired;
+        self.deleted += r.deleted;
+        self.bytes += r.bytes;
+        self.pending = r.pending;
+        self.error = r.error.is_some();
+    }
+
+    fn outcomes(&self) -> [(&'static str, u64); 7] {
+        [
+            ("downloaded", self.downloaded),
+            ("unchanged", self.unchanged),
+            ("shared", self.shared),
+            ("not_modified", self.not_modified),
+            ("failed", self.failed),
+            ("expired", self.expired),
+            ("deleted", self.deleted),
+        ]
+    }
+}
+
+/// Media metrics: `labels` are the Prometheus labels of each set of counts. With `totals`, the
+/// names are `serve`'s counters since start, else the last run's gauges
+pub(crate) fn render_media(sets: &[(String, MediaCounts)], totals: bool) -> String {
+    let (mut files, mut bytes) = if totals {
+        let mut files = Family::new(
+            "reso_ingest_media_files_total",
+            "Media files handled since the daemon started, by outcome (expired is also in failed)",
+        );
+        let mut bytes = Family::new(
+            "reso_ingest_media_bytes_total",
+            "Media bytes downloaded since the daemon started",
+        );
+        files.kind = "counter";
+        bytes.kind = "counter";
+        (files, bytes)
+    } else {
+        (
+            Family::new(
+                "reso_ingest_last_run_media_files",
+                "Media files handled in the last run, by outcome (expired is also in failed)",
+            ),
+            Family::new(
+                "reso_ingest_last_run_media_bytes",
+                "Media bytes downloaded in the last run",
+            ),
+        )
+    };
+    let mut pending = Family::new(
+        "reso_ingest_media_pending",
+        "Media files still to fetch after the last run",
+    );
+    let mut ok = Family::new(
+        "reso_ingest_media_index_ok",
+        "0 when the last run could not read or save the media index, else 1",
+    );
+    for (l, c) in sets {
+        for (outcome, n) in c.outcomes() {
+            let labels = match l.is_empty() {
+                true => format!("outcome=\"{outcome}\""),
+                false => format!("{l},outcome=\"{outcome}\""),
+            };
+            files.samples.push((labels, n as f64));
+        }
+        bytes.samples.push((l.clone(), c.bytes as f64));
+        pending.samples.push((l.clone(), c.pending as f64));
+        ok.samples
+            .push((l.clone(), if c.error { 0.0 } else { 1.0 }));
+    }
+    let mut out = String::new();
+    write_families(&mut out, vec![files, bytes, pending, ok]);
     out
+}
+
+/// The media metrics of `sync --media`: one set of samples per server (label `server`)
+pub fn render_media_prometheus(reports: &[MediaReport]) -> String {
+    let sets: Vec<(String, MediaCounts)> = reports
+        .iter()
+        .map(|r| {
+            let mut c = MediaCounts::default();
+            c.add(r);
+            (format!("server=\"{}\"", escape(&r.server)), c)
+        })
+        .collect();
+    render_media(&sets, false)
 }
 
 /// [`render_prometheus_at`] for the current time
@@ -312,13 +431,18 @@ pub fn render_prometheus(manifest: &RunManifest) -> String {
     render_prometheus_at(manifest, now_secs())
 }
 
-/// Write [`render_prometheus`] to `path`, replacing the file atomically (a temporary file in the
+/// Write [`render_prometheus`] and, for `sync --media`, [`render_media_prometheus`] of `media` to
+/// `path`, replacing the file atomically (a temporary file in the
 /// same directory, then a rename), so a collector never reads half a file
 ///
 /// # Errors
 ///
 /// [`IngestError::Output`] when the directory or file cannot be written.
-pub fn write_metrics_file(manifest: &RunManifest, path: &Path) -> Result<(), IngestError> {
+pub fn write_metrics_file(
+    manifest: &RunManifest,
+    media: &[MediaReport],
+    path: &Path,
+) -> Result<(), IngestError> {
     let err = |e: &dyn std::fmt::Display| IngestError::Output {
         path: path.display().to_string(),
         message: e.to_string(),
@@ -328,7 +452,9 @@ pub fn write_metrics_file(manifest: &RunManifest, path: &Path) -> Result<(), Ing
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    fs::write(&tmp, render_prometheus(manifest)).map_err(|e| err(&e))?;
+    let mut text = render_prometheus(manifest);
+    text.push_str(&render_media_prometheus(media));
+    fs::write(&tmp, text).map_err(|e| err(&e))?;
     fs::rename(&tmp, path).map_err(|e| err(&e))
 }
 
@@ -351,6 +477,45 @@ mod tests {
         assert_eq!(parse_rfc3339("2026-11-24T17:30:05"), Some(1_795_541_405.0));
         assert_eq!(parse_rfc3339("yesterday"), None);
         assert_eq!(parse_rfc3339("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn media_metrics_count_each_outcome_per_server() {
+        let report = MediaReport {
+            server: "mls".into(),
+            downloaded: 3,
+            unchanged: 2,
+            expired: 1,
+            failed: vec![crate::media::MediaFailure {
+                key: "K".into(),
+                error: "403".into(),
+            }],
+            bytes: 10,
+            pending: 1,
+            ..MediaReport::default()
+        };
+        let text = render_media_prometheus(std::slice::from_ref(&report));
+        assert!(text
+            .contains("reso_ingest_last_run_media_files{server=\"mls\",outcome=\"downloaded\"} 3"));
+        assert!(
+            text.contains("reso_ingest_last_run_media_files{server=\"mls\",outcome=\"failed\"} 1")
+        );
+        assert!(
+            text.contains("reso_ingest_last_run_media_files{server=\"mls\",outcome=\"expired\"} 1")
+        );
+        assert!(text.contains("reso_ingest_last_run_media_bytes{server=\"mls\"} 10"));
+        assert!(text.contains("reso_ingest_media_pending{server=\"mls\"} 1"));
+        assert!(render_media_prometheus(&[]).is_empty());
+
+        let mut total = MediaCounts::default();
+        total.add(&report);
+        total.add(&MediaReport::default());
+        let text = render_media(&[("server=\"mls\"".into(), total)], true);
+        assert!(text.contains("# TYPE reso_ingest_media_files_total counter"));
+        assert!(
+            text.contains("reso_ingest_media_files_total{server=\"mls\",outcome=\"downloaded\"} 3")
+        );
+        assert!(text.contains("reso_ingest_media_pending{server=\"mls\"} 0"));
     }
 
     #[test]

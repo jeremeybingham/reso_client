@@ -26,8 +26,9 @@ cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J
 - **`sync`** pulls each resource the server's `$metadata` lists (after the config's `include`/`exclude` filters),
   continuing from the saved checkpoint; the first run is the full load. `--server` and `--resource` narrow it (each can
   be repeated). `--deletes` also writes delete events. `--start-over` drops the selected checkpoints first.
-  `--max-file-mb` (default 256) starts a new data file after that size. `--media` downloads each page's media files
-  right after the page is written, into `--media-dir` (see [Media during sync](#media-during-sync-sync---media)).
+  `--max-file-mb` (default 256) starts a new data file after that size. `--media` queues each page's media files as soon
+  as the page is written, and download workers fetch them while the sync goes on, into `--media-dir` or the bucket (see
+  [Media during sync](#media-during-sync-sync---media)).
   `--backfill` runs a first load with progress on its own share of the rate limits, optionally for a
   `--from`/`--to` window (see [Backfill](#backfill)).
 - **`media`** downloads the files that the top-level `Media` records from `sync` point at (see
@@ -87,9 +88,12 @@ The rest describe the run just finished. Labels are `server` and `resource` unle
 | `reso_ingest_backfill_rate_percent` | With `--backfill`: the share of the rate limits the backfill ran with |
 | `reso_ingest_server_failed` (`server` only) | 1 for a server that failed as a whole |
 | `reso_ingest_last_run_finished_timestamp_seconds`, `_resources` | No labels: when the run ended, resources handled |
+| `reso_ingest_last_run_media_files` (`server`, `outcome`) | With `--media`: files `downloaded`, `unchanged` (same content under a new stamp), `shared` (content already stored for another key), `not_modified` (304), `failed`, `expired` (401, 403 or 410 from the file host; also in `failed`), `deleted` |
+| `reso_ingest_last_run_media_bytes`, `reso_ingest_media_pending` (`server`) | With `--media`: bytes downloaded; files still to fetch |
+| `reso_ingest_media_index_ok` (`server`) | With `--media`: 0 when the media index could not be read or saved |
 
 Not measured yet: the rate-limit budget used (the limiter does not report it) and checkpoint age (the freshness lag
-covers the same question). The request counters cover the pull and delete detection, not media downloads. OpenTelemetry
+covers the same question). The request counters cover the pull and delete detection, not media downloads (those are the `media` metrics). OpenTelemetry
 is not exported; the text format needs no new dependency.
 
 `monitoring/` holds an example Grafana dashboard (`grafana-dashboard.json`: import it and pick the Prometheus data
@@ -136,6 +140,7 @@ rate_percent = 50                   # 1 to 99 (default 50); other syncs of the s
 per_second = 4                      # also per_hour, per_day, bytes_per_hour, bytes_per_day, max_retries, *_backoff_ms
 timeout_secs = 300                  # per file; default 120
 send_token = "same_host"            # never, same_host (default) or always
+workers = 4                         # download workers per server (default 4)
 ```
 
 Each server runs as its own task: one server failing does not stop the others.
@@ -321,10 +326,12 @@ the store enforcing conditional writes, so `sync` and `serve` first probe it (#1
 and stop with an error (exit code 2) if any of the three succeeds. That costs up to three `PUT`s and two `DELETE`s per
 start.
 `--s3-unsafe-no-conditional-writes` skips the probe (logging a warning) for a bucket only one worker ever uses. `--out` is only a staging
-directory then (files are removed once the bucket has them; the `.run.<run>` markers stay). Not routed: the metrics file
-(`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`) and downloaded media files
-(`--media-dir`). The `media` command refuses a bucket, since the data files it reads are in the bucket: use
-`sync --media` instead.
+directory then (files are removed once the bucket has them; the `.run.<run>` markers stay). `sync --media` and `serve --media`
+stream media files to `<prefix>/media/<server>/<sha256>.<ext>` (`--media-dir` is not used): a file up to 8 MiB is held
+in memory and created with one conditional `PUT`; a larger one goes up in parts to a `.part-*` name, is copied to its
+final name and the staging object deleted. Nothing is written to the local disk. Not routed: the metrics file
+(`--metrics-file` feeds a node exporter on the same host; `serve` has `/metrics`). The `media` command refuses a bucket,
+since the data files it reads are in the bucket: use `sync --media` instead.
 `cargo test -p reso-ingest --features s3 --test s3_live` runs against a real server when `RESO_S3_TEST_BUCKET` is set
 with `RESO_S3_TEST_ENDPOINT` (a non-AWS server) or `RESO_S3_TEST_REGION` (AWS S3, no endpoint), or against GCS when
 `RESO_GCS_TEST_BUCKET` and `GOOGLE_SERVICE_ACCOUNT` are set. Checked against RustFS 2026-11-25 (MinIO no longer publishes binaries or images)
@@ -373,7 +380,7 @@ When an MLS licence ends, `purge --server NAME` removes what `reso-ingest` wrote
 
 - the data files in `--out` whose `source` tag is the server (NDJSON files, read line by line, including `.part` files a
   killed run left), and the files the run manifests list under the server (Parquet files);
-- its media directory, `<media-dir>/<server>/` (default `<out>/media/<server>/`);
+- its media files, `<media-dir>/<server>/` (default `<out>/media/<server>/`), or `<prefix>/media/<server>/` with a bucket;
 - its state keys: checkpoints, key sets, event sequences, the schema snapshot and leases (`<server>.*`) and the media
   index (`media/<server>.json`).
 
@@ -397,7 +404,7 @@ command exits 1. Remove the server from the configuration afterwards: a later `s
 `media` for it would look for data files that are gone.
 
 **With a bucket** (`--s3-bucket` or `--gcs-bucket`, #139), the data files and state keys are deleted in the bucket
-(`<prefix>/data/`, `<prefix>/state/`); media files are local with a bucket too, so `--media-dir` is purged as above.
+(`<prefix>/data/`, `<prefix>/state/`), and the media files in `<prefix>/media/<server>/`.
 The server's files are found by the run manifests in `<prefix>/data/` rather than by reading every object: only NDJSON
 objects named like the server's that no manifest lists (a run killed before delivering its manifest) are downloaded
 into `--out` and judged by their tag. The record, its `.sha256` and the access line are written to `<out>/audit/` as
@@ -447,7 +454,7 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 |---|---|
 | `/healthz` | `200` while the process is up |
 | `/readyz` | `200` when state can be saved (a probe key `.readyz` is written and deleted), `503` when not (config is read before the server starts, so a bad one never gets this far) |
-| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures` and `reso_ingest_feed_interval_seconds` (labels `server`, `resource`) |
+| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures` and `reso_ingest_feed_interval_seconds` (labels `server`, `resource`); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
 | `/status` | JSON: `started_at` and, per feed, `state` (`waiting`, `queued`, `running`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
 
 Unconfirmed against a real server (#32): everything here is tested against mock servers only. With concurrent feeds of one
@@ -522,11 +529,14 @@ page request (`docker stop -t`, Kubernetes `terminationGracePeriodSeconds`). `me
 
 1. It reads the NDJSON `Media` data files listed in the `manifest.*.json` files in `--out`, skipping the ones it has
    read before, and keeps the newest record per `MediaKey`. Parquet data files are not read (listed as skipped).
-2. It downloads each new or changed `MediaURL` into `--media-dir` (default `<out>/media`) as `<server>/<MediaKey>.<ext>`.
-   The key is kept as is when it has only letters, digits, `-` and `_`; other characters are percent-encoded. The
+2. It downloads each new or changed `MediaURL` into `--media-dir` (default `<out>/media`) as
+   `<server>/<sha256>.<ext>`, named by the SHA-256 of the content (#89). The index maps each `MediaKey` to its file, so
+   the same photo under several keys is stored once, and a file whose content did not change is kept as it is. The
+   server name is kept as is when it has only letters, digits, `-` and `_`; other characters are percent-encoded. The
    extension comes from the response's `Content-Type` (none when unknown); `MediaType` is not used, as it is often wrong.
-3. It writes `media.<run>.json` (per server: downloaded, not modified, deleted, failed with the error, still pending,
-   bytes) and prints a summary.
+   A file no key points at any more is deleted.
+3. It writes `media.<run>.json` (per server: downloaded, unchanged, shared with another key, not modified, deleted,
+   failed with the error, expired URLs, still pending, bytes) and prints a summary.
 
 What counts as changed: a new `MediaKey`, or a new `MediaModificationTimestamp` (`ModificationTimestamp` when that is
 absent). A new URL alone does **not** count, because signed CDN URLs change on every pull; the newest URL is kept for
@@ -535,25 +545,30 @@ saved `ETag` and `Last-Modified`, so an unchanged file costs a 304 and no transf
 
 A file that fails (404, an expired signed URL, a timeout after retries) is listed in the media manifest and stays
 pending; the run carries on, exits `1`, and the next run tries it again. `--limit N` caps downloads per server per run;
-the rest stay pending. Files are written to `<name>.part` and renamed when complete, so a partial file never sits under
-the final name.
+the rest stay pending. Files are streamed to a `.part-*` name (the hash is known only at the end) and renamed when
+complete, so a partial file never sits under a final name.
 
 The index of what was read and saved is `state/media/<server>.json`. Downloads have their own limits (`[server.media]`),
 so they do not use up the API's. The API token goes only to the API's own host by default (`send_token = "same_host"`):
-media usually lives on a CDN that does not need it. Downloads run one at a time per server; servers run in parallel.
+media usually lives on a CDN that does not need it. Each server has `[server.media] workers` download workers (default
+4); servers run in parallel.
 
 ### Media during sync (`sync --media`)
 
 Some vendors (MLS Grid) have no top-level `Media` resource: media come as an array inside `Property`, `Member` and
 `Office` records (`expand = ["Media"]`), and their URLs are signed, single-use and expire within the hour, so a later
-`reso-ingest media` run cannot use them. `sync --media` downloads the files of each page right after the page is written
-and checkpointed, before the next page is fetched:
+`reso-ingest media` run cannot use them. `sync --media` queues the files of each page as soon as the page is written
+and checkpointed, and a separate pool of download workers (`[server.media] workers`, default 4, with the
+`[server.media]` limits) fetches them while the next pages are pulled. A slow file host does not slow the record sync;
+the run ends once the queue is empty:
 
 - For the `Media` resource each record is a media record; for any other resource the media records in each record's
   `Media` array are taken (`[server.media] nested_field = "..."` names another field). Each uses its own `MediaKey`,
   `MediaURL` and `MediaModificationTimestamp`, and the same change rule and index as above.
-- Only files that are new or changed and whose record is in the page are fetched. Files go to `--media-dir` (default
-  `<out>/media`), with the `[server.media]` limits. The run writes `media.<run>.json` and prints one line per server.
+- Only files that are new or changed and whose record is in the page are fetched; a key seen on several pages before its
+  download starts is fetched once. Files go to `--media-dir` (default `<out>/media`), or to the bucket (see
+  "Running against a bucket" under [What it writes](#what-it-writes)), named by content as above. The run writes `media.<run>.json`, prints one line
+  per server, and with `--metrics-file` adds the media metrics.
 - A failed file stays pending and the run exits `1`. It is tried again only when a later sync sees its parent record
   again (a changed parent brings a fresh URL); with single-use URLs a pending file otherwise needs `--start-over` for the
   resource. Re-fetching parents by key for fresh URLs is not done.
@@ -592,11 +607,13 @@ The same pieces are public:
 - Configuration: `Config` (parse the TOML), `ServerConfig` (with `filter_for`, `expand_for`, `page_size_for`),
   `ResourceConfig`, `DeletesConfig`, `LimitsConfig`, `MediaConfig`.
 - Running: `run_servers` (one task per server, capped), `sync_resource` and `pull_resource` (one resource into a
-  `RecordWriter`), `sync_resource_media` (the same with `PageMedia` downloading each page's files), `reserve_run_id`.
+  `RecordWriter`), `sync_resource_media` (the same with `PageMedia` queueing each page's files), `reserve_run_id`.
 - Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`, `StateStore` (the state
   backend interface) and `FileStateStore` (and `S3StateStore` with feature `s3`), `FileSink` and `LocalDirSink` (where finished data files go), `Lease`.
 - Deletes: `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, `FlagDeleteWriter` (wraps a writer and adds an
   event after each flagged record).
-- Media: `sync_media`, `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `PageMedia`.
+- Media: `sync_media`, `page_pipeline` (a `PageMedia` that queues each page's files and the `MediaWorkers` that fetch
+  them), `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `MediaStore` with `LocalMediaStore` and
+  `S3MediaStore` (feature `s3`), `MediaRoot`.
 
 See the crate docs: `cargo doc -p reso-ingest --open`.

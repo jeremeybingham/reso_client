@@ -1192,3 +1192,150 @@ async fn sync_and_serve_refuse_a_bucket_without_conditional_writes() {
     assert!(!objects.lock().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `$metadata`, one `Property` record with three nested media records (two show the same photo),
+/// and the files
+async fn reso_server_with_media() -> wiremock::MockServer {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let base = server.uri();
+    Mock::given(method("GET"))
+        .respond_with(move |req: &wiremock::Request| {
+            let path = req.url.path();
+            if path.ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(METADATA);
+            }
+            if let Some(name) = path.strip_prefix("/files/") {
+                // M3 shows the same photo as M1
+                let body = match name {
+                    "m3" => "photo-m1".to_string(),
+                    name => format!("photo-{name}"),
+                };
+                return ResponseTemplate::new(200).set_body_raw(body.into_bytes(), "image/jpeg");
+            }
+            let after = req
+                .url
+                .query_pairs()
+                .any(|(k, v)| k == "$filter" && v.contains("2026-01-01T00:00:01Z"));
+            let value = if after {
+                serde_json::json!([])
+            } else {
+                let media = |key: &str| {
+                    serde_json::json!({
+                        "MediaKey": key,
+                        "MediaURL": format!("{base}/files/{}", key.to_lowercase()),
+                        "MediaModificationTimestamp": "2026-01-01T00:00:00Z"
+                    })
+                };
+                serde_json::json!([{
+                    "ListingKey": "K1",
+                    "ModificationTimestamp": "2026-01-01T00:00:01Z",
+                    "Media": [media("M1"), media("M2"), media("M3")]
+                }])
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "value": value }))
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_media_streams_files_into_the_bucket_and_purge_deletes_them() {
+    set_credentials();
+    std::env::set_var("S3_MEDIA_TEST_TOKEN", "t");
+    let (endpoint, objects) = fake_s3().await;
+    let reso = reso_server_with_media().await;
+    let dir = std::env::temp_dir().join(format!("reso-s3-media-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("servers.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[[server]]\nname = \"mls\"\nbase_url = \"{}\"\n[server.limits]\nmax_retries = 0\n\
+             [server.media]\nworkers = 2\n\
+             [server.auth]\ntype = \"bearer\"\ntoken_env = \"S3_MEDIA_TEST_TOKEN\"\n\
+             [server.resources.Property]\nexpand = [\"Media\"]\n",
+            reso.uri()
+        ),
+    )
+    .unwrap();
+    let out = dir.join("out");
+    let bucket = [
+        "--out",
+        out.to_str().unwrap(),
+        "--s3-bucket",
+        "bkt",
+        "--s3-prefix",
+        "p",
+        "--s3-endpoint",
+        &endpoint,
+        "--s3-region",
+        "us-east-1",
+        "--s3-allow-http",
+        "--s3-single-delete",
+    ]
+    .map(String::from);
+    let args = |cmd: &[&str]| -> Vec<String> {
+        cmd.iter()
+            .map(|s| s.to_string())
+            .chain(bucket.iter().cloned())
+            .collect()
+    };
+    let media_keys = |objects: &Objects| -> Vec<String> {
+        objects
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.starts_with("p/media/"))
+            .cloned()
+            .collect()
+    };
+
+    let (code, o, e) = cli(&args(&[
+        "sync",
+        "--media",
+        "--config",
+        config.to_str().unwrap(),
+    ]))
+    .await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(o.contains("2 downloaded"), "{o}");
+    assert!(o.contains("1 same as a stored file"), "{o}");
+    // Two photos, stored once each under their content hash, and nothing on the local disk
+    let mut want: Vec<String> = ["photo-m1", "photo-m2"]
+        .iter()
+        .map(|b| format!("p/media/mls/{}.jpg", reso_ingest::sha256_hex(b.as_bytes())))
+        .collect();
+    want.sort();
+    assert_eq!(media_keys(&objects), want);
+    assert_eq!(objects.lock().unwrap()[&want[0]].0.len(), "photo-m1".len());
+    assert!(!out.join("media").exists());
+
+    // Purge lists the bucket's media files and deletes them
+    let (code, o, e) = cli(&args(&["purge", "--server", "mls"])).await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(
+        o.contains("media files: 2 (16 bytes) in s3://bkt/p/media/mls"),
+        "{o}"
+    );
+    let (code, o, e) = cli(&args(&[
+        "purge",
+        "--server",
+        "mls",
+        "--execute",
+        "--by",
+        "tester",
+    ]))
+    .await;
+    assert_eq!(code, 0, "{o}{e}");
+    assert!(o.contains("2 media files"), "{o}");
+    assert!(media_keys(&objects).is_empty());
+    assert!(!objects
+        .lock()
+        .unwrap()
+        .contains_key("p/state/media/mls.json"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -39,7 +39,8 @@ use crate::cli::{sync_server_with, Format, SyncOptions};
 use crate::config::{Config, ServerConfig, MAX_BACKOFF};
 use crate::error::IngestError;
 use crate::manifest::{ResourceEntry, RunManifest};
-use crate::metrics::{escape, render_prometheus};
+use crate::media::MediaReport;
+use crate::metrics::{escape, render_media, render_prometheus, MediaCounts};
 use crate::output::now_rfc3339;
 use crate::runs;
 use crate::secrets::ClientHandle;
@@ -61,8 +62,8 @@ pub struct ServeOptions {
     pub allow_mass_deletes: bool,
     /// Where finished data files go; `None` leaves them in `out`
     pub sink: Option<Arc<dyn crate::sink::FileSink>>,
-    /// Download media files of each page into this directory
-    pub media_dir: Option<PathBuf>,
+    /// Download the media files of each page into this directory or bucket (`sync --media`)
+    pub media: Option<crate::media_store::MediaRoot>,
     /// Start a new data file after this many bytes
     pub max_file_bytes: u64,
     /// Data file format
@@ -80,7 +81,7 @@ impl ServeOptions {
             sink: None,
             deletes: false,
             allow_mass_deletes: false,
-            media_dir: None,
+            media: None,
             max_file_bytes: 256 * 1024 * 1024,
             format: Format::Ndjson,
         }
@@ -107,6 +108,8 @@ struct FeedStatus {
     next_at: Option<Instant>,
     /// The result of the last sync that reached the server, for the metrics
     last_entry: Option<ResourceEntry>,
+    /// Media files of the feed's syncs added up (with `media` set)
+    media: Option<MediaCounts>,
 }
 
 struct Shared {
@@ -216,6 +219,7 @@ impl Daemon {
                             last_deletes: 0,
                             next_at: None,
                             last_entry: None,
+                            media: None,
                         },
                     );
                 }
@@ -332,12 +336,15 @@ async fn run_feed(
             f.state = "running";
             f.last_started = Some(now_rfc3339());
         });
-        let outcome = sync_once(&server, &resource, &client, &options, &shutdown).await;
+        let (outcome, media) = sync_once(&server, &resource, &client, &options, &shutdown).await;
         drop(permit);
 
         let mut runs = 0;
         let mut failures = 0;
         shared.update(&key, |f| {
+            for report in &media {
+                f.media.get_or_insert_with(MediaCounts::default).add(report);
+            }
             f.runs += 1;
             f.last_finished = Some(now_rfc3339());
             match &outcome {
@@ -387,18 +394,19 @@ enum Outcome {
     Failed(String, Option<Box<ResourceEntry>>),
 }
 
-/// One sync of one feed, written like `reso-ingest sync --resource R --server S`
+/// One sync of one feed, written like `reso-ingest sync --resource R --server S`, with its media
+/// report (with `media` set)
 async fn sync_once(
     server: &ServerConfig,
     resource: &str,
     client: &ClientHandle,
     options: &ServeOptions,
     shutdown: &Shutdown,
-) -> Outcome {
+) -> (Outcome, Vec<MediaReport>) {
     let sink = options.sink.as_deref();
     let run_id = match runs::reserve(&options.out, options.state.as_ref(), sink).await {
         Ok(id) => id,
-        Err(e) => return Outcome::Failed(e.to_string(), None),
+        Err(e) => return (Outcome::Failed(e.to_string(), None), Vec::new()),
     };
     let sync_options = Arc::new(SyncOptions {
         out: options.out.clone(),
@@ -407,7 +415,7 @@ async fn sync_once(
         resources: vec![resource.to_owned()],
         deletes: options.deletes,
         allow_mass_deletes: options.allow_mass_deletes,
-        media: options.media_dir.clone(),
+        media: options.media.clone(),
         start_over: false,
         backfill: None,
         max_file_bytes: options.max_file_bytes,
@@ -425,12 +433,14 @@ async fn sync_once(
         .await;
 
     let mut manifest = RunManifest::new(&run_id);
+    let mut media_reports = Vec::new();
     let outcome = match result {
         Err(message) => {
             manifest.add_server_failure(&server.name, &message);
             Outcome::Failed(message, None)
         }
-        Ok((entries, _media, changes)) => {
+        Ok((entries, media, changes)) => {
+            media_reports.extend(media);
             manifest.add_schema_changes(&server.name, changes);
             let entry = entries.into_iter().find(|e| e.resource == resource);
             if let Some(e) = &entry {
@@ -478,7 +488,7 @@ async fn sync_once(
     }
     let marker = options.out.join(format!(".run.{}", sanitize_id(&run_id)));
     let _ = std::fs::remove_file(marker);
-    outcome
+    (outcome, media_reports)
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -520,6 +530,18 @@ async fn metrics(
     manifest.started_at = shared.started_at.clone();
     manifest.resources = feeds.iter().filter_map(|f| f.last_entry.clone()).collect();
     let mut text = render_prometheus(&manifest);
+    let media: Vec<(String, MediaCounts)> = feeds
+        .iter()
+        .filter_map(|f| {
+            let labels = format!(
+                "server=\"{}\",resource=\"{}\"",
+                escape(&f.server),
+                escape(&f.resource)
+            );
+            f.media.clone().map(|m| (labels, m))
+        })
+        .collect();
+    text.push_str(&render_media(&media, true));
     let mut family = |name: &str, kind: &str, help: &str, value: &dyn Fn(&FeedStatus) -> u64| {
         text.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
         for f in &feeds {

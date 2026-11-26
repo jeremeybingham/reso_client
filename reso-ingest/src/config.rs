@@ -460,6 +460,9 @@ pub struct MediaConfig {
     /// Field of a record that holds its nested media records, for `sync --media` (default `Media`)
     #[serde(default)]
     pub nested_field: Option<String>,
+    /// Download workers for this server's files (default 4); they share the limits above
+    #[serde(default)]
+    pub workers: Option<usize>,
 }
 
 impl MediaConfig {
@@ -718,6 +721,9 @@ impl ServerConfig {
             .is_some_and(|p| !(1..=99).contains(&p))
         {
             return Err("backfill.rate_percent must be between 1 and 99".into());
+        }
+        if self.media.workers == Some(0) {
+            return Err("media.workers must be at least 1".into());
         }
         if self.media.timeout_secs == Some(0) {
             return Err("media.timeout_secs must be at least 1".into());

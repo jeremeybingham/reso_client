@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest`: media at scale (#89). `sync --media` (and `serve --media`) queues each page's new and changed files
+  for a separate pool of download workers (`[server.media] workers`, default 4, with the `[server.media]` rate limits),
+  which fetch them while the record sync goes on, so a slow file host no longer holds up the pages; the run ends once
+  the queue is empty. A key seen on several pages before its download starts is fetched once. Files are streamed with
+  no local copy and named by the SHA-256 of their content (`<sha256>.<ext>`): the same photo under several `MediaKey`s
+  is stored once, and a re-sent file with the same bytes is counted `unchanged` and kept. A file no key points at any
+  more is deleted. With `--s3-bucket` or `--gcs-bucket`, files go to `<prefix>/media/<server>/` (one conditional
+  `PUT` up to 8 MiB, multipart to a staging name and a copy above), and `purge` deletes them there. New `MediaStore`
+  and `MediaUpload` traits, `LocalMediaStore`, `S3MediaStore` (feature `s3`), `MediaRoot`, `page_pipeline`,
+  `PipelineOptions`, `MediaWorkers` and `DEFAULT_WORKERS`. Metrics: `reso_ingest_last_run_media_files` (by
+  `outcome`), `_media_bytes`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` in the metrics file, and
+  running totals (`reso_ingest_media_files_total`, `reso_ingest_media_bytes_total`) per feed on `serve`'s `/metrics`.
+  Breaking: `MediaReport` gains `queued`, `unchanged`, `shared` and `expired` (401, 403 or 410 from the file host);
+  `MediaEntry` gains `sha256`; `PageMedia` has no lifetime, `new` or `finish` (use `page_pipeline`); `sync_media`
+  takes the worker count; `ServeOptions.media_dir` is now `media: Option<MediaRoot>`; `plan_purge` and
+  `execute_purge` take a `&dyn MediaStore` instead of the media directory, and `PurgePlan.media_dir` is now `media`
+  (a location string); `write_metrics_file` takes the media reports; `MediaConfig` gains `workers`. Files downloaded
+  by earlier versions under `<MediaKey>.<ext>` are not renamed: they are fetched again under their hash when their
+  record changes. Checked offline only (wiremock and an in-process S3 fake), not against a vendor file host (#32).
+- `reso-client`: `Downloader::download_into` streams a file into any `DownloadTarget` (`start`, `write` per chunk,
+  `finish`, `abort` on failure) with the same retries, validators and limits as `download_to`; a target error is not
+  retried. `download_to` is now `download_into` with a `.part` file target.
 - `reso-ingest`: `sync --backfill` for the first pull of a large feed (#88). It counts the records left with `$count`,
   prints `##progress` lines with the time left after every page, records `backfill` in the manifest and
   `reso_ingest_backfill_remaining_records`/`_rate_percent` in the metrics, and uses `[server.backfill] rate_percent`

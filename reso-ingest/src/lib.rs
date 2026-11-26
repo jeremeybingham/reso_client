@@ -69,6 +69,7 @@ mod lease;
 mod logging;
 mod manifest;
 mod media;
+mod media_store;
 mod metrics;
 mod output;
 #[cfg(feature = "parquet")]
@@ -102,10 +103,15 @@ pub use manifest::{
     RunManifest, ServerFailure,
 };
 pub use media::{
-    encode_name, sync_media, MediaEntry, MediaFailure, MediaIndex, MediaManifest, MediaOptions,
-    MediaReport, PageMedia, DEFAULT_NESTED_FIELD, MEDIA_RESOURCE,
+    encode_name, page_pipeline, sync_media, MediaEntry, MediaFailure, MediaIndex, MediaManifest,
+    MediaOptions, MediaReport, MediaWorkers, PageMedia, PipelineOptions, DEFAULT_NESTED_FIELD,
+    DEFAULT_WORKERS, MEDIA_RESOURCE,
 };
-pub use metrics::{parse_rfc3339, render_prometheus, render_prometheus_at, write_metrics_file};
+pub use media_store::{LocalMediaStore, MediaRoot, MediaStore, MediaUpload};
+pub use metrics::{
+    parse_rfc3339, render_media_prometheus, render_prometheus, render_prometheus_at,
+    write_metrics_file,
+};
 pub use output::{new_run_id, now_rfc3339, reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
 pub use parquet_out::{arrow_type, schema_for, ParquetWriter};
@@ -115,7 +121,7 @@ pub use purge::{
 };
 pub use runner::{run_servers, ServerReport};
 #[cfg(feature = "s3")]
-pub use s3::{Provider, S3FileSink, S3Options, S3StateStore};
+pub use s3::{Provider, S3FileSink, S3MediaStore, S3Options, S3StateStore};
 pub use secrets::ClientHandle;
 pub use serve::{Daemon, ServeOptions};
 pub use shutdown::Shutdown;

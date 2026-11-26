@@ -27,7 +27,11 @@ use crate::error::IngestError;
 use crate::lease::{live_leases, Lease, LeaseHolder, LeaseOutcome};
 use crate::logging::{env_filter, log_subscriber, LogFormat, LOG_FORMAT_ENV};
 use crate::manifest::{sync_resource_media, ResourceEntry, ResourceStats, RunManifest};
-use crate::media::{sync_media, MediaManifest, MediaOptions, MediaReport, PageMedia};
+use crate::media::{
+    page_pipeline, sync_media, MediaManifest, MediaOptions, MediaReport, PipelineOptions,
+    DEFAULT_WORKERS,
+};
+use crate::media_store::MediaRoot;
 use crate::metrics::write_metrics_file;
 use crate::output::{reserve_run_id, NdjsonWriter, RecordWriter};
 #[cfg(feature = "parquet")]
@@ -92,14 +96,15 @@ enum Command {
         /// the same deletes; use this once after checking them.
         #[arg(long)]
         allow_mass_deletes: bool,
-        /// Download the media files of each page right after it is written
+        /// Download the media files of each page while the sync goes on
         ///
         /// Takes the Media records (or, for other resources, the `Media` arrays that `expand`
-        /// brings) of each page and downloads the new and changed files into --media-dir, so
-        /// single-use or short-lived URLs are used while fresh. Uses the [server.media] limits.
+        /// brings) of each page and queues the new and changed files for [server.media] workers
+        /// (default 4), so single-use or short-lived URLs are used while fresh. Files go to
+        /// --media-dir, or the bucket's `media/` folder. Uses the [server.media] limits.
         #[arg(long)]
         media: bool,
-        /// Where files go with --media (default: <out>/media)
+        /// Where files go with --media without a bucket (default: <out>/media)
         #[arg(long)]
         media_dir: Option<PathBuf>,
         /// Delete the saved checkpoints of the selected resources first
@@ -167,10 +172,10 @@ enum Command {
         /// Write deletes even when they pass the [server.deletes] limits
         #[arg(long)]
         allow_mass_deletes: bool,
-        /// Download the media files of each page right after it is written
+        /// Download the media files of each page while the sync goes on
         #[arg(long)]
         media: bool,
-        /// Where files go with --media (default: <out>/media)
+        /// Where files go with --media without a bucket (default: <out>/media)
         #[arg(long)]
         media_dir: Option<PathBuf>,
         /// Start a new data file after this many MiB
@@ -267,7 +272,8 @@ enum Command {
 ///
 /// With `--s3-bucket` or `--gcs-bucket`, checkpoints, leases and media indexes go to
 /// `<prefix>/state/` in the bucket and finished data files to `<prefix>/data/`, so several workers
-/// share them. Manifests, the metrics file and media files still go to `--out` and `--media-dir`.
+/// share them; `sync --media` puts media files in `<prefix>/media/`. Run manifests also go to
+/// `<prefix>/data/`; the metrics file and the audit log stay in `--out`.
 /// Credentials come from the standard `AWS_*` or `GOOGLE_*` environment variables, never from
 /// options.
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -414,6 +420,20 @@ impl Args {
             return Ok(Arc::new(store));
         }
         self.state_store()
+    }
+
+    /// Where `sync --media` and `serve --media` put files: `<prefix>/media/` in the bucket with
+    /// `--s3-bucket` or `--gcs-bucket`, else `--media-dir` (default `<out>/media`)
+    fn media_root(&self) -> MediaRoot {
+        #[cfg(feature = "s3")]
+        if let Some(options) = self.s3_options("media") {
+            return MediaRoot::Bucket(options);
+        }
+        MediaRoot::Dir(
+            self.media_dir
+                .clone()
+                .unwrap_or_else(|| self.out().join("media")),
+        )
     }
 
     /// Where finished data files go: the bucket with `--s3-bucket` or `--gcs-bucket`, else they
@@ -798,11 +818,7 @@ async fn serve(
     };
     options.deletes = args.deletes;
     options.allow_mass_deletes = args.allow_mass_deletes;
-    options.media_dir = args.media.then(|| {
-        args.media_dir
-            .clone()
-            .unwrap_or_else(|| args.out().join("media"))
-    });
+    options.media = args.media.then(|| args.media_root());
     options.max_file_bytes = args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024;
     options.format = args.format;
     match Daemon::start(config, options, shutdown).await {
@@ -830,7 +846,7 @@ pub(crate) struct SyncOptions {
     pub(crate) resources: Vec<String>,
     pub(crate) deletes: bool,
     pub(crate) allow_mass_deletes: bool,
-    pub(crate) media: Option<PathBuf>,
+    pub(crate) media: Option<MediaRoot>,
     pub(crate) start_over: bool,
     /// `sync --backfill` and its window
     pub(crate) backfill: Option<BackfillWindow>,
@@ -866,11 +882,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
         resources: args.resources.clone(),
         deletes: args.deletes,
         allow_mass_deletes: args.allow_mass_deletes,
-        media: args.media.then(|| {
-            args.media_dir
-                .clone()
-                .unwrap_or_else(|| args.out().join("media"))
-        }),
+        media: args.media.then(|| args.media_root()),
         start_over: args.start_over,
         backfill: args.backfill.clone(),
         max_file_bytes: args.max_file_mb.unwrap_or(DEFAULT_MAX_FILE_MB) * 1024 * 1024,
@@ -925,7 +937,7 @@ async fn sync(args: Args, out: &mut dyn Write, err: &mut dyn Write, shutdown: Sh
     }
     let mut metrics_failed = false;
     if let Some(path) = &args.metrics_file {
-        if let Err(e) = write_metrics_file(&manifest, path) {
+        if let Err(e) = write_metrics_file(&manifest, &media_manifest.servers, path) {
             let _ = writeln!(err, "error: {e}");
             metrics_failed = true;
         }
@@ -1053,94 +1065,80 @@ pub(crate) async fn sync_server_with(
         return Err("no resources to pull (check include/exclude in the configuration)".into());
     }
 
-    let mut page_media = match &options.media {
-        Some(dir) => Some(
-            PageMedia::new(
+    // Media files are downloaded by their own workers next to the record sync (#89)
+    let (mut page_media, media_workers) = match &options.media {
+        Some(root) => {
+            let pipeline = PipelineOptions {
+                state: Arc::clone(&options.state),
+                store: root.store(&name).map_err(|e| e.to_string())?,
+                nested_field: server.media.nested_field.clone(),
+                workers: server.media.workers.unwrap_or(DEFAULT_WORKERS),
+                shutdown: options.shutdown.clone(),
+            };
+            let (pages, workers) = page_pipeline(
                 &media_client,
                 &name,
                 server.media.download_config(),
-                Arc::clone(&options.state),
-                dir,
-                server.media.nested_field.as_deref(),
+                pipeline,
             )
             .await
-            .map_err(|e| e.to_string())?,
-        ),
-        None => None,
-    };
-    let feed = EventFeed::detect(&metadata);
-    let total = resources.len();
-    for (i, resource) in resources.iter().enumerate() {
-        if options.shutdown.is_triggered() {
-            tracing::warn!("shutdown requested: not starting the remaining resources");
-            break;
+            .map_err(|e| e.to_string())?;
+            (Some(pages), Some(workers))
         }
-        let explicit = !options.resources.is_empty();
-        let label = format!("{name}/{resource}");
-        // Events inside carry `resource`; the server and run spans add `server` and `run_id`
-        let span = tracing::info_span!("resource", resource = %resource);
-        send(
-            &tx,
-            format!("##progress step={}/{total} label={label}", i + 1),
-        );
-
-        let Some(plan) = plan_resource(&metadata, resource) else {
-            span.in_scope(|| {
-                tracing::info!("skipped: no single key or no {TIMESTAMP_FIELD}");
-            });
+        None => (None, None),
+    };
+    let records = async {
+        let feed = EventFeed::detect(&metadata);
+        let total = resources.len();
+        for (i, resource) in resources.iter().enumerate() {
+            if options.shutdown.is_triggered() {
+                tracing::warn!("shutdown requested: not starting the remaining resources");
+                break;
+            }
+            let explicit = !options.resources.is_empty();
+            let label = format!("{name}/{resource}");
+            // Events inside carry `resource`; the server and run spans add `server` and `run_id`
+            let span = tracing::info_span!("resource", resource = %resource);
             send(
                 &tx,
-                format!("[{label}] skipped: no single key or no {TIMESTAMP_FIELD}"),
+                format!("##progress step={}/{total} label={label}", i + 1),
             );
-            if explicit {
-                let mut entry = failed_entry(
-                    &name,
-                    resource,
-                    &format!(
-                        "cannot sync: needs a single-field key and a {TIMESTAMP_FIELD} property"
-                    ),
+
+            let Some(plan) = plan_resource(&metadata, resource) else {
+                span.in_scope(|| {
+                    tracing::info!("skipped: no single key or no {TIMESTAMP_FIELD}");
+                });
+                send(
+                    &tx,
+                    format!("[{label}] skipped: no single key or no {TIMESTAMP_FIELD}"),
                 );
-                audit(&mut entry, None);
-                entries.push(entry);
+                if explicit {
+                    let mut entry = failed_entry(
+                        &name,
+                        resource,
+                        &format!(
+                            "cannot sync: needs a single-field key and a {TIMESTAMP_FIELD} property"
+                        ),
+                    );
+                    audit(&mut entry, None);
+                    entries.push(entry);
+                }
+                continue;
+            };
+
+            if i > 0 {
+                backfills = apply_rate_share(handle, &server, &options, &tx).await;
             }
-            continue;
-        };
-
-        if i > 0 {
-            backfills = apply_rate_share(handle, &server, &options, &tx).await;
-        }
-        // A feed with no checkpoint is left to the backfill loading it
-        let store_main = store.clone();
-        if options.backfill.is_none()
-            && backfills
-                .iter()
-                .any(|b| backfill::is_marker(b, Some(resource)))
-            && matches!(store_main.load(&name, resource).await, Ok(None))
-        {
-            let message = "skipped: a backfill is loading this feed".to_string();
-            span.in_scope(|| tracing::warn!("feed skipped: a backfill is loading it"));
-            send(&tx, format!("[{label}] {message}"));
-            let mut entry = failed_entry(&name, resource, "");
-            entry.error = None;
-            entry.warnings.push(message);
-            entries.push(entry);
-            continue;
-        }
-
-        // One writer per feed: a second process syncing this server and resource skips it. A
-        // backfill also holds its marker; a window holds only its marker (its checkpoint is its own).
-        let lease_names: Vec<String> = match &options.backfill {
-            None => vec![resource.clone()],
-            Some(w) if w.is_whole() => vec![resource.clone(), w.marker(resource)],
-            Some(w) => vec![w.marker(resource)],
-        };
-        let leases = match take_leases(&options.state, &name, &lease_names).await {
-            Ok(Ok(leases)) => leases,
-            Ok(Err(holder)) => {
-                let message = format!("skipped: another process is syncing this feed ({holder})");
-                span.in_scope(
-                    || tracing::warn!(%holder, "feed skipped: leased by another process"),
-                );
+            // A feed with no checkpoint is left to the backfill loading it
+            let store_main = store.clone();
+            if options.backfill.is_none()
+                && backfills
+                    .iter()
+                    .any(|b| backfill::is_marker(b, Some(resource)))
+                && matches!(store_main.load(&name, resource).await, Ok(None))
+            {
+                let message = "skipped: a backfill is loading this feed".to_string();
+                span.in_scope(|| tracing::warn!("feed skipped: a backfill is loading it"));
                 send(&tx, format!("[{label}] {message}"));
                 let mut entry = failed_entry(&name, resource, "");
                 entry.error = None;
@@ -1148,219 +1146,258 @@ pub(crate) async fn sync_server_with(
                 entries.push(entry);
                 continue;
             }
-            Err(e) => {
-                span.in_scope(|| tracing::warn!(error = %e, "cannot take the feed's lease"));
-                let mut entry = failed_entry(&name, resource, &e.to_string());
-                audit(&mut entry, None);
-                entries.push(entry);
-                continue;
-            }
-        };
 
-        let mut writer = match make_writer(
-            &options,
-            &metadata,
-            &name,
-            resource,
-            server.expand_for(resource),
-        ) {
-            Ok(w) => w,
-            Err(e) => {
-                span.in_scope(|| tracing::warn!(error = %e, "cannot open the output file"));
-                let mut entry = failed_entry(&name, resource, &e.to_string());
-                audit(&mut entry, None);
-                entries.push(entry);
-                release(leases).await;
-                continue;
-            }
-        };
-        let started = std::time::Instant::now();
-        client = handle.client();
-        let mut stats_before = client.stats();
-        let filter = join_filters(
-            server.filter_for(resource),
-            options
-                .backfill
-                .as_ref()
-                .and_then(|w| w.filter(TIMESTAMP_FIELD)),
-        );
-        // A backfill window keeps its own checkpoint
-        let store = match &options.backfill {
-            Some(w) => store_main.scoped(&w.checkpoint_suffix()),
-            None => store_main.clone(),
-        };
-        let mut spec = StandardReplication::new(resource, &plan.key);
-        if let Some(n) = server.page_size_for(resource) {
-            spec = spec.page_size(n);
-        }
-        if let Some(f) = &filter {
-            spec = spec.filter(f.as_str());
-        }
-        let expand: Vec<&str> = server
-            .expand_for(resource)
-            .iter()
-            .map(String::as_str)
-            .collect();
-        if !expand.is_empty() {
-            spec = spec.expand(&expand);
-        }
-        // A full load when there is no checkpoint to start from
-        let saved = store.load(&name, resource).await;
-        let full_load = options.start_over || matches!(saved, Ok(None) | Err(_));
-        let window_start = match &saved {
-            Ok(Some(c)) if !full_load => Some(c.timestamp.clone()),
-            _ => None,
-        };
-        let backfill_entry = match &options.backfill {
-            Some(w) => {
-                let mut filters: Vec<String> = filter.iter().cloned().collect();
-                if let Ok(Some(cp)) = &saved {
-                    if !options.start_over {
-                        filters.push(backfill::after_checkpoint(cp, TIMESTAMP_FIELD, &plan.key));
-                    }
+            // One writer per feed: a second process syncing this server and resource skips it. A
+            // backfill also holds its marker; a window holds only its marker (its checkpoint is its own).
+            let lease_names: Vec<String> = match &options.backfill {
+                None => vec![resource.clone()],
+                Some(w) if w.is_whole() => vec![resource.clone(), w.marker(resource)],
+                Some(w) => vec![w.marker(resource)],
+            };
+            let leases = match take_leases(&options.state, &name, &lease_names).await {
+                Ok(Ok(leases)) => leases,
+                Ok(Err(holder)) => {
+                    let message =
+                        format!("skipped: another process is syncing this feed ({holder})");
+                    span.in_scope(
+                        || tracing::warn!(%holder, "feed skipped: leased by another process"),
+                    );
+                    send(&tx, format!("[{label}] {message}"));
+                    let mut entry = failed_entry(&name, resource, "");
+                    entry.error = None;
+                    entry.warnings.push(message);
+                    entries.push(entry);
+                    continue;
                 }
-                let remaining = backfill::count(&client, resource, &filters)
-                    .instrument(span.clone())
-                    .await;
-                let rate_percent = handle.rate_percent();
-                span.in_scope(|| {
-                    tracing::info!(remaining, rate_percent, from = ?w.from, to = ?w.to, "backfill started")
-                });
-                send(
-                    &tx,
-                    format!(
-                        "[{label}] backfill: {} records left, {rate_percent}% of the rate limits",
-                        remaining.map_or("unknown".into(), |n| n.to_string())
-                    ),
-                );
-                Some(BackfillEntry {
-                    from: w.from.clone(),
-                    to: w.to.clone(),
-                    remaining_at_start: remaining,
-                    rate_percent,
-                })
-            }
-            None => None,
-        };
-        let mut progress;
-        let inner: &mut dyn RecordWriter = match &backfill_entry {
-            Some(b) => {
-                progress = ProgressWriter::new(
-                    writer.as_mut(),
-                    tx.clone(),
-                    format!("##progress step={}/{total} label={label}", i + 1),
-                    b.remaining_at_start,
-                );
-                &mut progress
-            }
-            None => writer.as_mut(),
-        };
-        let mut checked = CheckingWriter::new(inner, &plan.key);
-        let mut pull = Pull {
-            handle,
-            client: &mut client,
-            stats_before: &mut stats_before,
-            server: &name,
-            resource,
-            spec,
-            store: &store,
-            start_over: options.start_over,
-            media: page_media.as_mut(),
-            shutdown: &options.shutdown,
-            span: &span,
-        };
-        let mut entry = if let Some(flag) = &server.deletes.flag_field {
-            let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
-            let mut entry = pull.run(&mut flagged).await;
-            entry.deletes = flagged.deletes();
-            entry
-        } else {
-            pull.run(&mut checked).await
-        };
-        entry.warnings = checked.warnings();
-        entry.backfill = backfill_entry;
-        if let Some(w) = options.backfill.as_ref().filter(|w| !w.is_whole()) {
-            if w.to.is_none() && entry.error.is_none() && !entry.interrupted {
-                hand_over_checkpoint(&store, &store_main, &name, resource, &span, &tx, &label)
-                    .await;
-            }
-        }
-        if full_load && entry.error.is_none() && !entry.interrupted {
-            // A full load should hold what the server counts (servers without $count are skipped)
-            let written = entry.records;
-            entry.warnings.extend(
-                count_warning(&client, resource, filter.as_deref(), written)
-                    .instrument(span.clone())
-                    .await,
-            );
-        }
-        if options.deletes
-            && entry.error.is_none()
-            && !entry.interrupted
-            && server.deletes.flag_field.is_none()
-        {
-            // Key-diff temporary files; the image has no /tmp, --out is writable
-            let scratch = options.out.join(".scratch");
-            let deleted = reconcile_deletes(
-                &client,
+                Err(e) => {
+                    span.in_scope(|| tracing::warn!(error = %e, "cannot take the feed's lease"));
+                    let mut entry = failed_entry(&name, resource, &e.to_string());
+                    audit(&mut entry, None);
+                    entries.push(entry);
+                    continue;
+                }
+            };
+
+            let mut writer = match make_writer(
+                &options,
+                &metadata,
                 &name,
-                &DeleteTarget::new(resource, &plan.key)
-                    .with_filter(filter.as_deref())
-                    .with_limits(server.deletes.limits(options.allow_mass_deletes))
-                    .with_scratch_dir(&scratch),
-                feed.as_ref(),
-                writer.as_mut(),
-                &store,
-            )
-            .instrument(span.clone())
-            .await;
-            entry.deletes = deleted.deletes;
-            entry.deletes_held = deleted.deletes_held;
-            entry.warnings.extend(deleted.warnings);
-            entry.error = deleted.error;
-            if !deleted.files.is_empty() {
-                entry.files = deleted.files; // the writer's list is cumulative
-            }
-        }
-        entry.stats = ResourceStats::new(started.elapsed(), &client.stats().since(&stats_before));
-        span.in_scope(|| {
-            for w in &entry.warnings {
-                tracing::warn!(warning = %w, "check finding");
-            }
-        });
-        span.in_scope(|| match &entry.error {
-            None if entry.interrupted => {
-                tracing::warn!(records = entry.records, "resource interrupted")
-            }
-            None => tracing::info!(
-                records = entry.records,
-                deletes = entry.deletes,
-                "resource synced"
-            ),
-            Some(e) => tracing::warn!(
-                records = entry.records,
-                deletes = entry.deletes,
-                error = %e,
-                "resource failed"
-            ),
-        });
-        send(
-            &tx,
-            format!(
-                "[{label}] {} records, {} deletes{}",
-                entry.records,
-                entry.deletes,
-                entry
-                    .error
+                resource,
+                server.expand_for(resource),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    span.in_scope(|| tracing::warn!(error = %e, "cannot open the output file"));
+                    let mut entry = failed_entry(&name, resource, &e.to_string());
+                    audit(&mut entry, None);
+                    entries.push(entry);
+                    release(leases).await;
+                    continue;
+                }
+            };
+            let started = std::time::Instant::now();
+            client = handle.client();
+            let mut stats_before = client.stats();
+            let filter = join_filters(
+                server.filter_for(resource),
+                options
+                    .backfill
                     .as_ref()
-                    .map_or(String::new(), |e| format!(", FAILED: {e}"))
-            ),
-        );
-        audit(&mut entry, window_start);
-        entries.push(entry);
-        release(leases).await;
-    }
-    Ok((entries, page_media.map(PageMedia::finish), schema_changes))
+                    .and_then(|w| w.filter(TIMESTAMP_FIELD)),
+            );
+            // A backfill window keeps its own checkpoint
+            let store = match &options.backfill {
+                Some(w) => store_main.scoped(&w.checkpoint_suffix()),
+                None => store_main.clone(),
+            };
+            let mut spec = StandardReplication::new(resource, &plan.key);
+            if let Some(n) = server.page_size_for(resource) {
+                spec = spec.page_size(n);
+            }
+            if let Some(f) = &filter {
+                spec = spec.filter(f.as_str());
+            }
+            let expand: Vec<&str> = server
+                .expand_for(resource)
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if !expand.is_empty() {
+                spec = spec.expand(&expand);
+            }
+            // A full load when there is no checkpoint to start from
+            let saved = store.load(&name, resource).await;
+            let full_load = options.start_over || matches!(saved, Ok(None) | Err(_));
+            let window_start = match &saved {
+                Ok(Some(c)) if !full_load => Some(c.timestamp.clone()),
+                _ => None,
+            };
+            let backfill_entry = match &options.backfill {
+                Some(w) => {
+                    let mut filters: Vec<String> = filter.iter().cloned().collect();
+                    if let Ok(Some(cp)) = &saved {
+                        if !options.start_over {
+                            filters.push(backfill::after_checkpoint(
+                                cp,
+                                TIMESTAMP_FIELD,
+                                &plan.key,
+                            ));
+                        }
+                    }
+                    let remaining = backfill::count(&client, resource, &filters)
+                        .instrument(span.clone())
+                        .await;
+                    let rate_percent = handle.rate_percent();
+                    span.in_scope(|| {
+                        tracing::info!(remaining, rate_percent, from = ?w.from, to = ?w.to, "backfill started")
+                    });
+                    send(
+                        &tx,
+                        format!(
+                            "[{label}] backfill: {} records left, {rate_percent}% of the rate limits",
+                            remaining.map_or("unknown".into(), |n| n.to_string())
+                        ),
+                    );
+                    Some(BackfillEntry {
+                        from: w.from.clone(),
+                        to: w.to.clone(),
+                        remaining_at_start: remaining,
+                        rate_percent,
+                    })
+                }
+                None => None,
+            };
+            let mut progress;
+            let inner: &mut dyn RecordWriter = match &backfill_entry {
+                Some(b) => {
+                    progress = ProgressWriter::new(
+                        writer.as_mut(),
+                        tx.clone(),
+                        format!("##progress step={}/{total} label={label}", i + 1),
+                        b.remaining_at_start,
+                    );
+                    &mut progress
+                }
+                None => writer.as_mut(),
+            };
+            let mut checked = CheckingWriter::new(inner, &plan.key);
+            let mut pull = Pull {
+                handle,
+                client: &mut client,
+                stats_before: &mut stats_before,
+                server: &name,
+                resource,
+                spec,
+                store: &store,
+                start_over: options.start_over,
+                media: page_media.as_mut(),
+                shutdown: &options.shutdown,
+                span: &span,
+            };
+            let mut entry = if let Some(flag) = &server.deletes.flag_field {
+                let mut flagged = FlagDeleteWriter::new(&mut checked, flag, &plan.key);
+                let mut entry = pull.run(&mut flagged).await;
+                entry.deletes = flagged.deletes();
+                entry
+            } else {
+                pull.run(&mut checked).await
+            };
+            entry.warnings = checked.warnings();
+            entry.backfill = backfill_entry;
+            if let Some(w) = options.backfill.as_ref().filter(|w| !w.is_whole()) {
+                if w.to.is_none() && entry.error.is_none() && !entry.interrupted {
+                    hand_over_checkpoint(&store, &store_main, &name, resource, &span, &tx, &label)
+                        .await;
+                }
+            }
+            if full_load && entry.error.is_none() && !entry.interrupted {
+                // A full load should hold what the server counts (servers without $count are skipped)
+                let written = entry.records;
+                entry.warnings.extend(
+                    count_warning(&client, resource, filter.as_deref(), written)
+                        .instrument(span.clone())
+                        .await,
+                );
+            }
+            if options.deletes
+                && entry.error.is_none()
+                && !entry.interrupted
+                && server.deletes.flag_field.is_none()
+            {
+                // Key-diff temporary files; the image has no /tmp, --out is writable
+                let scratch = options.out.join(".scratch");
+                let deleted = reconcile_deletes(
+                    &client,
+                    &name,
+                    &DeleteTarget::new(resource, &plan.key)
+                        .with_filter(filter.as_deref())
+                        .with_limits(server.deletes.limits(options.allow_mass_deletes))
+                        .with_scratch_dir(&scratch),
+                    feed.as_ref(),
+                    writer.as_mut(),
+                    &store,
+                )
+                .instrument(span.clone())
+                .await;
+                entry.deletes = deleted.deletes;
+                entry.deletes_held = deleted.deletes_held;
+                entry.warnings.extend(deleted.warnings);
+                entry.error = deleted.error;
+                if !deleted.files.is_empty() {
+                    entry.files = deleted.files; // the writer's list is cumulative
+                }
+            }
+            entry.stats =
+                ResourceStats::new(started.elapsed(), &client.stats().since(&stats_before));
+            span.in_scope(|| {
+                for w in &entry.warnings {
+                    tracing::warn!(warning = %w, "check finding");
+                }
+            });
+            span.in_scope(|| match &entry.error {
+                None if entry.interrupted => {
+                    tracing::warn!(records = entry.records, "resource interrupted")
+                }
+                None => tracing::info!(
+                    records = entry.records,
+                    deletes = entry.deletes,
+                    "resource synced"
+                ),
+                Some(e) => tracing::warn!(
+                    records = entry.records,
+                    deletes = entry.deletes,
+                    error = %e,
+                    "resource failed"
+                ),
+            });
+            send(
+                &tx,
+                format!(
+                    "[{label}] {} records, {} deletes{}",
+                    entry.records,
+                    entry.deletes,
+                    entry
+                        .error
+                        .as_ref()
+                        .map_or(String::new(), |e| format!(", FAILED: {e}"))
+                ),
+            );
+            audit(&mut entry, window_start);
+            entries.push(entry);
+            release(leases).await;
+        }
+        // Dropping the pages closes the queue: the workers finish what is queued and stop
+        drop(page_media);
+        entries
+    };
+    let (entries, media) = match media_workers {
+        Some(workers) => {
+            let (entries, report) = tokio::join!(records, workers.run());
+            (entries, Some(report))
+        }
+        None => (records.await, None),
+    };
+    Ok((entries, media, schema_changes))
 }
 
 /// Set the rate share of `handle` for what this sync is about to do, and return the marker leases
@@ -1499,7 +1536,7 @@ async fn hand_over_checkpoint(
 
 /// One resource's records pull, tried once more with a new client when it failed to authenticate
 /// and the server's secrets have changed since (#92)
-struct Pull<'a, 'm> {
+struct Pull<'a> {
     handle: &'a ClientHandle,
     client: &'a mut Arc<ResoClient>,
     stats_before: &'a mut ClientStats,
@@ -1508,12 +1545,12 @@ struct Pull<'a, 'm> {
     spec: StandardReplication,
     store: &'a CheckpointStore,
     start_over: bool,
-    media: Option<&'a mut PageMedia<'m>>,
+    media: Option<&'a mut crate::media::PageMedia>,
     shutdown: &'a Shutdown,
     span: &'a tracing::Span,
 }
 
-impl Pull<'_, '_> {
+impl Pull<'_> {
     async fn run(&mut self, writer: &mut dyn RecordWriter) -> ResourceEntry {
         let mut entry = self.once(writer, self.start_over).await;
         let auth_failed = entry.error.as_deref().is_some_and(is_auth_failure);
@@ -1762,7 +1799,9 @@ async fn media(args: Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
                 let client = client_for(&server)?;
                 let download = server.media.download_config();
                 let progress = |line: String| send(&tx, line);
-                let report = sync_media(&client, &server.name, download, &options, progress).await;
+                let workers = server.media.workers.unwrap_or(DEFAULT_WORKERS);
+                let report =
+                    sync_media(&client, &server.name, download, workers, &options, progress).await;
                 let line = media_line(&report);
                 if report.error.is_some() {
                     tracing::warn!("{line}");
@@ -1831,6 +1870,15 @@ fn media_line(r: &MediaReport) -> String {
         r.pending,
         r.bytes
     );
+    if r.unchanged > 0 {
+        line.push_str(&format!(", {} unchanged", r.unchanged));
+    }
+    if r.shared > 0 {
+        line.push_str(&format!(", {} same as a stored file", r.shared));
+    }
+    if r.expired > 0 {
+        line.push_str(&format!(", {} expired URLs", r.expired));
+    }
     if r.without_url > 0 {
         line.push_str(&format!(", {} without MediaURL", r.without_url));
     }
@@ -1938,30 +1986,35 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
         return 2;
     };
     let out_dir = args.out();
-    let media_dir = args
-        .media_dir
-        .clone()
-        .unwrap_or_else(|| out_dir.join("media"));
-    // With a bucket, state and data files are there; media files and the audit log stay local
-    let (state, sink) = match (args.state_store(), args.file_sink()) {
-        (Ok(state), Ok(sink)) => (state, sink),
-        (Err(e), _) | (_, Err(e)) => {
+    // With a bucket, state, data and media files are there; the audit log stays local
+    let (state, sink, media) = match (
+        args.state_store(),
+        args.file_sink(),
+        args.media_root().store(&server),
+    ) {
+        (Ok(state), Ok(sink), Ok(media)) => (state, sink, media),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
             let _ = writeln!(err, "error: {e}");
             return 2;
         }
     };
     let files = sink.as_deref();
     let Some(by) = by else {
-        let plan =
-            match crate::purge::plan_purge(&server, &out_dir, files, &media_dir, state.as_ref())
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = writeln!(err, "error: {e}");
-                    return 1;
-                }
-            };
+        let plan = match crate::purge::plan_purge(
+            &server,
+            &out_dir,
+            files,
+            media.as_ref(),
+            state.as_ref(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = writeln!(err, "error: {e}");
+                return 1;
+            }
+        };
         let _ = writeln!(
             out,
             "dry run: nothing deleted; add --execute --by NAME to delete\npurge plan for server {server}"
@@ -1969,7 +2022,7 @@ async fn purge(args: Args, by: Option<String>, out: &mut dyn Write, err: &mut dy
         print_plan(out, &plan);
         return 0;
     };
-    match crate::purge::execute_purge(&server, &out_dir, files, &media_dir, &state, &by).await {
+    match crate::purge::execute_purge(&server, &out_dir, files, media.as_ref(), &state, &by).await {
         Ok(crate::purge::PurgeOutcome::Held(held)) => {
             for (key, holder) in held {
                 let _ = writeln!(err, "error: {} is {holder}", state.location(&key));
@@ -2043,9 +2096,7 @@ fn print_plan(out: &mut dyn Write, plan: &crate::purge::PurgePlan) {
     let _ = writeln!(
         out,
         "media files: {} ({} bytes) in {}",
-        plan.media_files,
-        plan.media_bytes,
-        plan.media_dir.display()
+        plan.media_files, plan.media_bytes, plan.media
     );
     let _ = writeln!(out, "state keys: {}", plan.state_keys.len());
     for k in &plan.state_keys {

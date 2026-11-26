@@ -68,3 +68,4 @@ bytes_per_day = 50000000000                  # also per_hour, per_day, bytes_per
 timeout_secs = 300
 send_token = "same_host"                     # never, same_host (default) or always
 # nested_field = "Media"                     # `sync --media`: array of media records inside a record
+# workers = 4                                # download workers per server (default 4)
