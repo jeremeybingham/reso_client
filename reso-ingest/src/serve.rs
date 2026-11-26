@@ -16,12 +16,19 @@
 //! | `/readyz` | 200 when the state directory can be written, else 503 |
 //! | `/metrics` | Prometheus text: the last result of every feed, plus the daemon's own numbers |
 //! | `/status` | JSON: every feed's state (`paused` included), last run, failures, time to the next run, and the configuration reloads |
+//! | `/` | With [`ServeOptions::ui`]: an HTML page with one row per feed |
+//! | `/feed/{server}/{resource}` | With `ui`: one feed's last error, checkpoint and recent runs |
+//! | `/runs` | With `ui`: the latest runs of every feed |
+//!
+//! The pages (Cargo feature `ui`, on by default) are read-only HTML with no scripts that reload
+//! every 15 seconds. They show what `/status` shows, plus each feed's last
+//! [`RECENT_RUNS`] runs, which are kept in memory and lost on restart.
 //!
 //! [`Daemon::reload`] applies a changed configuration while the daemon runs (the command does so
 //! on SIGHUP and with `--reload-every`).
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -50,6 +57,12 @@ use crate::secrets::ClientHandle;
 use crate::shutdown::Shutdown;
 use crate::state::{FileStateStore, StateStore};
 
+#[cfg(feature = "ui")]
+mod ui;
+
+/// How many runs of each feed the daemon keeps in memory for the status pages
+pub const RECENT_RUNS: usize = 20;
+
 /// How `serve` runs
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
@@ -73,6 +86,9 @@ pub struct ServeOptions {
     pub format: Format,
     /// Hive-style partition folders for Parquet files (`--partition`)
     pub partition: bool,
+    /// Also serve the read-only status pages (`/`, `/feed/{server}/{resource}`, `/runs`); needs
+    /// the `ui` feature
+    pub ui: bool,
 }
 
 impl ServeOptions {
@@ -90,6 +106,7 @@ impl ServeOptions {
             max_file_bytes: 256 * 1024 * 1024,
             format: Format::Ndjson,
             partition: false,
+            ui: false,
         }
     }
 }
@@ -118,6 +135,24 @@ struct FeedStatus {
     last_entry: Option<ResourceEntry>,
     /// Media files of the feed's syncs added up (with `media` set)
     media: Option<MediaCounts>,
+    /// The last [`RECENT_RUNS`] runs, oldest first
+    recent: VecDeque<RunSummary>,
+}
+
+/// One finished run of a feed, for the status pages
+#[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+struct RunSummary {
+    run_id: String,
+    started: String,
+    duration: Duration,
+    /// `ok`, `interrupted`, `skipped` (another process holds the feed) or `failed`
+    outcome: &'static str,
+    records: u64,
+    deletes: u64,
+    /// Response body bytes received
+    bytes: u64,
+    error: Option<String>,
 }
 
 impl FeedStatus {
@@ -140,6 +175,7 @@ impl FeedStatus {
             next_at: None,
             last_entry: None,
             media: None,
+            recent: VecDeque::new(),
         }
     }
 }
@@ -507,6 +543,11 @@ impl Daemon {
                 ClientHandle::new(server)?;
             }
         }
+        if options.ui && !cfg!(feature = "ui") {
+            return Err(IngestError::Parse(
+                "--ui needs reso-ingest built with the `ui` feature".into(),
+            ));
+        }
         // Fail now rather than at the first sync when state cannot be saved
         probe(options.state.as_ref()).await?;
 
@@ -528,6 +569,10 @@ impl Daemon {
             message: e.to_string(),
         })?;
 
+        let ui = options.ui;
+        if ui && !is_private(addr.ip()) {
+            tracing::warn!(%addr, "status pages on a public address: they have no authentication");
+        }
         let mut controller = Controller {
             options: Arc::new(options),
             shared: Arc::clone(&shared),
@@ -545,8 +590,10 @@ impl Daemon {
             .route("/healthz", get(|| async { "ok\n" }))
             .route("/readyz", get(readyz))
             .route("/metrics", get(metrics))
-            .route("/status", get(status))
-            .with_state(shared);
+            .route("/status", get(status));
+        #[cfg(feature = "ui")]
+        let app = if ui { app.merge(ui::routes()) } else { app };
+        let app = app.with_state(shared);
         let stop = shutdown.clone();
         let endpoints = tokio::spawn(async move {
             let served = axum::serve(listener, app)
@@ -703,12 +750,16 @@ async fn run_feed(
             p = permits.clone().acquire_owned() => p.ok(),
             () = shutdown.triggered() => return,
         };
+        let started = now_rfc3339();
+        let clock = Instant::now();
         shared.update(&key, generation, |f| {
             f.state = "running";
-            f.last_started = Some(now_rfc3339());
+            f.last_started = Some(started.clone());
         });
-        let (outcome, media) = sync_once(&server, &resource, &client, &options, &shutdown).await;
+        let (run_id, outcome, media) =
+            sync_once(&server, &resource, &client, &options, &shutdown).await;
         drop(permit);
+        let summary = RunSummary::new(run_id, started, clock.elapsed(), &outcome);
 
         let mut runs = 0;
         let mut failures = 0;
@@ -739,6 +790,10 @@ async fn run_feed(
                     }
                 }
             }
+            if f.recent.len() >= RECENT_RUNS {
+                f.recent.pop_front();
+            }
+            f.recent.push_back(summary);
             runs = f.runs;
             failures = f.consecutive_failures;
         });
@@ -765,19 +820,46 @@ enum Outcome {
     Failed(String, Option<Box<ResourceEntry>>),
 }
 
-/// One sync of one feed, written like `reso-ingest sync --resource R --server S`, with its media
-/// report (with `media` set)
+impl RunSummary {
+    fn new(run_id: String, started: String, duration: Duration, outcome: &Outcome) -> Self {
+        let (outcome, entry, error) = match outcome {
+            Outcome::Done(e) if e.interrupted => ("interrupted", Some(e), None),
+            Outcome::Done(e) => ("ok", Some(e), None),
+            Outcome::Skipped => ("skipped", None, None),
+            Outcome::Failed(m, e) => ("failed", e.as_ref(), Some(m.clone())),
+        };
+        Self {
+            run_id,
+            started,
+            duration,
+            outcome,
+            records: entry.map_or(0, |e| e.records),
+            deletes: entry.map_or(0, |e| e.deletes),
+            bytes: entry.map_or(0, |e| e.stats.http_bytes),
+            error,
+        }
+    }
+}
+
+/// One sync of one feed, written like `reso-ingest sync --resource R --server S`: its run id
+/// (empty when none could be reserved), outcome and media report (with `media` set)
 async fn sync_once(
     server: &ServerConfig,
     resource: &str,
     client: &ClientHandle,
     options: &ServeOptions,
     shutdown: &Shutdown,
-) -> (Outcome, Vec<MediaReport>) {
+) -> (String, Outcome, Vec<MediaReport>) {
     let sink = options.sink.as_deref();
     let run_id = match runs::reserve(&options.out, options.state.as_ref(), sink).await {
         Ok(id) => id,
-        Err(e) => return (Outcome::Failed(e.to_string(), None), Vec::new()),
+        Err(e) => {
+            return (
+                String::new(),
+                Outcome::Failed(e.to_string(), None),
+                Vec::new(),
+            )
+        }
     };
     let sync_options = Arc::new(SyncOptions {
         out: options.out.clone(),
@@ -861,7 +943,21 @@ async fn sync_once(
     }
     let marker = options.out.join(format!(".run.{}", sanitize_id(&run_id)));
     let _ = std::fs::remove_file(marker);
-    (outcome, media_reports)
+    (run_id, outcome, media_reports)
+}
+
+/// Loopback, private (RFC 1918, unique-local IPv6) or link-local: where pages without
+/// authentication may be served without a warning
+fn is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_private(v4.into()))
+        }
+    }
 }
 
 fn sanitize_id(id: &str) -> String {
@@ -1029,6 +1125,25 @@ mod tests {
         // an interval longer than the cap is never shortened
         let long = Duration::from_secs(3600);
         assert!(next_delay(long, 3, "s", 1) >= long);
+    }
+
+    #[test]
+    fn private_addresses_are_recognised() {
+        for a in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.5",
+            "172.16.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(is_private(a.parse().unwrap()), "{a}");
+        }
+        for a in ["0.0.0.0", "8.8.8.8", "::", "2001:db8::1"] {
+            assert!(!is_private(a.parse().unwrap()), "{a}");
+        }
     }
 
     #[test]

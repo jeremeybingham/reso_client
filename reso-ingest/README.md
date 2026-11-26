@@ -517,6 +517,16 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 | `/readyz` | `200` when state can be saved (a probe key `.readyz` is written and deleted), `503` when not (config is read before the server starts, so a bad one never gets this far) |
 | `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures`, `reso_ingest_feed_interval_seconds` and `reso_ingest_feed_paused` (labels `server`, `resource`); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
 | `/status` | JSON: `started_at`, `reloads`, `last_reload`, `last_reload_error` and, per feed, `state` (`waiting`, `queued`, `running`, `paused`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
+| `/` | With `--ui`: an HTML page, one row per feed (state, last run, records, time taken, result, failures in a row, next run, freshness lag); failing and paused rows are highlighted, with a summary line on top |
+| `/feed/<server>/<resource>` | With `--ui`: one feed's last error, checkpoint and its last 20 runs (`404` for an unknown feed) |
+| `/runs` | With `--ui`: the latest 100 runs of every feed, newest first |
+
+**Status pages (`--ui`).** Read-only HTML with one inline stylesheet, no scripts and no external assets; each page
+reloads every 15 seconds. The run list is kept in memory (20 runs per feed) and lost on restart: longer history is in
+Prometheus (see `monitoring/`) and the run manifests. There are no buttons: pausing and resuming stay in the
+configuration file. The pages have no authentication either; `serve --ui` logs a warning when `--listen` is not a
+loopback, private or link-local address. They are built in with the `ui` feature (on by default; it adds no
+dependency); without it `--ui` is a start-up error.
 
 Unconfirmed against a real server (#32): everything here is tested against mock servers only. Feeds of one server
 share its client, so `reso_ingest_rate_limit_used` is per server, read live from that client at each scrape; the

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `reso-ingest`: `serve --ui` (`ServeOptions::ui`) adds read-only HTML status pages: `/` (one row per feed, failing
+  and paused rows highlighted), `/feed/<server>/<resource>` (last error, checkpoint, last 20 runs) and `/runs` (latest
+  100 runs). Hand-written HTML, no scripts, reloads every 15 s, every value escaped. Feature `ui`, on by default, adds
+  no dependency; without it `--ui` is a start-up error. A warning is logged when `--ui` listens on a public address
+  (#161).
 - `reso-client`: `ReplicationRun::next_batch_raw` returns `RawRecords`, each record's JSON text as the server sent
   it, without parsing the records into `serde_json::Value`s (#162, lead 4); the order check and checkpoint read only
   the timestamp and key members. `RawRecords::values` parses them when needed, `RawRecords::from_texts` builds one,

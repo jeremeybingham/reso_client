@@ -786,3 +786,154 @@ async fn serve_command_reloads_its_config_directory() {
     let err = String::from_utf8(err).unwrap();
     assert_eq!(code, 0, "{err}");
 }
+
+/// `serve --ui` (#161): the pages show ok, failing and paused feeds, escape what servers send and
+/// are not there without `ui`
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn status_pages_show_every_feed_and_escape_server_text() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(|req: &wiremock::Request| {
+            let path = req.url.path();
+            if path.ends_with("$metadata") {
+                return ResponseTemplate::new(200).set_body_string(METADATA);
+            }
+            if path.ends_with("/Member") {
+                return ResponseTemplate::new(500).set_body_string("<script>alert(1)</script>");
+            }
+            if req.url.query_pairs().any(|(k, _)| k == "$filter") {
+                return ResponseTemplate::new(200).set_body_json(json!({"value": []}));
+            }
+            ResponseTemplate::new(200).set_body_json(
+                json!({"value": [{"ListingKey": "K1", "ModificationTimestamp": "2026-01-01T00:00:01Z"}]}),
+            )
+        })
+        .mount(&srv)
+        .await;
+    let dir = TempDir::new("ui");
+    let config = Config::parse(&format!(
+        r#"
+[[server]]
+name = "mls"
+base_url = "{}"
+[server.limits]
+max_retries = 0
+[server.auth]
+type = "bearer"
+token_env = "SERVE_TEST_TOKEN"
+[server.resources.Property]
+interval = "300ms"
+[server.resources.Member]
+interval = "300ms"
+[server.resources.Office]
+interval = "1h"
+paused = true
+"#,
+        srv.uri()
+    ))
+    .unwrap();
+    let mut opts = options(&dir);
+    opts.ui = true;
+    let shutdown = Shutdown::new();
+    let daemon = Daemon::start(config.clone(), opts, shutdown.clone())
+        .await
+        .unwrap();
+    until("both feeds ran", async || {
+        let s = status(&daemon).await;
+        feed(&s, "Member")["runs"].as_u64() >= Some(1)
+            && feed(&s, "Property")["runs"].as_u64() >= Some(1)
+    })
+    .await;
+    let error = feed(&status(&daemon).await, "Member")["last_error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        error.contains("<script>"),
+        "the error carries the server's text: {error}"
+    );
+
+    let url = format!("http://{}/", daemon.local_addr());
+    let r = reqwest::get(&url).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "text/html; charset=utf-8");
+    let index = r.text().await.unwrap();
+    assert!(index.contains("3 feeds"), "{index}");
+    assert!(index.contains("1 failing</span>, 1 paused"), "{index}");
+    assert!(
+        index.contains(r#"<tr class="fail"><td><a href="/feed/mls/Member">"#),
+        "{index}"
+    );
+    assert!(
+        index.contains(r#"<tr class="paused"><td><a href="/feed/mls/Office">"#),
+        "{index}"
+    );
+    assert!(
+        index.contains(r#"<tr><td><a href="/feed/mls/Property">"#),
+        "{index}"
+    );
+    assert!(index.contains(r#"http-equiv="refresh" content="15""#));
+
+    let (code, member) = get(&daemon, "/feed/mls/Member").await;
+    assert_eq!(code, 200);
+    assert!(
+        member.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{member}"
+    );
+    assert!(!member.contains("<script>"), "{member}");
+    assert!(member.contains("<td>failed</td>"), "{member}");
+
+    let (_, property) = get(&daemon, "/feed/mls/Property").await;
+    assert!(
+        property.contains("2026-01-01T00:00:01Z"),
+        "checkpoint shown: {property}"
+    );
+    assert!(property.contains("<td>ok</td>"), "{property}");
+
+    assert_eq!(get(&daemon, "/feed/mls/Nope").await.0, 404);
+    let (code, runs) = get(&daemon, "/runs").await;
+    assert_eq!(code, 200);
+    assert!(
+        runs.contains(r#"href="/feed/mls/Member""#)
+            && runs.contains(r#"href="/feed/mls/Property""#),
+        "{runs}"
+    );
+    assert!(!runs.contains("<script>"), "{runs}");
+    shutdown.trigger();
+    daemon.wait().await;
+
+    // Without `ui` the pages are not routed
+    let shutdown = Shutdown::new();
+    let daemon = Daemon::start(config, options(&dir), shutdown.clone())
+        .await
+        .unwrap();
+    for path in ["/", "/runs", "/feed/mls/Property"] {
+        assert_eq!(get(&daemon, path).await.0, 404, "{path}");
+    }
+    assert_eq!(get(&daemon, "/status").await.0, 200);
+    shutdown.trigger();
+    daemon.wait().await;
+}
+
+/// Without the `ui` feature, `--ui` is a start-up error rather than a silent no-op
+#[cfg(not(feature = "ui"))]
+#[tokio::test]
+async fn ui_without_the_feature_is_a_startup_error() {
+    std::env::set_var("SERVE_TEST_TOKEN", "t");
+    let (srv, _, _) = server(false).await;
+    let dir = TempDir::new("noui");
+    let mut opts = options(&dir);
+    opts.ui = true;
+    let e = Daemon::start(
+        config(&srv.uri(), "", "interval = \"1h\"", ""),
+        opts,
+        Shutdown::new(),
+    )
+    .await
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(e.contains("`ui` feature"), "{e}");
+}
