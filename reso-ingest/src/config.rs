@@ -117,6 +117,10 @@ pub struct ServerConfig {
     /// `serve` only: most feeds of this server syncing at once (default 2)
     #[serde(default)]
     pub concurrency: Option<usize>,
+    /// Leave the server alone: `sync` skips it and `serve` schedules none of its feeds, until
+    /// it is set back to `false` (a running `serve` picks the change up on reload)
+    #[serde(default)]
+    pub paused: bool,
     /// How to authenticate
     pub auth: AuthConfig,
     /// Retry and rate limits
@@ -331,6 +335,10 @@ pub struct ResourceConfig {
     /// `serve` only: how often to sync this resource (`"2m"`, `"30s"`, `"1h"`, `"500ms"`)
     #[serde(default)]
     pub interval: Option<String>,
+    /// Leave this resource alone: `sync` skips it and `serve` does not schedule it, while its
+    /// checkpoint is kept for when it is resumed
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// The longest wait the daemon puts between two syncs of a failing feed, unless the feed's own
@@ -692,15 +700,97 @@ fn rate_limit(
     rate
 }
 
+/// What one configuration file holds: the top-level settings it sets and its servers
+struct Part {
+    max_concurrent_servers: Option<usize>,
+    webhook_url_env: Option<String>,
+    servers: Vec<ServerConfig>,
+}
+
 impl Config {
     /// Read and parse a configuration file
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, IngestError> {
+        Self::parse(&read_text(path.as_ref())?)
+    }
+
+    /// Read a configuration file, or every `*.toml` file of a directory as one configuration
+    ///
+    /// A directory lets each server live in its own file (`servers.d/mls-a.toml`, ...), so
+    /// feeds are added and removed by adding and removing files. Files are read in name order;
+    /// other files (and `*.toml` files in subdirectories) are ignored. The top-level settings
+    /// (`max_concurrent_servers`, `webhook_url_env`) may be set in one file only, server names
+    /// must be unique across files, and errors name the file. The directory needs at least one
+    /// server in all.
+    ///
+    /// # Errors
+    ///
+    /// [`IngestError`] when a file cannot be read or parsed, a setting is repeated across files,
+    /// or no server is configured.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, IngestError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| IngestError::Read {
+        if !path.is_dir() {
+            return Self::from_file(path);
+        }
+        let entries = std::fs::read_dir(path).map_err(|e| IngestError::Read {
             path: path.display().to_string(),
             message: e.kind().to_string(),
         })?;
-        Self::parse(&text)
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "toml"))
+            .collect();
+        files.sort();
+        let mut config = Config {
+            max_concurrent_servers: DEFAULT_MAX_CONCURRENT,
+            webhook_url_env: None,
+            servers: Vec::new(),
+        };
+        let mut set_in: [Option<String>; 2] = [None, None];
+        for file in &files {
+            let name = file.display().to_string();
+            let in_file = |e: IngestError| IngestError::Parse(format!("{name}: {e}"));
+            let part = Self::parse_part(&read_text(file)?).map_err(in_file)?;
+            for (slot, (key, present)) in set_in.iter_mut().zip([
+                (
+                    "max_concurrent_servers",
+                    part.max_concurrent_servers.is_some(),
+                ),
+                ("webhook_url_env", part.webhook_url_env.is_some()),
+            ]) {
+                if !present {
+                    continue;
+                }
+                if let Some(first) = slot {
+                    return Err(IngestError::Parse(format!(
+                        "{name}: `{key}` is already set in {first}; set it in one file only"
+                    )));
+                }
+                *slot = Some(name.clone());
+            }
+            if let Some(n) = part.max_concurrent_servers {
+                config.max_concurrent_servers = n;
+            }
+            if part.webhook_url_env.is_some() {
+                config.webhook_url_env = part.webhook_url_env;
+            }
+            for server in part.servers {
+                if config.servers.iter().any(|s| s.name == server.name) {
+                    return Err(IngestError::Parse(format!(
+                        "{name}: server `{}` is also defined in another file",
+                        server.name
+                    )));
+                }
+                config.servers.push(server);
+            }
+        }
+        if config.servers.is_empty() {
+            return Err(IngestError::Parse(format!(
+                "no [[server]] entries in the *.toml files of {}",
+                path.display()
+            )));
+        }
+        Ok(config)
     }
 
     /// Parse configuration text
@@ -708,13 +798,28 @@ impl Config {
     /// Unknown keys, missing required fields, duplicate names and literal secrets are errors that
     /// name the server.
     pub fn parse(text: &str) -> Result<Self, IngestError> {
+        let part = Self::parse_part(text)?;
+        if part.servers.is_empty() {
+            return Err(IngestError::Parse("no [[server]] entries".into()));
+        }
+        Ok(Config {
+            max_concurrent_servers: part
+                .max_concurrent_servers
+                .unwrap_or(DEFAULT_MAX_CONCURRENT),
+            webhook_url_env: part.webhook_url_env,
+            servers: part.servers,
+        })
+    }
+
+    /// Parse one file's text; it may hold no server (a file of top-level settings in a directory)
+    fn parse_part(text: &str) -> Result<Part, IngestError> {
         let mut table: toml::Table = text
             .parse()
             .map_err(|e: toml::de::Error| IngestError::Parse(e.to_string()))?;
 
         let max_concurrent_servers = match table.remove("max_concurrent_servers") {
-            None => DEFAULT_MAX_CONCURRENT,
-            Some(toml::Value::Integer(n)) if n >= 1 => n as usize,
+            None => None,
+            Some(toml::Value::Integer(n)) if n >= 1 => Some(n as usize),
             Some(_) => {
                 return Err(IngestError::Parse(
                     "max_concurrent_servers must be an integer of at least 1".into(),
@@ -743,10 +848,6 @@ impl Config {
         if let Some(key) = table.keys().next() {
             return Err(IngestError::Parse(format!("unknown top-level key `{key}`")));
         }
-        if entries.is_empty() {
-            return Err(IngestError::Parse("no [[server]] entries".into()));
-        }
-
         let mut servers: Vec<ServerConfig> = Vec::new();
         for (i, entry) in entries.into_iter().enumerate() {
             let label = entry
@@ -769,12 +870,19 @@ impl Config {
             }
             servers.push(server);
         }
-        Ok(Config {
+        Ok(Part {
             max_concurrent_servers,
             webhook_url_env,
             servers,
         })
     }
+}
+
+fn read_text(path: &Path) -> Result<String, IngestError> {
+    std::fs::read_to_string(path).map_err(|e| IngestError::Read {
+        path: path.display().to_string(),
+        message: e.kind().to_string(),
+    })
 }
 
 /// toml error text without the source-snippet decoration, which is noisy once the server is named
@@ -938,8 +1046,28 @@ impl ServerConfig {
     ///
     /// A resource with its own `interval` is scheduled; so is each resource in `include` without
     /// one, at the server's `interval`. A resource the server does not [`include`](Self::includes)
-    /// is never scheduled. The result is empty when nothing has an interval. Intervals were checked when the file was parsed.
+    /// is never scheduled, nor is a [paused](Self::is_paused) one (see
+    /// [`paused_feeds`](Self::paused_feeds)). The result is empty when nothing has an interval.
+    /// Intervals were checked when the file was parsed.
     pub fn feeds(&self) -> Vec<(String, std::time::Duration)> {
+        let mut feeds = self.all_feeds();
+        feeds.retain(|(name, _)| !self.is_paused(name));
+        feeds
+    }
+
+    /// The feeds [`feeds`](Self::feeds) leaves out because they are paused, with their intervals
+    pub fn paused_feeds(&self) -> Vec<(String, std::time::Duration)> {
+        let mut feeds = self.all_feeds();
+        feeds.retain(|(name, _)| self.is_paused(name));
+        feeds
+    }
+
+    /// Whether `resource` is paused: the server is, or the resource's own `paused` is set
+    pub fn is_paused(&self, resource: &str) -> bool {
+        self.paused || self.resources.get(resource).is_some_and(|r| r.paused)
+    }
+
+    fn all_feeds(&self) -> Vec<(String, std::time::Duration)> {
         let default = self
             .interval
             .as_deref()

@@ -17,8 +17,12 @@ cargo run -p reso-ingest -- sync --config servers.toml --server mlsgrid --media
 cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --backfill
 cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
 cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
+cargo run -p reso-ingest -- discover --config draft.toml --starter                     # onboarding
 cargo run -p reso-ingest -- status --out data/
-cargo run -p reso-ingest -- serve --config servers.toml --out data/ --listen 0.0.0.0:9090
+cargo run -p reso-ingest -- serve --config servers.d/ --out data/ --listen 0.0.0.0:9090 --reload-every 1m
+cargo run -p reso-ingest -- reset --server mls-one --resource Member --out data/
+cargo run -p reso-ingest -- replay --server mls-one --resource Property --after 2026-11-01T00:00:00Z --out data/
+cargo run -p reso-ingest -- history --out data/ --server mls-one --limit 5
 cargo run -p reso-ingest -- purge --server mls-one --out data/                          # dry run
 cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J. Smith"
 ```
@@ -34,11 +38,14 @@ cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J
   `--from`/`--to` window (see [Backfill](#backfill)).
 - **`media`** downloads the files that the top-level `Media` records from `sync` point at (see
   [Media files](#media-files)).
-- **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums.
+- **`discover`** prints each server's `$metadata` model as JSON: resources, keys, properties, enums. With `--starter`
+  it onboards a server instead (see [Operating many feeds](#operating-many-feeds)).
 - **`sync --metrics-file PATH`** also writes the run's metrics (see Metrics below).
 - **`status`** shows the saved checkpoints and the last run's manifest.
 - **`serve`** runs as a daemon: each resource syncs on its own interval, and health, metrics and status endpoints answer
   over HTTP (see [Daemon mode](#daemon-mode-serve)).
+- **`reset`**, **`replay`** and **`history`** clear or move back one feed's checkpoint and list past runs (see
+  [Operating many feeds](#operating-many-feeds)).
 - **`purge`** deletes one server's data files, media files and state when its licence ends (see
   [Purging a source](#purging-a-source)).
 
@@ -105,7 +112,8 @@ finished, held deletes, schema changes, check findings). A test checks that both
 
 ## Configuration
 
-One TOML file lists the servers; [servers.example.toml](servers.example.toml) shows every setting. Secrets are never
+One TOML file lists the servers, or a directory of them (see [Operating many feeds](#operating-many-feeds));
+[servers.example.toml](servers.example.toml) shows every setting. Secrets are never
 written in it: `token_env`, `client_id_env` and `client_secret_env` name the environment variables that hold them, and
 a file with a literal secret is rejected. Each can instead be read from a file with `token_file`, `client_id_file` or
 `client_secret_file` (for example a Kubernetes Secret mounted as files); surrounding whitespace, such as a final
@@ -465,7 +473,9 @@ only actions the IAM policy below already grants (`s3:ListBucket`, `s3:GetObject
 `cron` starting `sync` syncs every resource at the same pace. `serve` is one long-running process that gives each
 resource its own pace: Property every two minutes, Member every hour. A resource is scheduled when it has an
 `interval` (`"500ms"`, `"30s"`, `"2m"`, `"1h"`, `"1d"`); a server's own `interval` covers the resources in its `include`
-list that have none. Nothing is scheduled by default, and `serve` refuses to start when no resource has an interval.
+list that have none. Nothing is scheduled by default, and `serve` refuses to start when no resource has an interval
+(a paused one counts, so a daemon can start with every feed paused). Feeds can be added, removed, paused and resumed
+while it runs (see [Operating many feeds](#operating-many-feeds)).
 
 ```toml
 [[server]]
@@ -500,12 +510,60 @@ The endpoints speak plain HTTP with no authentication and no TLS: bind to a priv
 |---|---|
 | `/healthz` | `200` while the process is up |
 | `/readyz` | `200` when state can be saved (a probe key `.readyz` is written and deleted), `503` when not (config is read before the server starts, so a bad one never gets this far) |
-| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures` and `reso_ingest_feed_interval_seconds` (labels `server`, `resource`); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
-| `/status` | JSON: `started_at` and, per feed, `state` (`waiting`, `queued`, `running`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
+| `/metrics` | Prometheus text: the numbers under Metrics for each feed's last sync, plus `reso_ingest_feed_runs_total`, `reso_ingest_feed_failed_runs_total`, `reso_ingest_feed_consecutive_failures`, `reso_ingest_feed_interval_seconds` and `reso_ingest_feed_paused` (labels `server`, `resource`); with `--media`, `reso_ingest_media_files_total` (also `outcome`), `reso_ingest_media_bytes_total`, `reso_ingest_media_pending` and `reso_ingest_media_index_ok` per feed |
+| `/status` | JSON: `started_at`, `reloads`, `last_reload`, `last_reload_error` and, per feed, `state` (`waiting`, `queued`, `running`, `paused`), `interval_secs`, `runs`, `failed_runs`, `consecutive_failures`, `last_started`, `last_finished`, `last_success`, `last_error`, `last_records`, `last_deletes`, `next_run_in_secs` |
 
 Unconfirmed against a real server (#32): everything here is tested against mock servers only. Feeds of one server
 share its client, so `reso_ingest_rate_limit_used` is per server, read live from that client at each scrape; the
 per-feed request counters count each feed's own requests.
+
+## Operating many feeds
+
+**A directory of files.** `--config` takes a directory as well as a file: every `*.toml` file in it is read, in name
+order (subdirectories and other files are ignored), and together they make one configuration, so each server can live
+in its own file (`servers.d/mls-one.toml`). A server defined in two files is an error, and so is a top-level setting
+(`max_concurrent_servers`, `webhook_url_env`) set in more than one file; errors name the file.
+
+**Pausing.** `paused = true` on a `[[server]]` or a `[server.resources.X]` table leaves it out: `sync` skips it with a
+line on stderr and never contacts a paused server, and `serve` keeps the feed in `/status` (state `paused`, counters
+kept) without syncing it.
+
+**Reloading `serve`.** `serve` reads its configuration again on SIGHUP, and every `--reload-every` interval with that
+option (`--reload-every 1m`, handy where sending a signal is awkward, such as a Kubernetes ConfigMap). Feeds added to
+the configuration start, removed ones stop after their current page, paused ones stop and resumed ones start again; an
+`interval` change restarts that feed alone, and any other change to a server's settings (URL, auth, limits, filters)
+rebuilds its client and restarts its feeds. A stopped feed always finishes its page before its replacement starts. A
+configuration that does not load is logged and shown in `/status` as `last_reload_error`, and the daemon keeps running
+the old one; `--server` given to `serve` still applies. Options given on the command line (`--deletes`, `--format`, ...)
+are not reloaded.
+
+**Admin commands.** These change one feed's checkpoint while holding its lease, so they refuse while a `sync` or
+`serve` is pulling that feed (stop the feed with `paused = true`, or wait). They take `--out`, `--state` and the bucket
+options, not `--config`.
+
+- `reset --server S --resource R` deletes the checkpoint, so the next sync is a full load. It prints the checkpoint it
+  removed; exit `1` when there was none.
+- `replay --server S --resource R --after TIME` sets the checkpoint to an RFC 3339 time with no key: the next sync pulls
+  again every record modified strictly after it. It refuses a time later than the saved checkpoint (that would skip
+  records); with no checkpoint it sets where the first sync starts.
+- To pull a closed window again without touching the checkpoint, use `sync --backfill --from --to` (see
+  [Backfill](#backfill)).
+- `history [--server S] [--resource R] [--limit N]` lists past runs from their manifests, newest first (default 10
+  runs), one line per feed: records, deletes and `ok`, `interrupted` or `FAILED: error`, plus failed servers. With a
+  bucket it reads the manifests in `<prefix>/data/`. `serve` keeps a manifest only for syncs that wrote or failed
+  something, so quiet polls are not listed.
+
+**Onboarding a server.** Write a draft with the new server's `name`, `base_url` and `[server.auth]` (and `filter` or
+`dataset_id` if the vendor needs them), export its secrets, and run `discover --config draft.toml --starter`. It reads
+`$metadata` and one record of each resource (`$top=1&$count=true`) with those credentials, then prints a starter block:
+an `include` list of the resources that are readable and have a `ModificationTimestamp`, and a comment per resource with
+its key and record count or why it was left out (for example a 403 for a resource the licence does not cover). Exit `1`
+when `$metadata` cannot be read or no resource is readable. Servers do not publish their rate limits in a standard way,
+so the block leaves `[server.limits]` for the vendor's numbers; copy the draft's `[server.auth]` table into it (secrets
+are never printed).
+
+Unconfirmed against a real server (#32): onboarding's `$top=1&$count=true` probe and the 403 a vendor sends for an
+unlicensed resource are tested against mock servers only.
 
 ## Containers and deployment
 
@@ -538,9 +596,9 @@ Examples in [`deploy/`](../deploy/):
 - [`kubernetes/cronjob.yaml`](../deploy/kubernetes/cronjob.yaml): one-shot `sync` on a schedule, `concurrencyPolicy:
   Forbid`, no retries (the next schedule continues from the checkpoints).
 - [`kubernetes/deployment.yaml`](../deploy/kubernetes/deployment.yaml): `serve` with one replica and `Recreate`
-  (one writer per volume), liveness on `/healthz`, readiness on `/readyz`, and a Service for `/metrics` and `/status`.
+  (one writer per volume), liveness on `/healthz`, readiness on `/readyz`, and a Service for `/metrics` and `/status`; `--reload-every 1m` picks up an edited ConfigMap.
 - [`systemd/reso-ingest.service`](../deploy/systemd/reso-ingest.service): `serve` on a single host, without containers,
-  with `DynamicUser` and a state directory.
+  with `DynamicUser` and a state directory; `systemctl reload` sends SIGHUP to reload the configuration.
 
 All of them set a stop grace period (120 s) longer than one page request, so a SIGTERM ends with output and checkpoints
 consistent (see [Shutdown](#shutdown)). Smoke-tested against RESO's reference server in a local

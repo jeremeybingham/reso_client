@@ -14,6 +14,8 @@ After=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/reso-ingest serve --config /etc/reso-ingest/servers.toml --out /var/lib/reso-ingest --listen 127.0.0.1:9090 --deletes
+# `systemctl reload reso-ingest` after editing servers.toml: serve reads it again on SIGHUP
+ExecReload=/bin/kill -HUP $MAINPID
 EnvironmentFile=/etc/reso-ingest/env
 Environment=RUST_LOG=reso_ingest=info,reso_client=warn
 # On SIGTERM each feed stops after its current page and serve exits 0
