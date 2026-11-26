@@ -114,6 +114,11 @@ struct Args {
     seed: u64,
 }
 
+// Same allocator as the binary, so the sync child measures what `reso-ingest` would run
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     if raw.get(1).map(String::as_str) == Some("child") {
