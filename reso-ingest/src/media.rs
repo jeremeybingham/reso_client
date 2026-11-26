@@ -673,6 +673,33 @@ mod tests {
     fn extension_from_content_type() {
         assert_eq!(extension_for("image/JPEG; charset=binary"), Some("jpg"));
         assert_eq!(extension_for("application/octet-stream"), None);
+        for (mime, ext) in [
+            ("image/pjpeg", "jpg"),
+            ("image/png", "png"),
+            ("image/gif", "gif"),
+            ("image/webp", "webp"),
+            ("image/tiff", "tif"),
+            ("image/bmp", "bmp"),
+            ("image/heic", "heic"),
+            ("image/avif", "avif"),
+            ("image/svg+xml", "svg"),
+            ("application/pdf", "pdf"),
+            ("video/mp4", "mp4"),
+            ("video/quicktime", "mov"),
+            ("video/webm", "webm"),
+            ("audio/mpeg", "mp3"),
+            ("text/plain; charset=utf-8", "txt"),
+            ("text/rtf", "rtf"),
+            ("application/rtf", "rtf"),
+            ("application/msword", "doc"),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "docx",
+            ),
+        ] {
+            assert_eq!(extension_for(mime), Some(ext), "{mime}");
+        }
+        assert_eq!(extension_for(""), None);
     }
 
     fn record(key: &str, url: &str, stamp: Option<&str>) -> Value {

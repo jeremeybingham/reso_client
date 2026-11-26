@@ -1004,6 +1004,16 @@ async fn bucket_errors_name_the_object() {
         "a name that is not a path",
         sink.exists("a//b").map(|_| String::new()),
     );
+    check("sink list", sink.list().map(|_| String::new()));
+    check(
+        "get_file",
+        sink.get_file("small.ndjson", &dir.join("got"))
+            .map(|_| String::new()),
+    );
+    check(
+        "sink delete",
+        sink.delete("small.ndjson").map(|_| String::new()),
+    );
 
     // Past the single-PUT size the upload is multipart: an absent object, then a refused start
     head.store(404, Ordering::SeqCst);

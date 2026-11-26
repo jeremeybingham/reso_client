@@ -94,3 +94,62 @@ where
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn formats_parse_in_any_case() {
+        assert_eq!("text".parse::<LogFormat>(), Ok(LogFormat::Text));
+        assert_eq!("Text".parse::<LogFormat>(), Ok(LogFormat::Text));
+        assert_eq!("JSON".parse::<LogFormat>(), Ok(LogFormat::Json));
+        let err = "XML".parse::<LogFormat>().unwrap_err();
+        assert!(
+            err.contains("`xml`") && err.contains("text or json"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn text_lines_are_not_json_and_respect_the_filter() {
+        let buf = Buffer::default();
+        let writer = buf.clone();
+        let subscriber = log_subscriber(LogFormat::Text, EnvFilter::new("info"), move || {
+            writer.clone()
+        });
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(server = "mls", "hello");
+            tracing::debug!("hidden");
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("hello") && text.contains("server=\"mls\""),
+            "{text}"
+        );
+        assert!(!text.contains("hidden"), "{text}");
+        assert!(!text.trim_start().starts_with('{'), "{text}");
+    }
+
+    #[test]
+    fn env_filter_always_gives_a_filter() {
+        // Whatever RUST_LOG holds (unset, valid or invalid), a filter comes back
+        let _ = env_filter().to_string();
+    }
+}

@@ -257,3 +257,46 @@ async fn sync_without_media_flag_downloads_nothing() {
     assert!(!out.join("media").exists());
     assert!(!stdout.contains("media manifest"));
 }
+
+/// Top-level `Media` pages: records without a key or a URL are counted, and a file already
+/// fetched is not fetched again when its unchanged record comes back
+#[tokio::test]
+async fn top_level_media_pages_count_records_without_key_or_url() {
+    use reso_client::{ClientConfig, DownloadConfig, ResoClient};
+    use reso_ingest::{PageMedia, MEDIA_RESOURCE};
+
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"jpeg".to_vec(), "image/jpeg"))
+        .mount(&srv)
+        .await;
+    let dir = std::env::temp_dir().join(format!("reso-page-media-top-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let state: Arc<dyn reso_ingest::StateStore> = Arc::new(FileStateStore::new(dir.join("state")));
+    let client = ResoClient::with_config(ClientConfig::new(srv.uri(), "t")).unwrap();
+    let url = format!("{}/a.jpg", srv.uri());
+    let batch = [
+        json!({"MediaKey": "A", "MediaURL": url, "MediaModificationTimestamp": "2026-01-01T00:00:00Z"}),
+        json!({"MediaURL": url}),
+        json!({"MediaKey": "B"}),
+    ];
+    let mut media = PageMedia::new(
+        &client,
+        "mls",
+        DownloadConfig::default(),
+        Arc::clone(&state),
+        &dir.join("media"),
+        None,
+    )
+    .await
+    .unwrap();
+    media.page(MEDIA_RESOURCE, &batch).await.unwrap();
+    media.page(MEDIA_RESOURCE, &batch[..1]).await.unwrap();
+    let report = media.finish();
+    assert_eq!(report.records, 4);
+    assert_eq!(report.records_without_key, 1);
+    assert_eq!(report.without_url, 1);
+    assert_eq!(report.downloaded, 1, "{report:?}");
+    assert_eq!(srv.received_requests().await.unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1116,6 +1116,39 @@ mod tests {
     }
 
     #[test]
+    fn gcs_clients_build_offline_and_debug_shows_only_the_location() {
+        // Building sends nothing; credentials are looked up on the first request
+        let o = S3Options {
+            provider: Provider::Gcs,
+            endpoint: Some("http://127.0.0.1:1".into()),
+            allow_http: true,
+            ..S3Options::new("b", "pre")
+        };
+        let state = S3StateStore::new(&o).unwrap();
+        assert!(matches!(state.versions, Versions::Generation(Some(_))));
+        assert_eq!(state.location("k"), "gs://b/pre/k");
+        let debug = format!("{state:?}");
+        assert!(
+            debug.contains("S3StateStore") && debug.contains("gs://b/pre"),
+            "{debug}"
+        );
+        let sink = S3FileSink::new(&o).unwrap();
+        let debug = format!("{sink:?}");
+        assert!(
+            debug.contains("S3FileSink") && debug.contains("gs://b/pre"),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_prefix_is_refused() {
+        let err = S3StateStore::with_store(Arc::new(InMemory::new()), "a//b", "s3://t".into())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid prefix"), "{err}");
+    }
+
+    #[test]
     fn gcs_options_name_a_gs_url() {
         let o = S3Options {
             provider: Provider::Gcs,
