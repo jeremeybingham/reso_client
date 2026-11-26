@@ -528,6 +528,12 @@ configuration file. The pages have no authentication either; `serve --ui` logs a
 loopback, private or link-local address. They are built in with the `ui` feature (on by default; it adds no
 dependency); without it `--ui` is a start-up error.
 
+**Link to Grafana (`--grafana-url URL`).** With `--ui` and the Prometheus + Grafana kit in `deploy/observability/`,
+`--grafana-url http://127.0.0.1:3000` adds a History column on `/` and a History line on each feed's page that open
+the kit's dashboard filtered to that feed (`URL/d/reso-ingest-serve?var-server=S&var-resource=R`), so the pages show
+now and Grafana shows the history. The URL is Grafana's root (a sub-path such as `https://host/grafana` works) and
+must start with `http://` or `https://`; without `--ui` the option is refused.
+
 Unconfirmed against a real server (#32): everything here is tested against mock servers only. Feeds of one server
 share its client, so `reso_ingest_rate_limit_used` is per server, read live from that client at each scrape; the
 per-feed request counters count each feed's own requests.

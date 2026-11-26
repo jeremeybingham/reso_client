@@ -207,6 +207,12 @@ enum Command {
         /// Needs the `ui` feature (on by default).
         #[arg(long)]
         ui: bool,
+        /// With --ui, link each feed to Grafana's reso-ingest dashboard filtered to that feed
+        ///
+        /// Grafana's root URL, e.g. http://127.0.0.1:3000; the dashboard is the one in
+        /// deploy/observability (uid reso-ingest-serve).
+        #[arg(long, value_name = "URL", requires = "ui")]
+        grafana_url: Option<String>,
         #[command(flatten)]
         storage: StorageArgs,
     },
@@ -740,6 +746,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
             format,
             partition,
             ui,
+            grafana_url,
             storage,
         } => {
             let args = Args {
@@ -757,7 +764,7 @@ async fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write, shutdown: S
                 storage,
                 ..Args::default()
             };
-            serve(args, listen, reload_every, ui, err, shutdown).await
+            serve(args, listen, reload_every, ui, grafana_url, err, shutdown).await
         }
         Command::Media {
             config,
@@ -971,6 +978,7 @@ async fn serve(
     listen: std::net::SocketAddr,
     reload_every: Option<std::time::Duration>,
     ui: bool,
+    grafana_url: Option<String>,
     err: &mut dyn Write,
     shutdown: Shutdown,
 ) -> i32 {
@@ -999,6 +1007,7 @@ async fn serve(
     options.format = args.format;
     options.partition = args.partition;
     options.ui = ui;
+    options.grafana_url = grafana_url;
     match Daemon::start(config.clone(), options, shutdown.clone()).await {
         Ok(daemon) => {
             let _ = writeln!(err, "listening on http://{}", daemon.local_addr());

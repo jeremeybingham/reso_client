@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ResoRateLimitHigh`, with runbooks in `docs/OPERATIONS.md`) plus the existing rules, and a provisioned dashboard
   filtered by server and resource. It runs natively (`setup.sh install`: pinned, checksum-verified releases as
   systemd user units) or with `docker compose`.
+- `reso-ingest`: `serve --ui --grafana-url URL` (`ServeOptions::grafana_url`) links each feed on `/` and its feed page
+  to the kit's dashboard filtered to that feed (`/d/reso-ingest-serve?var-server=…&var-resource=…`). Without `--ui`, or
+  with a URL that is not `http://` or `https://`, it is a start-up error (#161).
 - `reso-ingest`: `serve` exports `reso_ingest_feed_last_success_timestamp_seconds` per feed. Under `serve`,
   `reso_ingest_last_success_timestamp_seconds` is never set, because the daemon has no run end time.
 - `reso-client`: `ReplicationRun::next_batch_raw` returns `RawRecords`, each record's JSON text as the server sent
