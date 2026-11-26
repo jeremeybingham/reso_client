@@ -137,7 +137,14 @@ impl Page {
             })
             .collect();
         let page = Self::from_parts(Vec::new(), JsonValue::Object(rest), headers, url);
-        Ok((page, RawRecords { text, spans }))
+        Ok((
+            page,
+            RawRecords {
+                text,
+                spans,
+                known: None,
+            },
+        ))
     }
 
     fn from_parts(
@@ -203,6 +210,8 @@ impl Page {
 pub struct RawRecords {
     text: String,
     spans: Vec<Range<usize>>,
+    /// One member already found in every record (the replication's key), with its value's span
+    known: Option<(String, Vec<Range<usize>>)>,
 }
 
 impl RawRecords {
@@ -232,7 +241,11 @@ impl RawRecords {
             text.push_str(t.as_ref());
             spans.push(start..text.len());
         }
-        Self { text, spans }
+        Self {
+            text,
+            spans,
+            known: None,
+        }
     }
 
     /// Number of records
@@ -253,6 +266,64 @@ impl RawRecords {
     /// The text of each record, in order
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
         self.spans.iter().map(|r| &self.text[r.clone()])
+    }
+
+    /// The value of top-level member `name` of record `i`, as JSON text; `None` when the record
+    /// does not have it
+    ///
+    /// Like [`record_fields`] on [`get(i)`](Self::get), but records from
+    /// [`next_batch_raw`](crate::ReplicationRun::next_batch_raw) already had their key member
+    /// found by the order check, so reading the key again costs no scan of the record (#162).
+    ///
+    /// # Errors
+    ///
+    /// [`ResoError::Parse`] when `i` is past the end or the record is not a JSON object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::RawRecords;
+    /// let records = RawRecords::from_texts([r#"{"ListingKey":"L1","City":"Austin"}"#]);
+    /// assert_eq!(records.field(0, "City")?.unwrap().get(), r#""Austin""#);
+    /// assert!(records.field(0, "Zip")?.is_none());
+    /// # Ok::<(), reso_client::ResoError>(())
+    /// ```
+    pub fn field(&self, i: usize, name: &str) -> Result<Option<&RawValue>> {
+        if let Some((known, spans)) = &self.known {
+            if known == name {
+                if let Some(span) = spans.get(i) {
+                    return serde_json::from_str(&self.text[span.clone()])
+                        .map(Some)
+                        .map_err(parse_error);
+                }
+            }
+        }
+        let text = self.get(i).ok_or_else(|| {
+            ResoError::Parse(format!("No record {i} in a batch of {}", self.len()))
+        })?;
+        let [value] = record_fields(text, [name])?;
+        Ok(value)
+    }
+
+    /// Address of the batch's text, for spans of slices of it
+    pub(crate) fn text_start(&self) -> usize {
+        self.text.as_ptr() as usize
+    }
+
+    /// Remember where member `name`'s value is in every record (`spans`: one per record, into
+    /// the batch's text, from [`text_start`](Self::text_start)) so [`field`](Self::field) need
+    /// not scan for it again
+    ///
+    /// Ignored unless there is one span per record and each lies inside its record.
+    pub(crate) fn remember(&mut self, name: &str, spans: Vec<Range<usize>>) {
+        let fits = spans.len() == self.spans.len()
+            && spans
+                .iter()
+                .zip(&self.spans)
+                .all(|(v, r)| v.start >= r.start && v.end <= r.end);
+        if fits {
+            self.known = Some((name.to_string(), spans));
+        }
     }
 
     /// Parse every record into a `serde_json::Value`, in order

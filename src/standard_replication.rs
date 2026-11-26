@@ -359,7 +359,7 @@ impl ReplicationRun<'_> {
                     .client
                     .build_url(&self.spec.path_and_query(self.checkpoint.as_ref())),
             };
-            let (page, raw) = if keep_raw {
+            let (page, mut raw) = if keep_raw {
                 self.client.fetch_page_raw(&url).await?
             } else {
                 (self.client.fetch_page(&url).await?, RawRecords::default())
@@ -385,10 +385,18 @@ impl ReplicationRun<'_> {
             }
 
             if keep_raw {
-                self.accept(
-                    raw.iter()
-                        .map(|text| fields_of_text(text, &ts_field, &key_field)),
-                )?;
+                // The keys found here are kept, so a writer reading them again need not scan
+                let base = raw.text_start();
+                let mut keys = Vec::with_capacity(len);
+                self.accept(raw.iter().map(|text| {
+                    let fields = fields_of_text(text, &ts_field, &key_field)?;
+                    if let KeyRef::Raw(key) = fields.1 {
+                        let start = key.get().as_ptr() as usize - base;
+                        keys.push(start..start + key.get().len());
+                    }
+                    Ok(fields)
+                }))?;
+                raw.remember(&key_field, keys);
             } else {
                 self.accept(
                     page.records

@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use reso_client::{record_fields, Metadata, QueryBuilder, RawRecords, ResoClient};
+use reso_client::{Metadata, QueryBuilder, RawRecords, ResoClient};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -197,10 +197,10 @@ impl CheckingWriter<'_> {
     /// [`check`](Self::check) on the records' text: reads only the key member of each
     fn check_raw(&mut self, raw: &RawRecords) {
         let mut seen = HashSet::with_capacity(raw.len());
-        for text in raw.iter() {
-            // The replication already read each record as an object; a record it let through
-            // without the member has no key to compare
-            let Ok([Some(key)]) = record_fields(text, [self.key_field.as_str()]) else {
+        for i in 0..raw.len() {
+            // The replication already found each record's key (no scan here); a record it let
+            // through without the member has no key to compare
+            let Ok(Some(key)) = raw.field(i, &self.key_field) else {
                 continue;
             };
             if let Some(key) = SeenKey::of_raw(key) {

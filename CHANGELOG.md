@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `reso-client`: `ReplicationRun::next_batch_raw` returns `RawRecords`, each record's JSON text as the server sent
   it, without parsing the records into `serde_json::Value`s (#162, lead 4); the order check and checkpoint read only
   the timestamp and key members. `RawRecords::values` parses them when needed, `RawRecords::from_texts` builds one,
-  and `record_fields` reads a few top-level members of a record's text without parsing the rest. `next_batch` is
-  unchanged. Turns on `serde_json`'s `raw_value` feature (no new crate).
+  and `record_fields` reads a few top-level members of a record's text without parsing the rest.
+  `RawRecords::field` reads one member; for the key field it reuses the spans the replication already found, without
+  another scan. `next_batch` is unchanged. Turns on `serde_json`'s `raw_value` feature (no new crate).
 - `reso-ingest`: `RecordWriter::write_raw_batch(raw, fetched_at)` (default: parse, then `write_batch`), and `sync`
   uses it. `NdjsonWriter` copies each record's text; the repeated-key check and flag deletes read only their members
   from it, so an NDJSON sync builds no `Value` per record. Parquet and `sync --media` parse the records as before. In
