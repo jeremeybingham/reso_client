@@ -822,3 +822,46 @@ async fn status_reports_a_last_run_or_manifest_that_is_not_json() {
     assert_eq!(r.code, 1, "{}{}", r.out, r.err);
     assert!(r.err.contains("last.json is not valid JSON"), "{}", r.err);
 }
+
+#[tokio::test]
+async fn sync_sends_the_configured_user_agent_on_every_request() {
+    std::env::set_var("CLI_TEST_TOKEN_UA", SECRET);
+    let srv = rich_server().await;
+    let dir = TempDir::new("user-agent");
+    let text = bearer_server("mls", &srv.uri(), "CLI_TEST_TOKEN_UA", "")
+        + "[server.network]\nuser_agent = \"acme-ingest/1.0 (data@acme.example)\"\n";
+    let config = write_text_config(&dir, &text);
+    let out = dir.path("out");
+    let r = cli(&["sync", "--config", &config, "--out", out.to_str().unwrap()]).await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+
+    let requests = srv.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    for request in requests {
+        assert_eq!(
+            request.headers.get("user-agent").unwrap(),
+            "acme-ingest/1.0 (data@acme.example)",
+            "{}",
+            request.url
+        );
+    }
+}
+
+#[tokio::test]
+async fn sync_sends_the_reso_ingest_user_agent_by_default() {
+    std::env::set_var("CLI_TEST_TOKEN_UA2", SECRET);
+    let srv = rich_server().await;
+    let dir = TempDir::new("user-agent-default");
+    let config = write_text_config(
+        &dir,
+        &bearer_server("mls", &srv.uri(), "CLI_TEST_TOKEN_UA2", ""),
+    );
+    let out = dir.path("out");
+    let r = cli(&["sync", "--config", &config, "--out", out.to_str().unwrap()]).await;
+    assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    let requests = srv.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].headers.get("user-agent").unwrap(),
+        reso_ingest::DEFAULT_USER_AGENT
+    );
+}

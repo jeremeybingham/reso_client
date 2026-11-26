@@ -9,6 +9,7 @@ use tracing::debug;
 
 use crate::auth::{Auth, ClientCredentials, CredentialTransport, TokenProvider};
 use crate::error::{ResoError, Result};
+use crate::network::NetworkOptions;
 use crate::retry::{
     is_retryable_status, parse_retry_after, ClientStats, Counters, Limiter, RateLimit, RetryPolicy,
 };
@@ -77,6 +78,10 @@ pub struct ClientConfig {
 
     /// Client-side request and byte ceilings (default: none)
     pub rate_limit: RateLimit,
+
+    /// Proxy, extra CA certificates, User-Agent and connection pool (default: proxy environment
+    /// variables honoured, public roots, `reso-client/<version>`); see [`NetworkOptions`]
+    pub network: NetworkOptions,
 }
 
 impl std::fmt::Debug for ClientConfig {
@@ -88,6 +93,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("timeout", &self.timeout)
             .field("retry", &self.retry)
             .field("rate_limit", &self.rate_limit)
+            .field("network", &self.network)
             .finish()
     }
 }
@@ -109,6 +115,13 @@ impl ClientConfig {
     /// - `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_RATE_PER_DAY`, `RESO_BYTES_PER_HOUR`,
     ///   `RESO_BYTES_PER_DAY` (optional) - client-side
     ///   [`RateLimit`] (default: none)
+    /// - `RESO_PROXY` (optional) - proxy URL for every request; without it `HTTPS_PROXY`,
+    ///   `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` are honoured
+    /// - `RESO_NO_PROXY` (optional) - hosts that bypass `RESO_PROXY` (`NO_PROXY` format)
+    /// - `RESO_CA_FILE` (optional) - PEM file of extra trusted CA certificates
+    /// - `RESO_USER_AGENT` (optional) - the `User-Agent` header (default `reso-client/<version>`)
+    ///
+    /// See [`NetworkOptions`].
     ///
     /// # Examples
     ///
@@ -149,6 +162,21 @@ impl ClientConfig {
             rate_limit = rate_limit.bytes_per_day(n);
         }
 
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let mut network = NetworkOptions::default();
+        if let Some(proxy) = var("RESO_PROXY") {
+            network = network.with_proxy(proxy);
+        }
+        if let Some(hosts) = var("RESO_NO_PROXY") {
+            network = network.with_no_proxy(hosts);
+        }
+        if let Some(path) = var("RESO_CA_FILE") {
+            network = network.with_ca_file(path)?;
+        }
+        if let Some(agent) = var("RESO_USER_AGENT") {
+            network = network.with_user_agent(agent);
+        }
+
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth,
@@ -158,6 +186,7 @@ impl ClientConfig {
                 number("RESO_MAX_RETRIES").unwrap_or(0).min(u32::MAX as u64) as u32
             ),
             rate_limit,
+            network,
         })
     }
 
@@ -196,6 +225,7 @@ impl ClientConfig {
             timeout: Duration::from_secs(30),
             retry: RetryPolicy::default(),
             rate_limit: RateLimit::default(),
+            network: NetworkOptions::default(),
         }
     }
 
@@ -260,6 +290,23 @@ impl ClientConfig {
     /// ```
     pub fn with_rate_limit(mut self, rate_limit: RateLimit) -> Self {
         self.rate_limit = rate_limit;
+        self
+    }
+
+    /// Set the proxy, extra CA certificates, User-Agent and connection pool; see [`NetworkOptions`]
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use reso_client::{ClientConfig, NetworkOptions};
+    /// let config = ClientConfig::new("https://api.mls.com/odata", "token").with_network(
+    ///     NetworkOptions::default()
+    ///         .with_proxy("http://proxy.corp.example:3128")
+    ///         .with_user_agent("acme-ingest/1.0"),
+    /// );
+    /// ```
+    pub fn with_network(mut self, network: NetworkOptions) -> Self {
+        self.network = network;
         self
     }
 }
@@ -351,10 +398,7 @@ impl ResoClient {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn with_config(config: ClientConfig) -> Result<Self> {
-        let http_client = Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(|e| ResoError::Config(format!("Failed to create HTTP client: {}", e)))?;
+        let http_client = config.network.client(config.timeout)?;
 
         Ok(Self {
             tokens: TokenProvider::new(config.auth.clone()),
@@ -398,6 +442,11 @@ impl ResoClient {
     /// The token provider, shared with a [`Downloader`](crate::Downloader)
     pub(crate) fn tokens(&self) -> &TokenProvider {
         &self.tokens
+    }
+
+    /// The network settings, shared with a [`Downloader`](crate::Downloader)
+    pub(crate) fn network(&self) -> &NetworkOptions {
+        &self.config.network
     }
 
     /// The HTTP client used for API and token requests

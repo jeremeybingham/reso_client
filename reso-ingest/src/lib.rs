@@ -92,7 +92,7 @@ pub use checkpoint::{CheckpointInfo, CheckpointStore};
 pub use checks::{count_warning, CheckingWriter, SchemaSnapshot};
 pub use config::{
     parse_interval, AuthConfig, BackfillConfig, Config, DeletesConfig, LimitsConfig, MediaConfig,
-    ResourceConfig, SecretSource, ServerConfig,
+    NetworkConfig, ResourceConfig, SecretSource, ServerConfig, DEFAULT_USER_AGENT,
 };
 pub use deletes::{reconcile_deletes, DeleteLimits, DeleteTarget, EventFeed, FlagDeleteWriter};
 pub use error::IngestError;

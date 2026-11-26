@@ -288,10 +288,8 @@ impl ResoClient {
     ///
     /// [`ResoError::Config`] when the HTTP client cannot be built.
     pub fn downloader(&self, config: DownloadConfig) -> Result<Downloader<'_>> {
-        let http = Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .map_err(|e| ResoError::Config(format!("Failed to create HTTP client: {}", e)))?;
+        // File requests go through the same proxy, CAs and User-Agent as the API's
+        let http = self.network().client(config.timeout)?;
         Ok(Downloader {
             client: self,
             http,

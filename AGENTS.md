@@ -60,7 +60,7 @@ cargo run --example test_connectivity      # examples need a .env (see example.e
 - **Public API.** Every public item has a `///` doc comment, with an example where useful. Breaking changes are allowed
   before 1.0 but are recorded in `CHANGELOG.md` with a version bump.
 - **No new dependencies without discussion.** Keep `reso-client` lean (its XML parser is `roxmltree`; OAuth2 and rate
-  limiting are hand-written); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, `reqwest` for the webhook, `axum` for `serve`, `sha2` for purge records, `object_store` (`aws` and `gcp`) behind the `s3` feature, and
+  limiting are hand-written; its only test-only TLS crate is `rustls`, already in the tree via reqwest); heavier ones belong in `reso-ingest` (`clap`, `toml`, `tracing-subscriber`, `reqwest` for the webhook, `axum` for `serve`, `sha2` for purge records, `object_store` (`aws` and `gcp`) behind the `s3` feature, and
   `arrow`/`parquet` behind the `parquet` feature).
 - Every bug fixed gets a regression test. Docs change in the same commit as the behaviour they describe.
 
@@ -76,11 +76,12 @@ src/metadata.rs     Metadata model parsed from $metadata (roxmltree): entity set
 src/paging.rs       Page, next-link reading (body, `next` and `Link` headers), relative resolution
 src/replication.rs  ReplicationResponse, ReplicationQuery (Bridge `/replication`, vendor mode)
 src/standard_replication.rs  StandardReplication, ReplicationRun, Checkpoint (RESO-standard, keyset on timestamp+key)
+src/network.rs      NetworkOptions: proxy, extra CA certificates, User-Agent, connection pool (#91); used by the client and Downloader
 src/retry.rs        RetryPolicy (backoff, Retry-After), RateLimit and its limiter, ClientStats counters
 src/error.rs        ResoError and the Result alias
 reso-ingest/        second workspace crate (unpublished); README.md documents the command
   src/config.rs     Config: multi-server TOML, secrets read from the variables (`*_env`) or files (`*_file`) named; server filter,
-                    [server.resources.<Name>] (ResourceConfig), flag-field deletes (DeletesConfig), limits, media
+                    [server.resources.<Name>] (ResourceConfig), flag-field deletes (DeletesConfig), limits, media, network (NetworkConfig)
   src/secrets.rs    ClientHandle: a server's client, rebuilt when its secrets change; retry once after a 401 (#92)
   src/runner.rs     run_servers: one independent task per server, concurrency cap
   src/output.rs     RecordWriter, NdjsonWriter: tagged lines, size rotation, never overwrite; reserve_run_id (.run.<id>)
@@ -121,6 +122,7 @@ tests/              queries_tests.rs (URL building), client_http_tests.rs (wirem
                     standard_replication_tests.rs (fake RESO server: ties, caps, ignored $orderby), auth_tests.rs (token endpoint, 401 retry),
                     download_tests.rs (conditional GET, .part files, retries, token scope),
                     retry_tests.rs (retries, Retry-After, counters; limiter timing is in src/retry.rs with a paused clock),
+                    network_tests.rs (User-Agent, a small forward proxy, HTTPS with the test CA in fixtures/tls, pool; #[serial]),
                     auth_logs.rs (no secrets in tracing output; own binary),
                     live_reference_server.rs (`#[ignore]`, needs RESO_LIVE_URL)
 Dockerfile          reso-ingest image: static musl binary on scratch, `parquet` and `s3` features, CA bundle for S3 (CI: .github/workflows/container.yml)
