@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Planned as 0.4.0. Both crates are released together and share version numbers from now on. `reso-ingest` is
+## [0.4.0] - 2026-11-26
+
+Both crates are released together and share version numbers from now on. `reso-ingest` is
 published for the first time; its entries below cover everything since 0.3.0, while it was in the repository but
 unpublished. Neither crate has been run against a vendor server yet
 ([#32](https://github.com/jeremeybingham/reso-rs/issues/32), [#76](https://github.com/jeremeybingham/reso-rs/issues/76)):
@@ -555,7 +557,8 @@ release and its entries are listed separately below.
 ### Security
 - Token redaction in debug output to prevent accidental exposure in logs
 
-[Unreleased]: https://github.com/jeremeybingham/reso-rs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jeremeybingham/reso-rs/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jeremeybingham/reso-rs/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jeremeybingham/reso-rs/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jeremeybingham/reso-rs/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jeremeybingham/reso-rs/compare/v0.1.0...v0.2.0

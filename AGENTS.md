@@ -4,7 +4,7 @@ Guidance for AI coding agents and people working in this repository (tool-neutra
 
 This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in two Rust crates:
 
-- `reso-client` (crates.io, pre-1.0; 0.3.0 published, 0.4.0 ready to release): a client for one server: queries, standard paging and replication,
+- `reso-client` (crates.io, pre-1.0; 0.4.0 published): a client for one server: queries, standard paging and replication,
   bearer token or OAuth2 client credentials, retries and rate limits, a parsed `$metadata` model, file downloads
   (`Downloader`) with their own limits.
 - `reso-ingest` (`reso-ingest/`, first published at 0.4.0; it shares `reso-client`'s version numbers): pulls every resource from many servers into tagged NDJSON or Parquet
