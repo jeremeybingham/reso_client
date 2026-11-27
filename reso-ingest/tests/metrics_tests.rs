@@ -288,7 +288,7 @@ async fn shipped_dashboard_and_alerts_use_only_exported_metrics() {
 fn every_shipped_alert_links_a_runbook_that_exists() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let runbooks = std::fs::read_to_string(root.join("../docs/OPERATIONS.md")).unwrap();
-    let base = "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#";
+    let base = "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#";
     // The rules for every run, and the `serve` rules of the Prometheus + Grafana kit (#161)
     for file in [
         "monitoring/alert-rules.yml",

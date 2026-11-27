@@ -44,7 +44,7 @@ happen first. Releasing and publishing stay the owner's call.
 
 ## The 1.0 surface of `reso-client`
 
-Reviewed in [#157](https://github.com/jeremeybingham/reso_client/issues/157). Every type below is reachable from the
+Reviewed in [#157](https://github.com/jeremeybingham/reso-rs/issues/157). Every type below is reachable from the
 crate root and from its module (`reso_client::Page` and `reso_client::paging::Page` are the same item).
 
 | Module | Public items | Can grow without a break |
@@ -86,9 +86,9 @@ stays `pub(crate)`. `DownloadTarget` gets no new required methods in 1.x (a new 
 
 ## Before 1.0 (to do)
 
-The release plan is the tracker [#179](https://github.com/jeremeybingham/reso_client/issues/179) (owner, 2026-11-26):
+The release plan is the tracker [#179](https://github.com/jeremeybingham/reso-rs/issues/179) (owner, 2026-11-26):
 
-1. ~~API review ([#157](https://github.com/jeremeybingham/reso_client/issues/157))~~: done; the result is
+1. ~~API review ([#157](https://github.com/jeremeybingham/reso-rs/issues/157))~~: done; the result is
    [the 1.0 surface](#the-10-surface-of-reso-client) below. It ships in 0.4.0.
 2. **0.4.0** (milestone `0.4.0`): both crates, released before any vendor server is available and marked as not yet
    checked against one. `reso-client` 0.4.0 and the first `reso-ingest` publish (#178), after the pre-release
@@ -96,7 +96,7 @@ The release plan is the tracker [#179](https://github.com/jeremeybingham/reso_cl
 3. **0.5.0** (milestone `0.5.0`): the #76 pass against at least one vendor server (#32), its fixes, and the
    compatibility table ([`COMPATIBILITY.md`](COMPATIBILITY.md)) filled in for it; realistic load fixtures (#163);
    release artifacts: SBOM, signed tags and a signed container image
-   ([#158](https://github.com/jeremeybingham/reso_client/issues/158)). The largest likely API change is a replication
+   ([#158](https://github.com/jeremeybingham/reso-rs/issues/158)). The largest likely API change is a replication
    mode without the two-field `$orderby` (#76, section 3).
 4. After 0.5.0, at least one more minor release used in production with no breaking change needed, before tagging
    1.0.

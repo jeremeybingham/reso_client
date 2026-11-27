@@ -6,10 +6,10 @@ point at. Built on [`reso-client`](../README.md).
 
 > **Status (0.4.0, first published release):** built and tested against mock servers and RESO's reference server run
 > locally; **not yet run against a vendor server**
-> ([#32](https://github.com/jeremeybingham/reso_client/issues/32),
-> [#76](https://github.com/jeremeybingham/reso_client/issues/76)). Expect changes to options, configuration and output in
+> ([#32](https://github.com/jeremeybingham/reso-rs/issues/32),
+> [#76](https://github.com/jeremeybingham/reso-rs/issues/76)). Expect changes to options, configuration and output in
 > 0.5.0, after that check; renamed options and settings follow the
-> [deprecation policy](https://github.com/jeremeybingham/reso_client/blob/main/docs/STABILITY.md#deprecation-policy).
+> [deprecation policy](https://github.com/jeremeybingham/reso-rs/blob/main/docs/STABILITY.md#deprecation-policy).
 
 Install the command with `cargo install --locked reso-ingest` (add `--features parquet,s3` for Parquet output and
 buckets), or build the container image from the repository's `Dockerfile`.
@@ -184,7 +184,7 @@ Some servers need a filter on every request or serve related records only inline
 `and`) to every query sent to it: sync pulls, and the key pulls and lookups of `--deletes` (not the `EntityEvent`
 query). `[server.resources.<Name>]` adds a filter, an `expand` list and a `page_size` for one resource; `expand` goes on
 sync pulls only. For example, from MLS Grid's public documentation (not yet tried against it,
-[#32](https://github.com/jeremeybingham/reso_client/issues/32)):
+[#32](https://github.com/jeremeybingham/reso-rs/issues/32)):
 
 ```toml
 [[server]]
@@ -718,7 +718,7 @@ the run ends once the queue is empty:
   of the top-level `Media` resource. `reso-ingest media` still reads only top-level `Media` data files.
 
 Not yet checked against a vendor file host
-([#32](https://github.com/jeremeybingham/reso_client/issues/32)): signed URLs that expire before the run reaches them
+([#32](https://github.com/jeremeybingham/reso-rs/issues/32)): signed URLs that expire before the run reaches them
 (they fail with 403 until the next `sync` brings a fresh URL), vendor media limits, and real volumes.
 
 ## Parquet

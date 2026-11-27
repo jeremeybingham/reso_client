@@ -1,7 +1,7 @@
 # reso-client
 
-[![CI](https://github.com/jeremeybingham/reso_client/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso_client/actions)
-[![codecov](https://codecov.io/gh/jeremeybingham/reso_client/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso_client)
+[![CI](https://github.com/jeremeybingham/reso-rs/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso-rs/actions)
+[![codecov](https://codecov.io/gh/jeremeybingham/reso-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso-rs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Crates.io](https://img.shields.io/crates/v/reso-client.svg)](https://crates.io/crates/reso-client)
 [![Documentation](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
@@ -20,19 +20,19 @@ and hand the records over **raw**, tagged with where they came from. Mapping fie
 enforcing data-licence and display rules and choosing a database are left to the application that uses the data.
 `reso-ingest` helps that application comply with licence terms: an append-only access log records what was pulled, when
 and with which credential, and one source's data can be purged when its licence ends
-([#93](https://github.com/jeremeybingham/reso_client/issues/93); `reso-ingest purge`). Resource and
+([#93](https://github.com/jeremeybingham/reso-rs/issues/93); `reso-ingest purge`). Resource and
 field names are plain strings and records are raw JSON, so any server schema works, including
 [Data Dictionary 2.1](https://dd.reso.org/DD2.1/).
 
 ## Status and limits
 
 - **Tested against:** mock servers (every test, offline) and RESO's reference server run locally
-  ([#35](https://github.com/jeremeybingham/reso_client/issues/35)): a full `reso-ingest sync`, a repeat run, an
+  ([#35](https://github.com/jeremeybingham/reso-rs/issues/35)): a full `reso-ingest sync`, a repeat run, an
   interrupted run resumed, a changed record and a deleted record all came out right.
 - **Not yet tested against a vendor server** (Bridge, MLS Grid, Trestle and others): OAuth2, rate limits, replication
   and delete feeds behave as the standard says, but are unconfirmed in practice until
-  a vendor server is available ([#32](https://github.com/jeremeybingham/reso_client/issues/32)); the checks are listed
-  in [#76](https://github.com/jeremeybingham/reso_client/issues/76).
+  a vendor server is available ([#32](https://github.com/jeremeybingham/reso-rs/issues/32)); the checks are listed
+  in [#76](https://github.com/jeremeybingham/reso-rs/issues/76).
 - `reso-ingest` syncs only resources with a single-field key and a `ModificationTimestamp`; others are skipped.
 - `reso-ingest sync --format parquet` writes files rotated by `--max-file-mb`; a checkpoint is saved when its file is
   finished. `--partition` puts them in Hive-style folders (`source=…/resource=…/date=…/`); compaction is a documented
@@ -67,7 +67,7 @@ stay raw. Code that hard-codes field names should note:
   `any()`; `has` failed on RESO's reference server.
 
 Checked on RESO's reference server with DD 2.1 metadata, not yet on a vendor server
-([#17](https://github.com/jeremeybingham/reso_client/issues/17)).
+([#17](https://github.com/jeremeybingham/reso-rs/issues/17)).
 
 ## Installation
 
@@ -259,7 +259,7 @@ written against Bridge Interactive's `actris_ref` dataset, and the project has n
 | `test_replication`, `test_pagination_nextlink` | Bridge's `/replication` endpoint (vendor mode) |
 
 To run against RESO's reference server started locally (see
-[#35](https://github.com/jeremeybingham/reso_client/issues/35)), set `RESO_BASE_URL=http://localhost:8080` and
+[#35](https://github.com/jeremeybingham/reso-rs/issues/35)), set `RESO_BASE_URL=http://localhost:8080` and
 `RESO_TOKEN=dummy`.
 
 ## Development
@@ -277,47 +277,47 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 ## What's next
 
 The vendor differences known from public documentation are all handled
-([#65](https://github.com/jeremeybingham/reso_client/issues/65)-[#69](https://github.com/jeremeybingham/reso_client/issues/69));
+([#65](https://github.com/jeremeybingham/reso-rs/issues/65)-[#69](https://github.com/jeremeybingham/reso-rs/issues/69));
 what is left is the two releases below, and work that needs a real server or someone else:
 
-- **A vendor server** ([#32](https://github.com/jeremeybingham/reso_client/issues/32)), then the verification pass
-  in [#76](https://github.com/jeremeybingham/reso_client/issues/76): what to check against it (auth, paging, replication
+- **A vendor server** ([#32](https://github.com/jeremeybingham/reso-rs/issues/32)), then the verification pass
+  in [#76](https://github.com/jeremeybingham/reso-rs/issues/76): what to check against it (auth, paging, replication
   order, limits, `$metadata`, deletes, media) and what code may change with the answers.
-- **Release 0.4.0** (milestone `0.4.0`, plan in [#179](https://github.com/jeremeybingham/reso_client/issues/179)):
+- **Release 0.4.0** (milestone `0.4.0`, plan in [#179](https://github.com/jeremeybingham/reso-rs/issues/179)):
   `reso-client` 0.4.0 (rate limits per day and bytes per hour, `StandardReplication::expand`, `execute_count` by
   `$count=true`, `Downloader::download_into`, raw record text, `#[non_exhaustive]` API review, metadata fixes; see
   the [changelog](CHANGELOG.md)) and the first `reso-ingest` publish at the same version
-  ([#178](https://github.com/jeremeybingham/reso_client/issues/178)), released before any vendor server and marked as
-  not yet checked against one. The clean-ups ([#177](https://github.com/jeremeybingham/reso_client/issues/177)), fewer
-  bucket requests per quiet run ([#162](https://github.com/jeremeybingham/reso_client/issues/162) lead 6) and the
+  ([#178](https://github.com/jeremeybingham/reso-rs/issues/178)), released before any vendor server and marked as
+  not yet checked against one. The clean-ups ([#177](https://github.com/jeremeybingham/reso-rs/issues/177)), fewer
+  bucket requests per quiet run ([#162](https://github.com/jeremeybingham/reso-rs/issues/162) lead 6) and the
   publish preparation (#178) are done; what is left is the tag and `cargo publish`, the owner's call.
 - **Release 0.5.0** (milestone `0.5.0`): the #76 pass on a real server and its fixes, a filled-in
   [compatibility table](docs/COMPATIBILITY.md), realistic load fixtures
-  ([#163](https://github.com/jeremeybingham/reso_client/issues/163)), SBOMs, signed tags and a published container
-  image ([#158](https://github.com/jeremeybingham/reso_client/issues/158)).
-- **Production scale, offline parts** (tracker [#78](https://github.com/jeremeybingham/reso_client/issues/78), work
-  order [#116](https://github.com/jeremeybingham/reso_client/issues/116), both closed). Done: logs, metrics, run checks, leases,
+  ([#163](https://github.com/jeremeybingham/reso-rs/issues/163)), SBOMs, signed tags and a published container
+  image ([#158](https://github.com/jeremeybingham/reso-rs/issues/158)).
+- **Production scale, offline parts** (tracker [#78](https://github.com/jeremeybingham/reso-rs/issues/78), work
+  order [#116](https://github.com/jeremeybingham/reso-rs/issues/116), both closed). Done: logs, metrics, run checks, leases,
   graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
   harness, delete detection at millions of keys, backfill, media at scale, media index saves
-  ([#149](https://github.com/jeremeybingham/reso_client/issues/149)), delivery guarantees and partitioned Parquet
-  ([#86](https://github.com/jeremeybingham/reso_client/issues/86)), network options
-  ([#91](https://github.com/jeremeybingham/reso_client/issues/91)), rate-limit budget and per-feed request counts
-  ([#109](https://github.com/jeremeybingham/reso_client/issues/109)), operating many feeds: config directories,
+  ([#149](https://github.com/jeremeybingham/reso-rs/issues/149)), delivery guarantees and partitioned Parquet
+  ([#86](https://github.com/jeremeybingham/reso-rs/issues/86)), network options
+  ([#91](https://github.com/jeremeybingham/reso-rs/issues/91)), rate-limit budget and per-feed request counts
+  ([#109](https://github.com/jeremeybingham/reso-rs/issues/109)), operating many feeds: config directories,
   pausing, `serve` reload, `reset`/`replay`/`history`, onboarding
-  ([#94](https://github.com/jeremeybingham/reso_client/issues/94)), product readiness: compatibility table, 1.0 plan,
+  ([#94](https://github.com/jeremeybingham/reso-rs/issues/94)), product readiness: compatibility table, 1.0 plan,
   `cargo-deny`, semver and MSRV checks in CI, operator guide and runbooks
-  ([#95](https://github.com/jeremeybingham/reso_client/issues/95)), the 1.0 API review
-  ([#157](https://github.com/jeremeybingham/reso_client/issues/157)), status pages and a Prometheus + Grafana kit
-  ([#161](https://github.com/jeremeybingham/reso_client/issues/161)). Built only on request: a Postgres state store, a
-  stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso_client/issues/137)).
+  ([#95](https://github.com/jeremeybingham/reso-rs/issues/95)), the 1.0 API review
+  ([#157](https://github.com/jeremeybingham/reso-rs/issues/157)), status pages and a Prometheus + Grafana kit
+  ([#161](https://github.com/jeremeybingham/reso-rs/issues/161)). Built only on request: a Postgres state store, a
+  stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso-rs/issues/137)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
-  advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso_client/issues/51)).
+  advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso-rs/issues/51)).
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
 
 **Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
 output, re-fetching parent records by key to get fresh media URLs for files that failed during `sync --media`.
 
-The release plan is tracker [#179](https://github.com/jeremeybingham/reso_client/issues/179); earlier trackers #18 (ingest layer), #78 (production scale) and #116 were closed when their work was done.
+The release plan is tracker [#179](https://github.com/jeremeybingham/reso-rs/issues/179); earlier trackers #18 (ingest layer), #78 (production scale) and #116 were closed when their work was done.
 
 ## License
 

@@ -21,4 +21,4 @@ Checked in CI on every pull request and push to `main` ([`.github/workflows/ci.y
 New dependencies need the owner's go-ahead ([`AGENTS.md`](AGENTS.md)). The container image is a static binary on
 `scratch` with no shell or package manager; its only C code is the `ring` and `aws-lc` crypto libraries.
 SBOMs and signed tags and artifacts are planned in
-[#158](https://github.com/jeremeybingham/reso_client/issues/158).
+[#158](https://github.com/jeremeybingham/reso-rs/issues/158).

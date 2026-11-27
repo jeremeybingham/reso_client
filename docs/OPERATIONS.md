@@ -4,8 +4,8 @@ A deployment guide, a runbook for each alert in
 [`reso-ingest/monitoring/alert-rules.yml`](../reso-ingest/monitoring/alert-rules.yml), and what support to expect.
 The details of every command and setting are in [`reso-ingest/README.md`](../reso-ingest/README.md).
 
-Nothing here has run against a vendor server yet ([#32](https://github.com/jeremeybingham/reso_client/issues/32),
-[#76](https://github.com/jeremeybingham/reso_client/issues/76)); see [`COMPATIBILITY.md`](COMPATIBILITY.md).
+Nothing here has run against a vendor server yet ([#32](https://github.com/jeremeybingham/reso-rs/issues/32),
+[#76](https://github.com/jeremeybingham/reso-rs/issues/76)); see [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 ## Deployment guide
 
@@ -195,7 +195,7 @@ waits for budget, so syncs get slower and feeds fall behind.
 
 - `reso-client` and `reso-ingest` are maintained by one person on a best-effort basis. There is no SLA and no paid
   support.
-- Questions and bug reports: [GitHub issues](https://github.com/jeremeybingham/reso_client/issues). Include the
+- Questions and bug reports: [GitHub issues](https://github.com/jeremeybingham/reso-rs/issues). Include the
   versions, the server vendor, the command and the error, with secrets and record data removed.
 - Security issues: see [`SECURITY.md`](../SECURITY.md); do not open a public issue.
 - Supported versions: the latest release of `reso-client` and `main` of `reso-ingest`. Fixes are not backported to
