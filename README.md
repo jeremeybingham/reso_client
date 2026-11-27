@@ -1,10 +1,11 @@
 # reso-rs
 
-[![CI](https://github.com/jeremeybingham/reso-rs/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso-rs/actions)
-[![codecov](https://codecov.io/gh/jeremeybingham/reso-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso-rs)
+[![CI](https://github.com/jeremeybingham/reso-rs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jeremeybingham/reso-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Crates.io](https://img.shields.io/crates/v/reso-client.svg)](https://crates.io/crates/reso-client)
-[![Documentation](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
+[![reso-client on crates.io](https://img.shields.io/crates/v/reso-client.svg?label=reso-client)](https://crates.io/crates/reso-client)
+[![reso-client docs](https://docs.rs/reso-client/badge.svg)](https://docs.rs/reso-client)
+[![reso-ingest on crates.io](https://img.shields.io/crates/v/reso-ingest.svg?label=reso-ingest)](https://crates.io/crates/reso-ingest)
+[![reso-ingest docs](https://docs.rs/reso-ingest/badge.svg)](https://docs.rs/reso-ingest)
 
 Rust tools for pulling real estate data from [RESO Web API](https://www.reso.org/reso-web-api/) servers (OData 4.0).
 
