@@ -16,8 +16,9 @@ Nothing here has run against a vendor server yet ([#32](https://github.com/jerem
 | `sync` on a schedule (cron, Kubernetes CronJob) | A few feeds, polled every 15 minutes or more | [`deploy/kubernetes/cronjob.yaml`](../deploy/kubernetes/cronjob.yaml) |
 | `serve` daemon (Kubernetes Deployment, systemd) | Many feeds, each on its own interval, with `/metrics` and `/status` | [`deploy/kubernetes/deployment.yaml`](../deploy/kubernetes/deployment.yaml), [`deploy/systemd/reso-ingest.service`](../deploy/systemd/reso-ingest.service) |
 
-Build the image from the [`Dockerfile`](../Dockerfile) (no image is published yet) or the binary with
-`cargo build --release -p reso-ingest --features parquet,s3`.
+Install the binary with `cargo install --locked reso-ingest --features parquet,s3`, or build the image from the
+[`Dockerfile`](../Dockerfile) (no image is published yet; it is planned in
+[#158](https://github.com/jeremeybingham/reso-rs/issues/158)).
 
 ### 2. Choose where state and data live
 
@@ -198,7 +199,7 @@ waits for budget, so syncs get slower and feeds fall behind.
 - Questions and bug reports: [GitHub issues](https://github.com/jeremeybingham/reso-rs/issues). Include the
   versions, the server vendor, the command and the error, with secrets and record data removed.
 - Security issues: see [`SECURITY.md`](../SECURITY.md); do not open a public issue.
-- Supported versions: the latest release of `reso-client` and `main` of `reso-ingest`. Fixes are not backported to
-  older 0.x releases.
+- Supported versions: the latest release of `reso-client` and `reso-ingest` (they share version numbers). Fixes are
+  not backported to older 0.x releases.
 - Vendor-specific behaviour is supported once it is verified ([`COMPATIBILITY.md`](COMPATIBILITY.md)); until then it
   is best effort.

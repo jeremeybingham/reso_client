@@ -17,21 +17,24 @@ buckets), or build the container image from the repository's `Dockerfile`.
 ## Commands
 
 ```sh
-cargo run -p reso-ingest -- sync --config servers.toml --out data/
-cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --deletes
-cargo run -p reso-ingest -- sync --config servers.toml --server mlsgrid --media
-cargo run -p reso-ingest -- sync --config servers.toml --server mls-one --resource Property --backfill
-cargo run -p reso-ingest -- media --config servers.toml --out data/ --limit 1000
-cargo run -p reso-ingest -- discover --config servers.toml --server mls-one
-cargo run -p reso-ingest -- discover --config draft.toml --starter                     # onboarding
-cargo run -p reso-ingest -- status --out data/
-cargo run -p reso-ingest -- serve --config servers.d/ --out data/ --listen 0.0.0.0:9090 --reload-every 1m
-cargo run -p reso-ingest -- reset --server mls-one --resource Member --out data/
-cargo run -p reso-ingest -- replay --server mls-one --resource Property --after 2026-11-01T00:00:00Z --out data/
-cargo run -p reso-ingest -- history --out data/ --server mls-one --limit 5
-cargo run -p reso-ingest -- purge --server mls-one --out data/                          # dry run
-cargo run -p reso-ingest -- purge --server mls-one --out data/ --execute --by "J. Smith"
+reso-ingest sync --config servers.toml --out data/
+reso-ingest sync --config servers.toml --server mls-one --resource Property --deletes
+reso-ingest sync --config servers.toml --server mlsgrid --media
+reso-ingest sync --config servers.toml --server mls-one --resource Property --backfill
+reso-ingest media --config servers.toml --out data/ --limit 1000
+reso-ingest discover --config servers.toml --server mls-one
+reso-ingest discover --config draft.toml --starter                     # onboarding
+reso-ingest status --out data/
+reso-ingest serve --config servers.d/ --out data/ --listen 0.0.0.0:9090 --reload-every 1m
+reso-ingest reset --server mls-one --resource Member --out data/
+reso-ingest replay --server mls-one --resource Property --after 2026-11-01T00:00:00Z --out data/
+reso-ingest history --out data/ --server mls-one --limit 5
+reso-ingest purge --server mls-one --out data/                          # dry run
+reso-ingest purge --server mls-one --out data/ --execute --by "J. Smith"
 ```
+
+From a clone, `cargo run -p reso-ingest -- <command>` runs the same commands (add `--features parquet,s3` before
+`--` for those features).
 
 - **`sync`** pulls each resource the server's `$metadata` lists (after the config's `include`/`exclude` filters),
   continuing from the saved checkpoint; the first run is the full load. `--server` and `--resource` narrow it (each can
@@ -726,7 +729,7 @@ Not yet checked against a vendor file host
 Build with the `parquet` feature and pass `--format parquet` for typed columns instead of NDJSON:
 
 ```sh
-cargo run -p reso-ingest --features parquet -- sync --config servers.toml --format parquet
+reso-ingest sync --config servers.toml --format parquet   # built with --features parquet
 ```
 
 Columns are the four tags, `fetched_at` (UTC timestamp in milliseconds), `event`, `key` (delete events) and a `record` struct with one
@@ -791,18 +794,28 @@ peak memory at 1M records) are in [LOADTEST.md](LOADTEST.md).
 
 ## As a library
 
-The same pieces are public:
+The same pieces are public. The library exists for the binary: before 1.0 it may change in any minor release without
+a deprecation ([STABILITY.md](https://github.com/jeremeybingham/reso-rs/blob/main/docs/STABILITY.md)); the command
+line and configuration file are what the deprecation policy covers.
 
-- Configuration: `Config` (parse the TOML), `ServerConfig` (with `filter_for`, `expand_for`, `page_size_for`),
-  `ResourceConfig`, `DeletesConfig`, `LimitsConfig`, `MediaConfig`.
+- Configuration: `Config` (`parse`, `from_path` for a file or a directory), `ServerConfig` (with `filter_for`,
+  `expand_for`, `page_size_for`, `client_config`), `ResourceConfig`, `AuthConfig`, `SecretSource`, `DeletesConfig`,
+  `LimitsConfig`, `MediaConfig`, `NetworkConfig`, `BackfillConfig`; `ClientHandle` rebuilds a server's client when its
+  secrets change.
 - Running: `run_servers` (one task per server, capped), `sync_resource` and `pull_resource` (one resource into a
-  `RecordWriter`), `sync_resource_media` (the same with `PageMedia` queueing each page's files), `reserve_run_id`.
-- Output and state: `NdjsonWriter` / `ParquetWriter`, `RunManifest`, `CheckpointStore`, `StateStore` (the state
-  backend interface) and `FileStateStore` (and `S3StateStore` with feature `s3`), `FileSink` and `LocalDirSink` (where finished data files go), `Lease`.
-- Deletes: `reconcile_deletes` (with a `DeleteTarget`), `EventFeed`, `FlagDeleteWriter` (wraps a writer and adds an
-  event after each flagged record).
+  `RecordWriter`), `sync_resource_media` (the same with `PageMedia` queueing each page's files), `reserve_run_id`,
+  `Shutdown`, `BackfillWindow`; `Daemon` and `ServeOptions` for `serve`; `cli::run` runs the command in-process.
+- Output and state: `NdjsonWriter` / `ParquetWriter` (feature `parquet`), `RunManifest`, `CheckpointStore`,
+  `StateStore` (the state backend interface) with `FileStateStore` and `S3StateStore` (feature `s3`), `FileSink` with
+  `LocalDirSink` and `S3FileSink` (where finished data files go), `Lease`.
+- Deletes: `reconcile_deletes` (with a `DeleteTarget` and `DeleteLimits`), `EventFeed`, `FlagDeleteWriter` (wraps a
+  writer and adds an event after each flagged record).
 - Media: `sync_media`, `page_pipeline` (a `PageMedia` that queues each page's files and the `MediaWorkers` that fetch
   them), `MediaIndex` (with `add_nested` for expanded arrays), `MediaManifest`, `MediaStore` with `LocalMediaStore` and
   `S3MediaStore` (feature `s3`), `MediaRoot`.
+- Checks and reporting: `SchemaSnapshot`, `CheckingWriter`, `render_prometheus`, `write_metrics_file`, `run_summary`
+  and `post_summary` (webhook), `log_subscriber`.
+- Licence terms: `AccessLog`, `plan_purge` and `execute_purge`, `PurgeRecord`.
 
-See the crate docs: `cargo doc -p reso-ingest --open`.
+API reference: [docs.rs/reso-ingest](https://docs.rs/reso-ingest) (built with `parquet` and `s3`), or
+`cargo doc -p reso-ingest --features parquet,s3 --open`.

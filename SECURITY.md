@@ -6,7 +6,7 @@ Please do not open a public issue. Use GitHub's private reporting: **Security â†
 this repository. Include the affected version, how to reproduce it and the impact. Expect a first reply
 within a week; this is a one-person project with no SLA (see [Support](docs/OPERATIONS.md#support)).
 
-Supported versions: the latest `reso-client` release and `main` of `reso-ingest`.
+Supported versions: the latest release of `reso-client` and `reso-ingest` (they share version numbers), and `main`.
 
 ## Supply chain
 

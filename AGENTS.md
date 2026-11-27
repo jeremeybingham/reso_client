@@ -4,10 +4,10 @@ Guidance for AI coding agents and people working in this repository (tool-neutra
 
 This repository is an **ingest layer** for RESO Web API servers (OData 4.0), in two Rust crates:
 
-- `reso-client` (crates.io, pre-1.0, v0.3.0 published, 0.4.0 next): a client for one server: queries, standard paging and replication,
+- `reso-client` (crates.io, pre-1.0; 0.3.0 published, 0.4.0 ready to release): a client for one server: queries, standard paging and replication,
   bearer token or OAuth2 client credentials, retries and rate limits, a parsed `$metadata` model, file downloads
   (`Downloader`) with their own limits.
-- `reso-ingest` (`reso-ingest/`, first published at 0.4.0 with the same version as `reso-client`): pulls every resource from many servers into tagged NDJSON or Parquet
+- `reso-ingest` (`reso-ingest/`, first published at 0.4.0; it shares `reso-client`'s version numbers): pulls every resource from many servers into tagged NDJSON or Parquet
   files, incrementally and resumably, with delete detection, and downloads the files of `Media` records; library plus
   the `reso-ingest` command.
 
@@ -28,7 +28,7 @@ layer), #78 (production scale) and #116 (offline work order) are closed. Open wo
 | The ingest command: configuration, output format, deletes, media files, Parquet | `reso-ingest/README.md` |
 | The plan and open owner decisions | Release tracker #179, milestones `0.4.0` and `0.5.0`; done: #18, #78, #116 |
 | What to check on a real server, and what may change | GitHub issue #76 (access: #32) |
-| API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client |
+| API reference (every method, type and example) | rustdoc: `cargo doc --open`, or docs.rs/reso-client and docs.rs/reso-ingest |
 | Runnable examples (written against Bridge's `actris_ref`) | `examples/` |
 | Version history | `CHANGELOG.md` |
 | Which vendor servers are checked | `docs/COMPATIBILITY.md` |
@@ -45,6 +45,7 @@ layer), #78 (production scale) and #116 (offline work order) are closed. Open wo
 cargo fmt && cargo clippy -- -D warnings   # required before every commit
 cargo test                                 # unit, integration (wiremock) and doc tests; no network or credentials needed
 cargo doc --no-deps                        # public items must have doc comments
+RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps -p reso-ingest --features parquet,s3   # what docs.rs builds
 cargo deny --workspace --all-features check   # licences, sources, advisories (CI job "Supply chain")
 cargo semver-checks -p reso-client         # API changes against the last release (CI job "Semver checks")
 scripts/profile.sh clean 100000            # timed + callgrind profile of one load-test scenario (#162)

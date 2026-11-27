@@ -53,6 +53,10 @@ mimalloc = ["dep:mimalloc"]
 # Read-only HTML status pages in `serve --ui` (#161): hand-written HTML, no extra dependency
 ui = []
 
+# docs.rs documents the optional `ParquetWriter` and the S3/GCS backends too
+[package.metadata.docs.rs]
+features = ["parquet", "s3"]
+
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1", features = ["test-util"] }
