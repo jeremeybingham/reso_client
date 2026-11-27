@@ -1,4 +1,4 @@
-# reso-client
+# reso-rs
 
 [![CI](https://github.com/jeremeybingham/reso-rs/workflows/CI/badge.svg)](https://github.com/jeremeybingham/reso-rs/actions)
 [![codecov](https://codecov.io/gh/jeremeybingham/reso-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/jeremeybingham/reso-rs)
