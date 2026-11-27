@@ -52,7 +52,7 @@ crate root and from its module (`reso_client::Page` and `reso_client::paging::Pa
 | `client` | `ResoClient`, `ClientConfig` | `ClientConfig` is `#[non_exhaustive]` (build with `new`, `with_auth`, `from_env`, `with_*`) |
 | `auth` | `Auth`, `ClientCredentials`, `CredentialTransport` | all three `#[non_exhaustive]` |
 | `queries` | `QueryBuilder`, `Query`, `ReplicationQueryBuilder`, `ReplicationQuery` | private fields; built by the builders |
-| `paging` | `Page`, `parse_link_header` | `Page` `#[non_exhaustive]` |
+| `paging` | `Page`, `RawRecords`, `record_fields`, `parse_link_header` | `Page` `#[non_exhaustive]`; `RawRecords` has private fields (`from_texts`, `iter`, `values`, `field`); `record_fields` returns `serde_json::value::RawValue`s, so serde_json's `raw_value` feature is part of the API |
 | `replication` | `ReplicationResponse` (Bridge vendor mode) | `#[non_exhaustive]`; `ReplicationResponse::new` |
 | `standard_replication` | `StandardReplication`, `ReplicationRun`, `Checkpoint` | `StandardReplication` and `ReplicationRun` have private fields; `Checkpoint` `#[non_exhaustive]` (`new`, `at`) |
 | `metadata` | `Metadata`, `EntitySet`, `EntityType`, `Property`, `NavigationProperty`, `EnumType`, `EnumMember` | all `#[non_exhaustive]`; built by `Metadata::parse` |
@@ -89,10 +89,11 @@ stays `pub(crate)`. `DownloadTarget` gets no new required methods in 1.x (a new 
 The release plan is the tracker [#179](https://github.com/jeremeybingham/reso-rs/issues/179) (owner, 2026-11-26):
 
 1. ~~API review ([#157](https://github.com/jeremeybingham/reso-rs/issues/157))~~: done; the result is
-   [the 1.0 surface](#the-10-surface-of-reso-client) below. It ships in 0.4.0.
+   [the 1.0 surface](#the-10-surface-of-reso-client) above. It ships in 0.4.0.
 2. **0.4.0** (milestone `0.4.0`): both crates, released before any vendor server is available and marked as not yet
-   checked against one. `reso-client` 0.4.0 and the first `reso-ingest` publish (#178), after the pre-release
-   clean-ups (#177) and #162 lead 6. Unsigned tag; no container image on a registry.
+   checked against one: `reso-client` 0.4.0 and the first `reso-ingest` publish. The pre-release clean-ups (#177),
+   #162 lead 6, the publish preparation (#178) and the documentation pass are done; the tag and `cargo publish` are
+   left, on the owner's go-ahead. Unsigned tag; no container image on a registry.
 3. **0.5.0** (milestone `0.5.0`): the #76 pass against at least one vendor server (#32), its fixes, and the
    compatibility table ([`COMPATIBILITY.md`](COMPATIBILITY.md)) filled in for it; realistic load fixtures (#163);
    release artifacts: SBOM, signed tags and a signed container image
@@ -105,7 +106,9 @@ The release plan is the tracker [#179](https://github.com/jeremeybingham/reso-rs
 
 1. `git fetch origin`; on an up-to-date `main`.
 2. Bump `version` in `Cargo.toml` and in `reso-ingest/Cargo.toml`, together with its `reso-client` dependency's
-   `version` (the crates share version numbers), and move the changelog's "Unreleased" section under the new version.
+   `version` (the crates share version numbers), and move the changelog's "Unreleased" section under the new version
+   (`## [X.Y.Z] - date`, with its compare link at the bottom). Check that the README's install line and status table
+   name the new version.
 3. `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
    `cargo test --workspace --all-features`, `cargo doc --no-deps --all-features`.
 4. `cargo semver-checks -p reso-client` passes for the new version; `cargo deny --workspace --all-features check`
@@ -116,3 +119,5 @@ The release plan is the tracker [#179](https://github.com/jeremeybingham/reso-rs
 6. Tag `vX.Y.Z` (signed once #158 is done) and push the tag.
 7. Publish in order: `cargo publish -p reso-client` first; once that version shows on crates.io,
    `cargo publish --dry-run -p reso-ingest`, then `cargo publish -p reso-ingest`.
+8. Check that docs.rs built both crates (`reso-ingest` with its `parquet` and `s3` features, set in its
+   `[package.metadata.docs.rs]`).

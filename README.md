@@ -12,8 +12,8 @@ This repository holds two crates:
 
 | Crate | What it is | Status |
 |---|---|---|
-| [`reso-client`](https://crates.io/crates/reso-client) | Async client for one server: queries, standard paging and replication, OAuth2, retries and rate limits, a parsed `$metadata` model, file downloads | v0.3.0 on crates.io |
-| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection, and download the `Media` files they point at | First published at 0.4.0 (with `reso-client` 0.4.0); not yet run against a vendor server |
+| [`reso-client`](https://crates.io/crates/reso-client) | Async client for one server: queries, standard paging and replication, OAuth2, retries and rate limits, a parsed `$metadata` model, file downloads | 0.4.0 |
+| [`reso-ingest`](reso-ingest/README.md) | Library and command that pull every resource from many servers into tagged NDJSON or Parquet files, incrementally, with delete detection, and download the `Media` files they point at | 0.4.0, first published release; not yet run against a vendor server |
 
 Together they form an **ingest layer**: they connect to many servers, follow the API's rules, keep each copy current,
 and hand the records over **raw**, tagged with where they came from. Mapping fields, de-duplicating across MLSs,
@@ -28,7 +28,8 @@ field names are plain strings and records are raw JSON, so any server schema wor
 
 - **Tested against:** mock servers (every test, offline) and RESO's reference server run locally
   ([#35](https://github.com/jeremeybingham/reso-rs/issues/35)): a full `reso-ingest sync`, a repeat run, an
-  interrupted run resumed, a changed record and a deleted record all came out right.
+  interrupted run resumed, a changed record and a deleted record all came out right. The bucket backends (`s3`
+  feature) were also run against real AWS S3 and Google Cloud Storage buckets.
 - **Not yet tested against a vendor server** (Bridge, MLS Grid, Trestle and others): OAuth2, rate limits, replication
   and delete feeds behave as the standard says, but are unconfirmed in practice until
   a vendor server is available ([#32](https://github.com/jeremeybingham/reso-rs/issues/32)); the checks are listed
@@ -41,8 +42,8 @@ field names are plain strings and records are raw JSON, so any server schema wor
 - Media files: `reso-ingest media` downloads them from NDJSON `Media` output (not from Parquet output), and
   `reso-ingest sync --media` queues them page by page for its own download workers during the sync (a slow file host
   does not slow the sync), including `Media` arrays expanded inside other records; each file is stored once, by its
-  content hash, in a directory or a bucket. Checked against the reference server's `Media` records, not yet against a vendor's file host (signed
-  single-use URLs, media limits). A save of the media index writes only what changed (#149: 1.8 ms and 0.6 MiB per page
+  content hash, in a directory or a bucket. Checked against the reference server's `Media` records, not yet against
+  a vendor's file host (signed single-use URLs, media limits). A save of the media index writes only what changed (#149: 1.8 ms and 0.6 MiB per page
   at 1M entries), but the whole index is still held in memory while a run goes on (about 0.4 GB of JSON at 1M entries).
 - Vendor differences taken from public documentation (MLS Grid, Trestle) are supported but unconfirmed until #32: a
   filter required on every request, related records served only by `$expand`, deletes signalled by a flag field
@@ -73,11 +74,15 @@ Checked on RESO's reference server with DD 2.1 metadata, not yet on a vendor ser
 
 ```toml
 [dependencies]
-reso-client = "0.3"
+reso-client = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 Rust 1.87 or later for `reso-client`, 1.89 for `reso-ingest` (policy in [docs/STABILITY.md](docs/STABILITY.md)).
+Upgrading from 0.3: see [the changelog](CHANGELOG.md#upgrading-reso-client-from-03).
+
+The ingest command: `cargo install --locked reso-ingest` (add `--features parquet,s3` for Parquet output and
+buckets).
 
 ## Quick start
 
@@ -133,7 +138,8 @@ What else the client does:
   second, hour and day and on response bytes per hour and day; request counters (`ResoClient::stats`, or `count_requests` for one task's requests when tasks share a client); how much of
   each limit window is used (`ResoClient::rate_usage`). Off by default.
 - `StandardReplication`: keyset paging on `ModificationTimestamp` and key, checkpoints to resume, and `expand` for servers
-  that serve related records only inline.
+  that serve related records only inline. `next_batch_raw` hands back each record's JSON text as the server sent it,
+  without parsing it (`RawRecords`).
 - `$metadata` as raw XML (`fetch_metadata`) or a model (`fetch_metadata_model`): entity sets, keys, properties,
   navigation properties, enum types.
 - File downloads (`ResoClient::downloader`): a `Downloader` with its own retries, rate limit, timeout and counters,
@@ -226,18 +232,21 @@ whose nodes have their own public IPs do not go through the NAT gateway; check t
 `reso-ingest` reads a TOML file listing servers (secrets come from environment variables or files it names, re-read so a rotated file needs no restart) and pulls each one:
 
 ```sh
-cargo run -p reso-ingest -- sync --config servers.toml --out data/    # incremental pull of every server
-cargo run -p reso-ingest -- sync --config servers.toml --media        # same, downloading each page's media files alongside
-cargo run -p reso-ingest -- media --config servers.toml --out data/   # download new and changed Media files
-cargo run -p reso-ingest -- serve --config servers.toml --listen 127.0.0.1:9090 --ui   # daemon: per-resource intervals, /healthz /readyz /metrics /status, status pages on /
-cargo run -p reso-ingest -- discover --config servers.toml            # each server's $metadata model as JSON
-cargo run -p reso-ingest -- status --out data/                        # checkpoints and the last run
+reso-ingest sync --config servers.toml --out data/    # incremental pull of every server
+reso-ingest sync --config servers.toml --media        # same, downloading each page's media files alongside
+reso-ingest media --config servers.toml --out data/   # download new and changed Media files
+reso-ingest serve --config servers.toml --listen 127.0.0.1:9090 --ui   # daemon: per-resource intervals, /healthz /readyz /metrics /status, status pages on /
+reso-ingest discover --config servers.toml            # each server's $metadata model as JSON
+reso-ingest status --out data/                        # checkpoints and the last run
+reso-ingest purge --server mls-one --out data/        # what deleting one source would remove (dry run)
 ```
+
+From a clone, `cargo run -p reso-ingest -- <command>` does the same.
 
 Configuration (including per-server filters, per-resource `expand` and flag-field deletes), output format, run ids,
 logs (`--log-format json`, `RUST_LOG`), delete detection, media download and Parquet are described in [reso-ingest/README.md](reso-ingest/README.md).
 
-A container image (static binary on an empty base, about 20 MB) and Kubernetes and systemd examples are in
+A container image (static binary on an empty base, about 30 MB; build it yourself, none is published yet) and Kubernetes and systemd examples are in
 [`Dockerfile`](Dockerfile) and [`deploy/`](deploy/); see [Containers and deployment](reso-ingest/README.md#containers-and-deployment).
 
 ## Examples
@@ -276,48 +285,32 @@ Rules for contributors and coding agents are in [AGENTS.md](AGENTS.md).
 
 ## What's next
 
-The vendor differences known from public documentation are all handled
-([#65](https://github.com/jeremeybingham/reso-rs/issues/65)-[#69](https://github.com/jeremeybingham/reso-rs/issues/69));
-what is left is the two releases below, and work that needs a real server or someone else:
+Plan: release tracker [#179](https://github.com/jeremeybingham/reso-rs/issues/179). Earlier trackers #18 (ingest
+layer), #78 (production scale) and #116 (offline work order) are closed; what they built is in the
+[changelog](CHANGELOG.md).
 
-- **A vendor server** ([#32](https://github.com/jeremeybingham/reso-rs/issues/32)), then the verification pass
-  in [#76](https://github.com/jeremeybingham/reso-rs/issues/76): what to check against it (auth, paging, replication
-  order, limits, `$metadata`, deletes, media) and what code may change with the answers.
-- **Release 0.4.0** (milestone `0.4.0`, plan in [#179](https://github.com/jeremeybingham/reso-rs/issues/179)):
-  `reso-client` 0.4.0 (rate limits per day and bytes per hour, `StandardReplication::expand`, `execute_count` by
-  `$count=true`, `Downloader::download_into`, raw record text, `#[non_exhaustive]` API review, metadata fixes; see
-  the [changelog](CHANGELOG.md)) and the first `reso-ingest` publish at the same version
-  ([#178](https://github.com/jeremeybingham/reso-rs/issues/178)), released before any vendor server and marked as
-  not yet checked against one. The clean-ups ([#177](https://github.com/jeremeybingham/reso-rs/issues/177)), fewer
-  bucket requests per quiet run ([#162](https://github.com/jeremeybingham/reso-rs/issues/162) lead 6) and the
-  publish preparation (#178) are done; what is left is the tag and `cargo publish`, the owner's call.
-- **Release 0.5.0** (milestone `0.5.0`): the #76 pass on a real server and its fixes, a filled-in
-  [compatibility table](docs/COMPATIBILITY.md), realistic load fixtures
-  ([#163](https://github.com/jeremeybingham/reso-rs/issues/163)), SBOMs, signed tags and a published container
-  image ([#158](https://github.com/jeremeybingham/reso-rs/issues/158)).
-- **Production scale, offline parts** (tracker [#78](https://github.com/jeremeybingham/reso-rs/issues/78), work
-  order [#116](https://github.com/jeremeybingham/reso-rs/issues/116), both closed). Done: logs, metrics, run checks, leases,
-  graceful shutdown, `serve`, container image, S3 and GCS backends, secrets from files, purge and access log, load
-  harness, delete detection at millions of keys, backfill, media at scale, media index saves
-  ([#149](https://github.com/jeremeybingham/reso-rs/issues/149)), delivery guarantees and partitioned Parquet
-  ([#86](https://github.com/jeremeybingham/reso-rs/issues/86)), network options
-  ([#91](https://github.com/jeremeybingham/reso-rs/issues/91)), rate-limit budget and per-feed request counts
-  ([#109](https://github.com/jeremeybingham/reso-rs/issues/109)), operating many feeds: config directories,
-  pausing, `serve` reload, `reset`/`replay`/`history`, onboarding
-  ([#94](https://github.com/jeremeybingham/reso-rs/issues/94)), product readiness: compatibility table, 1.0 plan,
-  `cargo-deny`, semver and MSRV checks in CI, operator guide and runbooks
-  ([#95](https://github.com/jeremeybingham/reso-rs/issues/95)), the 1.0 API review
-  ([#157](https://github.com/jeremeybingham/reso-rs/issues/157)), status pages and a Prometheus + Grafana kit
-  ([#161](https://github.com/jeremeybingham/reso-rs/issues/161)). Built only on request: a Postgres state store, a
-  stream sink and a lookup-value check ([#137](https://github.com/jeremeybingham/reso-rs/issues/137)).
+- **0.4.0** (milestone `0.4.0`): both crates, released before any vendor server is available and marked as not yet
+  checked against one; the first `reso-ingest` publish. The work is done; what is left is the tag and
+  `cargo publish`, the owner's call.
+- **0.5.0** (milestone `0.5.0`): read-only access to a vendor server ([#32](https://github.com/jeremeybingham/reso-rs/issues/32)),
+  then the verification pass in [#76](https://github.com/jeremeybingham/reso-rs/issues/76) (auth, paging, replication
+  order, limits, `$metadata`, deletes, media) and its fixes; the [compatibility table](docs/COMPATIBILITY.md) filled in
+  for that server; realistic load fixtures ([#163](https://github.com/jeremeybingham/reso-rs/issues/163)); SBOMs,
+  signed tags and a published container image ([#158](https://github.com/jeremeybingham/reso-rs/issues/158)). The
+  largest likely change is a replication mode without the two-field `$orderby` (#76, section 3), which would break
+  the API.
+- **Toward 1.0:** at least one more minor release used in production without a breaking change
+  ([docs/STABILITY.md](docs/STABILITY.md)).
 - Moving off `chrono` waits on an arrow/parquet release (apache/arrow-rs#9183); until then its "unmaintained"
   advisory is ignored in `.cargo/audit.toml` (see [#51](https://github.com/jeremeybingham/reso-rs/issues/51)).
 - Replies from RESO on the reference server issues (reso-tools #453, #454, #455).
 
+**Built only on request:** a Postgres state store, a stream sink and a lookup-value check
+([#137](https://github.com/jeremeybingham/reso-rs/issues/137)); NDJSON compression
+([#162](https://github.com/jeremeybingham/reso-rs/issues/162), lead 7).
+
 **Not planned without a need:** resources with a composite key or no `ModificationTimestamp`, `media` from Parquet
 output, re-fetching parent records by key to get fresh media URLs for files that failed during `sync --media`.
-
-The release plan is tracker [#179](https://github.com/jeremeybingham/reso-rs/issues/179); earlier trackers #18 (ingest layer), #78 (production scale) and #116 were closed when their work was done.
 
 ## License
 

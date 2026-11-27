@@ -8,8 +8,11 @@
 //! `Media` photos. Records come back as raw [`serde_json::Value`]s: resource and field names are
 //! strings, so any server schema works.
 //!
-//! Pulling many servers into files is the job of the `reso-ingest` crate in the same repository.
-//! The crate is pre-1.0; breaking changes are listed in the changelog.
+//! Pulling many servers into files is the job of the
+//! [`reso-ingest`](https://docs.rs/reso-ingest) crate, released with this one at the same version.
+//! The crate is pre-1.0; breaking changes are listed in the
+//! [changelog](https://github.com/jeremeybingham/reso-rs/blob/main/CHANGELOG.md), and what 1.0 will
+//! promise in `docs/STABILITY.md` in the repository.
 //!
 //! # Quick start
 //!
@@ -43,8 +46,8 @@
 //! (`RESO_CLIENT_ID`, `RESO_CLIENT_SECRET`, `RESO_TOKEN_URI`, optional `RESO_SCOPE` and
 //! `RESO_CREDENTIAL_TRANSPORT`), and the optional `RESO_TIMEOUT`, `RESO_MAX_RETRIES`,
 //! `RESO_RATE_PER_SECOND`, `RESO_RATE_PER_HOUR`, `RESO_RATE_PER_DAY`, `RESO_BYTES_PER_HOUR`,
-//! `RESO_BYTES_PER_DAY` and `RESO_DATASET_ID`
-//! (Bridge Interactive only). The same settings in code:
+//! `RESO_BYTES_PER_DAY`, the network settings `RESO_PROXY`, `RESO_NO_PROXY`, `RESO_CA_FILE` and
+//! `RESO_USER_AGENT`, and `RESO_DATASET_ID` (Bridge Interactive only). The same settings in code:
 //!
 //! ```no_run
 //! # use std::time::Duration;
@@ -63,6 +66,13 @@
 //! With client credentials the token is fetched on first use, renewed after 90% of its lifetime
 //! and once after a 401. Retries ([`RetryPolicy`]) and rate limits ([`RateLimit`]) are off by
 //! default. Tokens and secrets are never logged and are redacted from `Debug` output.
+//!
+//! [`NetworkOptions`] ([`ClientConfig::with_network`]) sets a proxy, extra trusted CA certificates,
+//! the `User-Agent` and the connection pool, for API, token and download requests alike.
+//!
+//! [`ResoClient::stats`] counts requests, retries, bytes and responses by status;
+//! [`count_requests`] counts only the requests one future makes, when tasks share a client; and
+//! [`ResoClient::rate_usage`] says how much of each [`RateLimit`] window is used.
 //!
 //! # Paging through a result set
 //!
@@ -105,6 +115,9 @@
 //! # }
 //! ```
 //!
+//! [`ReplicationRun::next_batch_raw`] returns the same batches as each record's JSON text, as the
+//! server sent it, without parsing them ([`RawRecords`], [`record_fields`]).
+//!
 //! Bridge Interactive's `/replication` endpoint is a separate vendor mode:
 //! [`ReplicationQueryBuilder`] and [`ResoClient::execute_replication`].
 //!
@@ -137,6 +150,7 @@
 //! conditional GET written to `<dest>.part` and renamed when complete; pass the [`Validators`]
 //! from the last download to get [`DownloadOutcome::NotModified`] for an unchanged file. The token
 //! goes only to the API's own host unless [`SendToken`] says otherwise.
+//! [`Downloader::download_into`] streams a file into any [`DownloadTarget`] instead of a path.
 //!
 //! ```no_run
 //! # use reso_client::{DownloadConfig, DownloadOutcome, ResoClient, Validators};
@@ -166,17 +180,20 @@
 //! with constructors and builders rather than struct literals:
 //!
 //! ```
-//! # use reso_client::{RateLimit, Validators};
+//! # use reso_client::{RateLimit, RetryPolicy, Validators};
 //! let limit = RateLimit::default().per_second(2).per_hour(7_200);
-//! let mut validators = Validators::default();
-//! validators.etag = Some("\"v1\"".into());
-//! # let _ = (limit, validators);
+//! let validators = Validators::default().with_etag("\"v1\"");
+//! let mut retry = RetryPolicy::new(4);
+//! retry.max_retries = 6; // public fields can still be read and assigned
+//! # let _ = (limit, validators, retry);
 //! ```
 //!
 //! # Server support
 //!
 //! `$count`, `$expand`, `$apply` and the paths servers accept vary. Tests run against mock
-//! servers and RESO's reference server; vendor servers are not yet confirmed.
+//! servers and RESO's reference server; vendor servers are not yet confirmed (the checks planned
+//! for 0.5.0 are in [#76](https://github.com/jeremeybingham/reso-rs/issues/76), and which servers
+//! have been checked is in `docs/COMPATIBILITY.md`).
 //!
 //! # Resources
 //!
