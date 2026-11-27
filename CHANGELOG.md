@@ -532,8 +532,8 @@ release and its entries are listed separately below.
 ### Security
 - Token redaction in debug output to prevent accidental exposure in logs
 
-[Unreleased]: https://github.com/jeremeybingham/reso_client/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/jeremeybingham/reso_client/compare/v0.2.1...v0.3.0
-[0.2.1]: https://github.com/jeremeybingham/reso_client/releases/tag/v0.2.1
-[0.2.0]: https://github.com/jeremeybingham/reso_client/jeremeybingham/reso_client/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/jeremeybingham/reso_client/releases/tag/v0.1.0
+[Unreleased]: https://github.com/jeremeybingham/reso-rs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jeremeybingham/reso-rs/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/jeremeybingham/reso-rs/releases/tag/v0.2.1
+[0.2.0]: https://github.com/jeremeybingham/reso-rs/jeremeybingham/reso-rs/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/jeremeybingham/reso-rs/releases/tag/v0.1.0

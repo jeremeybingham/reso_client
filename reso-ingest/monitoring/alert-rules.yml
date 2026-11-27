@@ -11,7 +11,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.server }}/{{ $labels.resource }} is {{ $value | humanizeDuration }} behind"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resofeedstale"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resofeedstale"
 
       - alert: ResoResourceFailed
         # The last pull of the resource ended in an error
@@ -20,7 +20,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.server }}/{{ $labels.resource }} failed in its last run"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resoresourcefailed"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resoresourcefailed"
 
       - alert: ResoServerFailed
         # The whole server failed (no $metadata, no resources to pull)
@@ -29,7 +29,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.server }} failed as a whole in its last run"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resoserverfailed"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resoserverfailed"
 
       - alert: ResoRepeatedThrottling
         # 429 responses in the last run, for three runs in a row
@@ -38,7 +38,7 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "{{ $labels.server }}/{{ $labels.resource }} keeps getting 429s; lower [server.limits]"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resorepeatedthrottling"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resorepeatedthrottling"
 
       - alert: ResoRunsStopped
         # No run has finished for 3 hours (the metrics file is only written at the end of a run)
@@ -46,7 +46,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "reso-ingest has not finished a run in {{ $value | humanizeDuration }}"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resorunsstopped"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resorunsstopped"
 
       - alert: ResoDeletesHeld
         # A delete pass found more deletes than [server.deletes] allows and wrote none; check the
@@ -55,7 +55,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "{{ $value }} deletes of {{ $labels.server }}/{{ $labels.resource }} are held for review"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resodeletesheld"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resodeletesheld"
 
       - alert: ResoSchemaChanged
         # The server's $metadata differs from the previous run's (lasts until the next run)
@@ -63,7 +63,7 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "{{ $labels.server }} changed its $metadata ({{ $value }} changes); see the run manifest"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resoschemachanged"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resoschemachanged"
 
       - alert: ResoDataWarnings
         # Records without a key, repeated keys in a page, timestamps before the checkpoint, or a
@@ -72,4 +72,4 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "{{ $labels.server }}/{{ $labels.resource }} has check findings; see the run manifest"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resodatawarnings"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resodatawarnings"

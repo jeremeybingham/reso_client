@@ -7,6 +7,6 @@ ignore = [
     # Remove this entry once an arrow/parquet release drops chrono
     # (apache/arrow-rs#9183) and `cargo tree -i chrono --workspace --all-features`
     # comes back empty.
-    # https://github.com/jeremeybingham/reso_client/issues/51
+    # https://github.com/jeremeybingham/reso-rs/issues/51
     "RUSTSEC-2026-0543",
 ]

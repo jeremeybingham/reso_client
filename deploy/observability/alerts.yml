@@ -11,7 +11,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "reso-ingest serve at {{ $labels.instance }} cannot be scraped"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resoservedown"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resoservedown"
 
       - alert: ResoFeedFailing
         # Three syncs in a row failed (the feed backs off, doubling its wait up to 15 minutes)
@@ -19,7 +19,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.server }}/{{ $labels.resource }} failed {{ $value }} times in a row"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resofeedfailing"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resofeedfailing"
 
       - alert: ResoFeedNoSuccess
         # No successful sync for three intervals plus 10 minutes, and the feed is not paused. A feed
@@ -31,7 +31,7 @@ groups:
         labels: {severity: page}
         annotations:
           summary: "{{ $labels.server }}/{{ $labels.resource }} has not synced for {{ $value | humanizeDuration }}"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resofeednosuccess"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resofeednosuccess"
 
       - alert: ResoRateLimitHigh
         # A server's client used over 90% of a rate-limit window for 15 minutes
@@ -40,4 +40,4 @@ groups:
         labels: {severity: ticket}
         annotations:
           summary: "{{ $labels.server }} uses {{ $value | humanizePercentage }} of its {{ $labels.window }} {{ $labels.unit }} limit"
-          runbook_url: "https://github.com/jeremeybingham/reso_client/blob/main/docs/OPERATIONS.md#resoratelimithigh"
+          runbook_url: "https://github.com/jeremeybingham/reso-rs/blob/main/docs/OPERATIONS.md#resoratelimithigh"
